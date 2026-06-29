@@ -179,7 +179,7 @@ async def translate_message(
         max_tokens=1000,
         extra_body={
             "thinking": {
-                "type": "disabled",
+                "type": "enabled",
             },
         },
     )

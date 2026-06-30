@@ -27,6 +27,9 @@ typedef _MessageLongPressCallback =
 
 typedef _MessageBubbleKeyFor = GlobalKey Function(int messageId);
 
+typedef _ReplySelectedCallback =
+    void Function(ChatMessage message, String displayedContent);
+
 final class _CapturedMessageBubble {
   const _CapturedMessageBubble({required this.image, required this.rect});
 
@@ -125,31 +128,134 @@ StrutStyle _buildMessageStrutStyle(TextStyle style) {
   );
 }
 
-final class ChatStylePreviewScreen extends StatelessWidget {
+final class ChatStylePreviewScreen extends StatefulWidget {
   const ChatStylePreviewScreen({super.key});
 
   static const int _currentUserId = 1;
+  static const int _otherParticipantId = 2;
+  static const String _otherParticipantName = 'Lia';
   static const Color _chatBackgroundColor = AppColors.white;
+
+  @override
+  State<ChatStylePreviewScreen> createState() {
+    return _ChatStylePreviewScreenState();
+  }
+}
+
+final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen> {
+  final GlobalKey<_MessageListState> _messageListKey =
+      GlobalKey<_MessageListState>();
+
+  final TextEditingController _messageController = TextEditingController();
+  final FocusNode _messageFocusNode = FocusNode();
+
+  ChatMessage? _replyingToMessage;
+  String? _replyingToContent;
+
+  @override
+  void dispose() {
+    _messageController.dispose();
+    _messageFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _beginReply(ChatMessage message, String displayedContent) {
+    setState(() {
+      _replyingToMessage = message;
+      _replyingToContent = displayedContent;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      _messageFocusNode.requestFocus();
+      _messageListKey.currentState?.scrollToBottom();
+    });
+  }
+
+  void _cancelReply() {
+    setState(() {
+      _replyingToMessage = null;
+      _replyingToContent = null;
+    });
+  }
+
+  void _sendMessage() {
+    final String content = _messageController.text.trim();
+
+    if (content.isEmpty) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final ChatMessage? replyingToMessage = _replyingToMessage;
+    final String? replyingToContent = _replyingToContent;
+
+    final ChatReplyReference? replyTo =
+        replyingToMessage == null || replyingToContent == null
+        ? null
+        : ChatReplyReference(
+            messageId: replyingToMessage.id,
+            senderId: replyingToMessage.senderId,
+            content: replyingToContent,
+          );
+
+    messageListState.addOutgoingMessage(content: content, replyTo: replyTo);
+
+    _messageController.clear();
+
+    setState(() {
+      _replyingToMessage = null;
+      _replyingToContent = null;
+    });
+
+    _messageFocusNode.requestFocus();
+  }
 
   @override
   Widget build(BuildContext context) {
     final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.dark
         .copyWith(
-          statusBarColor: _chatBackgroundColor,
-          systemNavigationBarColor: _chatBackgroundColor,
+          statusBarColor: ChatStylePreviewScreen._chatBackgroundColor,
+          systemNavigationBarColor: ChatStylePreviewScreen._chatBackgroundColor,
           systemNavigationBarIconBrightness: Brightness.dark,
         );
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
-      child: const Scaffold(
-        backgroundColor: _chatBackgroundColor,
+      child: Scaffold(
+        backgroundColor: ChatStylePreviewScreen._chatBackgroundColor,
         body: SafeArea(
           child: Column(
             children: [
-              _ChatTopBar(),
-              Expanded(child: _MessageList(currentUserId: _currentUserId)),
-              _MessageComposer(),
+              const _ChatTopBar(),
+              Expanded(
+                child: _MessageList(
+                  key: _messageListKey,
+                  currentUserId: ChatStylePreviewScreen._currentUserId,
+                  otherParticipantId:
+                      ChatStylePreviewScreen._otherParticipantId,
+                  onReplySelected: _beginReply,
+                ),
+              ),
+              _MessageComposer(
+                controller: _messageController,
+                focusNode: _messageFocusNode,
+                replyingToMessage: _replyingToMessage,
+                replyingToContent: _replyingToContent,
+                currentUserId: ChatStylePreviewScreen._currentUserId,
+                otherParticipantName:
+                    ChatStylePreviewScreen._otherParticipantName,
+                onCancelReply: _cancelReply,
+                onSend: _sendMessage,
+              ),
             ],
           ),
         ),
@@ -212,9 +318,16 @@ final class _ChatTopBar extends StatelessWidget {
 }
 
 final class _MessageList extends StatefulWidget {
-  const _MessageList({required this.currentUserId});
+  const _MessageList({
+    required this.currentUserId,
+    required this.otherParticipantId,
+    required this.onReplySelected,
+    super.key,
+  });
 
   final int currentUserId;
+  final int otherParticipantId;
+  final _ReplySelectedCallback onReplySelected;
 
   @override
   State<_MessageList> createState() {
@@ -234,9 +347,11 @@ final class _MessageListState extends State<_MessageList> {
 
   final Set<int> _showTranslatedMessageIds = <int>{};
   final Map<int, GlobalKey> _messageBubbleKeys = <int, GlobalKey>{};
+  final ScrollController _scrollController = ScrollController();
 
-  late final DateTime _previewNow;
+  late DateTime _previewNow;
   late List<ChatMessage> _messages;
+  int _nextMessageId = 9;
 
   @override
   void initState() {
@@ -313,6 +428,52 @@ final class _MessageListState extends State<_MessageList> {
     ];
   }
 
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void addOutgoingMessage({
+    required String content,
+    ChatReplyReference? replyTo,
+  }) {
+    setState(() {
+      _previewNow = _previewNow.add(const Duration(minutes: 1));
+
+      _messages.add(
+        ChatMessage(
+          id: _nextMessageId,
+          senderId: widget.currentUserId,
+          recipientId: widget.otherParticipantId,
+          content: content,
+          createdAt: _previewNow,
+          replyTo: replyTo,
+        ),
+      );
+
+      _nextMessageId++;
+    });
+
+    scrollToBottom();
+  }
+
+  void scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) {
+        return;
+      }
+
+      unawaited(
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
+  }
+
   void _handleIncomingMessageTap(int messageId) {
     final ChatMessage? message = _findMessage(messageId);
 
@@ -345,6 +506,17 @@ final class _MessageListState extends State<_MessageList> {
 
   void _retryTranslation(int messageId) {
     unawaited(_startTranslation(messageId));
+  }
+
+  String _displayedContentFor(ChatMessage message) {
+    final String? translatedContent = message.translatedContent;
+
+    if (_showTranslatedMessageIds.contains(message.id) &&
+        translatedContent != null) {
+      return translatedContent;
+    }
+
+    return message.content;
   }
 
   Future<void> _handleMessageLongPress(
@@ -410,12 +582,9 @@ final class _MessageListState extends State<_MessageList> {
 
     switch (selectedAction) {
       case ChatMessageAction.copy:
-        final String copiedContent =
-            _showTranslatedMessageIds.contains(message.id)
-            ? message.translatedContent!
-            : message.content;
-
-        await Clipboard.setData(ClipboardData(text: copiedContent));
+        await Clipboard.setData(
+          ClipboardData(text: _displayedContentFor(message)),
+        );
 
         if (!mounted) {
           return;
@@ -427,6 +596,9 @@ final class _MessageListState extends State<_MessageList> {
         return;
 
       case ChatMessageAction.reply:
+        widget.onReplySelected(message, _displayedContentFor(message));
+        return;
+
       case ChatMessageAction.edit:
         return;
 
@@ -530,6 +702,7 @@ final class _MessageListState extends State<_MessageList> {
     );
 
     return ListView(
+      controller: _scrollController,
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
       children: _buildTimeline(
@@ -765,6 +938,73 @@ extension on ChatMessageAction {
       ChatMessageAction.edit => Icons.edit_outlined,
       ChatMessageAction.unsend => Icons.delete_outline_rounded,
     };
+  }
+}
+
+final class _ReplyMessageBody extends StatelessWidget {
+  const _ReplyMessageBody({
+    required this.message,
+    required this.isOutgoing,
+    required this.child,
+  });
+
+  final ChatMessage message;
+  final bool isOutgoing;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final ChatReplyReference? replyTo = message.replyTo;
+
+    if (replyTo == null) {
+      return child;
+    }
+
+    final String authorLabel =
+        replyTo.senderId == ChatStylePreviewScreen._currentUserId
+        ? 'Me'
+        : ChatStylePreviewScreen._otherParticipantName;
+
+    final Color primaryColor = isOutgoing ? AppColors.white : AppColors.grey900;
+
+    final Color secondaryColor = isOutgoing
+        ? AppColors.white.withAlpha(220)
+        : AppColors.grey700;
+
+    final Color dividerColor = isOutgoing
+        ? AppColors.white.withAlpha(56)
+        : AppColors.grey200;
+
+    return Column(
+      key: ValueKey<String>('reply-message-${message.id}'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Reply to $authorLabel',
+          key: ValueKey<String>('reply-message-title-${message.id}'),
+          style: AppTypography.subTypography10.copyWith(
+            color: primaryColor,
+            fontWeight: AppTypography.bold,
+          ),
+        ),
+        const SizedBox(height: 1),
+        Text(
+          replyTo.content,
+          key: ValueKey<String>('reply-message-preview-${message.id}'),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: AppTypography.subTypography10.copyWith(
+            color: secondaryColor,
+            fontWeight: AppTypography.regular,
+          ),
+        ),
+        const SizedBox(height: 7),
+        Divider(height: 1, thickness: 1, color: dividerColor),
+        const SizedBox(height: 7),
+        child,
+      ],
+    );
   }
 }
 
@@ -1029,25 +1269,31 @@ final class _IncomingMessageContent extends StatelessWidget {
       );
     }
 
+    final Widget messageBody = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        messageText,
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 160),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          transitionBuilder: (Widget child, Animation<double> animation) {
+            return FadeTransition(opacity: animation, child: child);
+          },
+          child: _buildTranslationStatus(context),
+        ),
+      ],
+    );
+
     return AnimatedSize(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
       alignment: Alignment.topLeft,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          messageText,
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 160),
-            switchInCurve: Curves.easeOut,
-            switchOutCurve: Curves.easeIn,
-            transitionBuilder: (Widget child, Animation<double> animation) {
-              return FadeTransition(opacity: animation, child: child);
-            },
-            child: _buildTranslationStatus(context),
-          ),
-        ],
+      child: _ReplyMessageBody(
+        message: message,
+        isOutgoing: false,
+        child: messageBody,
       ),
     );
   }
@@ -1281,12 +1527,16 @@ final class _OutgoingMessageRow extends StatelessWidget {
                 backgroundColor: AppColors.blue500,
                 direction: _BubbleDirection.outgoing,
                 showTail: showTail,
-                child: Text(
-                  message.content,
-                  softWrap: true,
-                  strutStyle: _buildMessageStrutStyle(messageTextStyle),
-                  textHeightBehavior: _messageTextHeightBehavior,
-                  style: messageTextStyle,
+                child: _ReplyMessageBody(
+                  message: message,
+                  isOutgoing: true,
+                  child: Text(
+                    message.content,
+                    softWrap: true,
+                    strutStyle: _buildMessageStrutStyle(messageTextStyle),
+                    textHeightBehavior: _messageTextHeightBehavior,
+                    style: messageTextStyle,
+                  ),
                 ),
               ),
             ),
@@ -1453,51 +1703,341 @@ final class _MessageTime extends StatelessWidget {
 }
 
 final class _MessageComposer extends StatelessWidget {
-  const _MessageComposer();
+  const _MessageComposer({
+    required this.controller,
+    required this.focusNode,
+    required this.replyingToMessage,
+    required this.replyingToContent,
+    required this.currentUserId,
+    required this.otherParticipantName,
+    required this.onCancelReply,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final ChatMessage? replyingToMessage;
+  final String? replyingToContent;
+  final int currentUserId;
+  final String otherParticipantName;
+  final VoidCallback onCancelReply;
+  final VoidCallback onSend;
 
   @override
   Widget build(BuildContext context) {
+    final ChatMessage? replyTarget = replyingToMessage;
+    final bool isReplying = replyTarget != null;
+
+    final String? replyTitle = replyTarget == null
+        ? null
+        : 'Reply to '
+              '${replyTarget.senderId == currentUserId ? 'Me' : otherParticipantName}';
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: AppColors.grey50,
-          borderRadius: AppRadius.borderRadiusFull,
-          border: Border.all(color: AppColors.grey200),
+      child: ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (BuildContext context, TextEditingValue value, Widget? child) {
+          final bool canSend = value.text.trim().isNotEmpty;
+
+          return AnimatedSize(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.bottomCenter,
+            child: isReplying
+                ? _buildReplyComposer(
+                    replyTitle: replyTitle!,
+                    replyPreview: replyingToContent ?? '',
+                    canSend: canSend,
+                  )
+                : _buildDefaultComposer(canSend: canSend),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildDefaultComposer({required bool canSend}) {
+    return ClipRRect(
+      key: const ValueKey<String>('message-composer-default'),
+      borderRadius: AppRadius.borderRadiusFull,
+      child: ColoredBox(
+        color: AppColors.grey50,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 50),
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                _ComposerCircleButton(
+                  buttonKey: const ValueKey<String>('message-attachment'),
+                  tooltip: 'Attachments',
+                  icon: Icons.add_rounded,
+                  iconSize: 29,
+                  backgroundColor: AppColors.white,
+                  foregroundColor: AppColors.grey700,
+                  onPressed: () {},
+                ),
+                const SizedBox(width: 4),
+                Expanded(child: _buildTextField(hintText: 'Enter a message')),
+                const SizedBox(width: 4),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 140),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  transitionBuilder:
+                      (Widget child, Animation<double> animation) {
+                        return FadeTransition(
+                          opacity: animation,
+                          child: ScaleTransition(
+                            scale: animation,
+                            child: child,
+                          ),
+                        );
+                      },
+                  child: canSend
+                      ? _ComposerCircleButton(
+                          buttonKey: const ValueKey<String>('message-send'),
+                          tooltip: 'Send',
+                          icon: Icons.arrow_upward_rounded,
+                          iconSize: 23,
+                          backgroundColor: AppColors.blue500,
+                          foregroundColor: AppColors.white,
+                          onPressed: onSend,
+                        )
+                      : _ComposerCircleButton(
+                          buttonKey: const ValueKey<String>('message-voice'),
+                          tooltip: 'Voice message',
+                          icon: Icons.graphic_eq_rounded,
+                          iconSize: 25,
+                          backgroundColor: AppColors.white,
+                          foregroundColor: AppColors.grey700,
+                          onPressed: () {},
+                        ),
+                ),
+              ],
+            ),
+          ),
         ),
-        child: SizedBox(
-          height: 50,
-          child: Row(
+      ),
+    );
+  }
+
+  Widget _buildReplyComposer({
+    required String replyTitle,
+    required String replyPreview,
+    required bool canSend,
+  }) {
+    return ClipRRect(
+      key: const ValueKey<String>('reply-composer'),
+      borderRadius: const BorderRadius.all(Radius.circular(28)),
+      child: ColoredBox(
+        key: const ValueKey<String>('reply-composer-surface'),
+        color: AppColors.grey50,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 11, 10, 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const SizedBox(width: 3),
-              IconButton(
-                tooltip: 'Attachments',
-                onPressed: null,
-                icon: const Icon(
-                  Icons.add_rounded,
-                  size: 29,
-                  color: AppColors.grey700,
-                ),
-              ),
-              Expanded(
-                child: Text(
-                  'Enter a message',
-                  style: AppTypography.subTypography10.copyWith(
-                    color: AppColors.grey500,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 1),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            replyTitle,
+                            key: const ValueKey<String>('reply-composer-title'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.typography6.copyWith(
+                              color: AppColors.grey900,
+                              fontWeight: AppTypography.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            replyPreview,
+                            key: const ValueKey<String>(
+                              'reply-composer-preview',
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.typography6.copyWith(
+                              color: AppColors.grey700,
+                              fontWeight: AppTypography.regular,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
+                  const SizedBox(width: 10),
+                  _ReplyActionSlot(
+                    child: SizedBox.square(
+                      key: const ValueKey<String>('reply-cancel'),
+                      dimension: 34,
+                      child: Material(
+                        color: AppColors.white,
+                        shape: const CircleBorder(
+                          side: BorderSide(color: AppColors.grey200),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: onCancelReply,
+                          child: const Icon(
+                            Icons.close_rounded,
+                            size: 20,
+                            color: AppColors.grey700,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 5),
+              ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 50),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: _buildTextField(hintText: 'Reply to message...'),
+                    ),
+                    const SizedBox(width: 4),
+                    _ReplyActionSlot(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 140),
+                        switchInCurve: Curves.easeOut,
+                        switchOutCurve: Curves.easeIn,
+                        transitionBuilder:
+                            (Widget child, Animation<double> animation) {
+                              return FadeTransition(
+                                opacity: animation,
+                                child: ScaleTransition(
+                                  scale: animation,
+                                  child: child,
+                                ),
+                              );
+                            },
+                        child: canSend
+                            ? _ComposerCircleButton(
+                                buttonKey: const ValueKey<String>(
+                                  'message-send',
+                                ),
+                                tooltip: 'Send',
+                                icon: Icons.arrow_upward_rounded,
+                                iconSize: 23,
+                                backgroundColor: AppColors.blue500,
+                                foregroundColor: AppColors.white,
+                                onPressed: onSend,
+                              )
+                            : const SizedBox.shrink(
+                                key: ValueKey<String>(
+                                  'reply-action-placeholder',
+                                ),
+                              ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const IconButton(
-                tooltip: 'Send',
-                onPressed: null,
-                icon: Icon(
-                  Icons.arrow_upward_rounded,
-                  size: 24,
-                  color: AppColors.grey300,
-                ),
-              ),
-              const SizedBox(width: 3),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextField({required String hintText}) {
+    return TextField(
+      key: const ValueKey<String>('message-input'),
+      controller: controller,
+      focusNode: focusNode,
+      minLines: 1,
+      maxLines: 4,
+      keyboardType: TextInputType.multiline,
+      textInputAction: TextInputAction.newline,
+      cursorColor: AppColors.blue500,
+      style: AppTypography.subTypography10.copyWith(
+        color: AppColors.grey900,
+        fontWeight: AppTypography.regular,
+      ),
+      decoration: InputDecoration(
+        hintText: hintText,
+        hintStyle: AppTypography.subTypography10.copyWith(
+          color: AppColors.grey500,
+          fontWeight: AppTypography.regular,
+        ),
+
+        // 전역 InputDecorationTheme의 회색 채우기를 명시적으로 제거한다.
+        filled: false,
+        fillColor: Colors.transparent,
+
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        border: InputBorder.none,
+        enabledBorder: InputBorder.none,
+        focusedBorder: InputBorder.none,
+        disabledBorder: InputBorder.none,
+        errorBorder: InputBorder.none,
+        focusedErrorBorder: InputBorder.none,
+      ),
+    );
+  }
+}
+
+final class _ReplyActionSlot extends StatelessWidget {
+  const _ReplyActionSlot({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.square(dimension: 42, child: Center(child: child));
+  }
+}
+
+final class _ComposerCircleButton extends StatelessWidget {
+  const _ComposerCircleButton({
+    required this.buttonKey,
+    required this.tooltip,
+    required this.icon,
+    required this.iconSize,
+    required this.backgroundColor,
+    required this.foregroundColor,
+    required this.onPressed,
+  });
+
+  final Key buttonKey;
+  final String tooltip;
+  final IconData icon;
+  final double iconSize;
+  final Color backgroundColor;
+  final Color foregroundColor;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: SizedBox.square(
+        key: buttonKey,
+        dimension: 42,
+        child: Material(
+          color: backgroundColor,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: Icon(icon, size: iconSize, color: foregroundColor),
           ),
         ),
       ),

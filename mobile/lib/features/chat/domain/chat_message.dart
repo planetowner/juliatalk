@@ -1,5 +1,17 @@
 enum ChatTranslationStatus { none, translating, translated, failed }
 
+final class ChatReplyReference {
+  const ChatReplyReference({
+    required this.messageId,
+    required this.senderId,
+    required this.content,
+  });
+
+  final int messageId;
+  final int senderId;
+  final String content;
+}
+
 final class ChatMessage {
   const ChatMessage({
     required this.id,
@@ -11,6 +23,7 @@ final class ChatMessage {
     this.translationStatus = ChatTranslationStatus.none,
     this.translatedContent,
     this.translationFailureReason,
+    this.replyTo,
   });
 
   final int id;
@@ -23,13 +36,16 @@ final class ChatMessage {
   final ChatTranslationStatus translationStatus;
   final String? translatedContent;
   final String? translationFailureReason;
+  final ChatReplyReference? replyTo;
 
   ChatMessage copyWith({
     ChatTranslationStatus? translationStatus,
     String? translatedContent,
     String? translationFailureReason,
+    ChatReplyReference? replyTo,
     bool clearTranslatedContent = false,
     bool clearTranslationFailureReason = false,
+    bool clearReplyTo = false,
   }) {
     return ChatMessage(
       id: id,
@@ -45,6 +61,7 @@ final class ChatMessage {
       translationFailureReason: clearTranslationFailureReason
           ? null
           : translationFailureReason ?? this.translationFailureReason,
+      replyTo: clearReplyTo ? null : replyTo ?? this.replyTo,
     );
   }
 }

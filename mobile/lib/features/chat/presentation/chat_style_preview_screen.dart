@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
 import '../../../design_system/app_typography.dart';
+import '../domain/chat_message_action.dart';
 import '../domain/chat_message.dart';
 import '../domain/chat_message_group.dart';
 import '../domain/chat_message_grouper.dart';
@@ -13,6 +17,94 @@ import 'chat_date_formatter.dart';
 import 'read_receipt_formatter.dart';
 
 const double _messageHorizontalPadding = 11;
+
+typedef _MessageLongPressCallback =
+    Future<void> Function(
+      ChatMessage message,
+      Rect bubbleRect,
+      ui.Image bubbleImage,
+    );
+
+typedef _MessageBubbleKeyFor = GlobalKey Function(int messageId);
+
+final class _CapturedMessageBubble {
+  const _CapturedMessageBubble({required this.image, required this.rect});
+
+  final ui.Image image;
+  final Rect rect;
+}
+
+final class _MessageCaptureBoundary extends SingleChildRenderObjectWidget {
+  const _MessageCaptureBoundary({required super.child, super.key});
+
+  @override
+  _MessageCaptureRenderRepaintBoundary createRenderObject(
+    BuildContext context,
+  ) {
+    return _MessageCaptureRenderRepaintBoundary();
+  }
+}
+
+final class _MessageCaptureRenderRepaintBoundary extends RenderRepaintBoundary {
+  Future<ui.Image> captureImage(Rect bounds, {required double pixelRatio}) {
+    assert(!debugNeedsPaint);
+
+    final OffsetLayer offsetLayer = layer! as OffsetLayer;
+
+    return offsetLayer.toImage(bounds, pixelRatio: pixelRatio);
+  }
+}
+
+Future<_CapturedMessageBubble> _captureMessageBubble({
+  required GlobalKey bubbleKey,
+  required double pixelRatio,
+}) async {
+  final _MessageCaptureRenderRepaintBoundary boundary =
+      bubbleKey.currentContext!.findRenderObject()!
+          as _MessageCaptureRenderRepaintBoundary;
+
+  final Offset bubbleTopLeft = boundary.localToGlobal(Offset.zero);
+
+  const double horizontalOverflow = 8;
+
+  final Rect localCaptureRect = Rect.fromLTWH(
+    -horizontalOverflow,
+    0,
+    boundary.size.width + (horizontalOverflow * 2),
+    boundary.size.height,
+  );
+
+  final ui.Image image = await boundary.captureImage(
+    localCaptureRect,
+    pixelRatio: pixelRatio,
+  );
+
+  return _CapturedMessageBubble(
+    image: image,
+    rect: Rect.fromLTWH(
+      bubbleTopLeft.dx - horizontalOverflow,
+      bubbleTopLeft.dy,
+      localCaptureRect.width,
+      localCaptureRect.height,
+    ),
+  );
+}
+
+Future<void> _handleMessageBubbleLongPress({
+  required BuildContext context,
+  required GlobalKey bubbleKey,
+  required ChatMessage message,
+  required _MessageLongPressCallback onMessageLongPress,
+}) async {
+  final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
+
+  final _CapturedMessageBubble capturedBubble = await _captureMessageBubble(
+    bubbleKey: bubbleKey,
+    pixelRatio: pixelRatio,
+  );
+
+  await onMessageLongPress(message, capturedBubble.rect, capturedBubble.image);
+}
 
 const TextHeightBehavior _messageTextHeightBehavior = TextHeightBehavior(
   applyHeightToFirstAscent: true,
@@ -141,6 +233,7 @@ final class _MessageListState extends State<_MessageList> {
   };
 
   final Set<int> _showTranslatedMessageIds = <int>{};
+  final Map<int, GlobalKey> _messageBubbleKeys = <int, GlobalKey>{};
 
   late final DateTime _previewNow;
   late List<ChatMessage> _messages;
@@ -149,7 +242,7 @@ final class _MessageListState extends State<_MessageList> {
   void initState() {
     super.initState();
 
-    _previewNow = DateTime(2026, 6, 30, 20, 34, 30);
+    _previewNow = DateTime(2026, 6, 30, 20, 35);
 
     _messages = [
       ChatMessage(
@@ -254,6 +347,103 @@ final class _MessageListState extends State<_MessageList> {
     unawaited(_startTranslation(messageId));
   }
 
+  Future<void> _handleMessageLongPress(
+    ChatMessage message,
+    Rect bubbleRect,
+    ui.Image bubbleImage,
+  ) async {
+    final List<ChatMessageAction> actions = availableChatMessageActions(
+      isOutgoing: message.senderId == widget.currentUserId,
+      createdAt: message.createdAt,
+      now: _previewNow,
+    );
+
+    ChatMessageAction? selectedAction;
+
+    try {
+      selectedAction = await showGeneralDialog<ChatMessageAction>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: 'Dismiss message actions',
+        barrierColor: AppColors.black.withAlpha(31),
+        transitionDuration: const Duration(milliseconds: 140),
+        pageBuilder:
+            (
+              BuildContext context,
+              Animation<double> primaryAnimation,
+              Animation<double> secondaryAnimation,
+            ) {
+              return _MessageActionOverlay(
+                actions: actions,
+                bubbleRect: bubbleRect,
+                bubbleImage: bubbleImage,
+              );
+            },
+        transitionBuilder:
+            (
+              BuildContext context,
+              Animation<double> primaryAnimation,
+              Animation<double> secondaryAnimation,
+              Widget child,
+            ) {
+              final Animation<double> curvedAnimation = CurvedAnimation(
+                parent: primaryAnimation,
+                curve: Curves.easeOutCubic,
+                reverseCurve: Curves.easeInCubic,
+              );
+
+              return FadeTransition(opacity: curvedAnimation, child: child);
+            },
+      );
+    } finally {
+      unawaited(
+        Future<void>.delayed(
+          const Duration(milliseconds: 160),
+          bubbleImage.dispose,
+        ),
+      );
+    }
+
+    if (selectedAction == null || !mounted) {
+      return;
+    }
+
+    switch (selectedAction) {
+      case ChatMessageAction.copy:
+        final String copiedContent =
+            _showTranslatedMessageIds.contains(message.id)
+            ? message.translatedContent!
+            : message.content;
+
+        await Clipboard.setData(ClipboardData(text: copiedContent));
+
+        if (!mounted) {
+          return;
+        }
+
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(const SnackBar(content: Text('Message copied')));
+        return;
+
+      case ChatMessageAction.reply:
+      case ChatMessageAction.edit:
+        return;
+
+      case ChatMessageAction.unsend:
+        _unsendMessage(message.id);
+        return;
+    }
+  }
+
+  void _unsendMessage(int messageId) {
+    setState(() {
+      _messages.removeWhere((ChatMessage message) => message.id == messageId);
+      _showTranslatedMessageIds.remove(messageId);
+      _messageBubbleKeys.remove(messageId);
+    });
+  }
+
   Future<void> _startTranslation(int messageId) async {
     final int messageIndex = _messages.indexWhere(
       (ChatMessage message) => message.id == messageId,
@@ -316,6 +506,10 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
+  GlobalKey _messageBubbleKeyFor(int messageId) {
+    return _messageBubbleKeys.putIfAbsent(messageId, () => GlobalKey());
+  }
+
   ChatMessage? _findMessage(int messageId) {
     for (final ChatMessage message in _messages) {
       if (message.id == messageId) {
@@ -373,6 +567,8 @@ final class _MessageListState extends State<_MessageList> {
           shownTranslatedMessageIds: _showTranslatedMessageIds,
           onIncomingMessageTap: _handleIncomingMessageTap,
           onRetryTranslation: _retryTranslation,
+          onMessageLongPress: _handleMessageLongPress,
+          messageBubbleKeyFor: _messageBubbleKeyFor,
         ),
       );
 
@@ -387,6 +583,188 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     return timeline;
+  }
+}
+
+final class _MessageActionOverlay extends StatelessWidget {
+  const _MessageActionOverlay({
+    required this.actions,
+    required this.bubbleRect,
+    required this.bubbleImage,
+  });
+
+  final List<ChatMessageAction> actions;
+  final Rect bubbleRect;
+  final ui.Image bubbleImage;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      type: MaterialType.transparency,
+      child: Stack(
+        children: [
+          Positioned.fromRect(
+            rect: bubbleRect,
+            child: IgnorePointer(
+              child: RawImage(
+                key: const ValueKey<String>('selected-message-preview'),
+                image: bubbleImage,
+                fit: BoxFit.fill,
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: CustomSingleChildLayout(
+              delegate: _MessageActionMenuLayoutDelegate(
+                bubbleRect: bubbleRect,
+                safePadding: MediaQuery.paddingOf(context),
+              ),
+              child: _MessageActionMenu(actions: actions),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _MessageActionMenuLayoutDelegate extends SingleChildLayoutDelegate {
+  const _MessageActionMenuLayoutDelegate({
+    required this.bubbleRect,
+    required this.safePadding,
+  });
+
+  static const double _horizontalMargin = 16;
+  static const double _verticalMargin = 8;
+  static const double _bubbleGap = 6;
+  static const double _maxWidth = 288;
+
+  final Rect bubbleRect;
+  final EdgeInsets safePadding;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
+    final double width = math.min(
+      _maxWidth,
+      constraints.maxWidth - (_horizontalMargin * 2),
+    );
+
+    return BoxConstraints.tightFor(width: width);
+  }
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final double left = (size.width - childSize.width) / 2;
+    final double minimumTop = safePadding.top + _verticalMargin;
+    final double maximumBottom =
+        size.height - safePadding.bottom - _verticalMargin;
+    final double belowTop = bubbleRect.bottom + _bubbleGap;
+
+    final double top = belowTop + childSize.height <= maximumBottom
+        ? belowTop
+        : math.max(minimumTop, bubbleRect.top - _bubbleGap - childSize.height);
+
+    return Offset(left, top);
+  }
+
+  @override
+  bool shouldRelayout(_MessageActionMenuLayoutDelegate oldDelegate) {
+    return oldDelegate.bubbleRect != bubbleRect ||
+        oldDelegate.safePadding != safePadding;
+  }
+}
+
+final class _MessageActionMenu extends StatelessWidget {
+  const _MessageActionMenu({required this.actions});
+
+  final List<ChatMessageAction> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      key: const ValueKey<String>('message-action-menu'),
+      color: AppColors.white,
+      elevation: 4,
+      shadowColor: AppColors.black.withAlpha(31),
+      borderRadius: const BorderRadius.all(Radius.circular(12)),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (int index = 0; index < actions.length; index++) ...[
+            _MessageActionMenuItem(action: actions[index]),
+            if (index != actions.length - 1)
+              const Divider(height: 1, thickness: 1, color: AppColors.grey100),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+final class _MessageActionMenuItem extends StatelessWidget {
+  const _MessageActionMenuItem({required this.action});
+
+  final ChatMessageAction action;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color foregroundColor = action == ChatMessageAction.unsend
+        ? AppColors.red500
+        : AppColors.grey900;
+
+    return InkWell(
+      key: ValueKey<String>('message-action-${action.name}'),
+      onTap: () {
+        Navigator.of(context).pop(action);
+      },
+      child: SizedBox(
+        height: 40,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 14, right: 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  action.label,
+                  style: AppTypography.typography6.copyWith(
+                    color: foregroundColor,
+                    fontWeight: AppTypography.regular,
+                  ),
+                ),
+              ),
+              Icon(
+                action.icon,
+                size: 20,
+                color: action == ChatMessageAction.unsend
+                    ? AppColors.red500
+                    : AppColors.grey700,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+extension on ChatMessageAction {
+  String get label {
+    return switch (this) {
+      ChatMessageAction.copy => 'Copy',
+      ChatMessageAction.reply => 'Reply',
+      ChatMessageAction.edit => 'Edit',
+      ChatMessageAction.unsend => 'Unsend',
+    };
+  }
+
+  IconData get icon {
+    return switch (this) {
+      ChatMessageAction.copy => Icons.copy_outlined,
+      ChatMessageAction.reply => Icons.reply_rounded,
+      ChatMessageAction.edit => Icons.edit_outlined,
+      ChatMessageAction.unsend => Icons.delete_outline_rounded,
+    };
   }
 }
 
@@ -439,6 +817,8 @@ final class _MessageGroup extends StatelessWidget {
     required this.shownTranslatedMessageIds,
     required this.onIncomingMessageTap,
     required this.onRetryTranslation,
+    required this.onMessageLongPress,
+    required this.messageBubbleKeyFor,
   });
 
   final ChatMessageGroup group;
@@ -448,6 +828,8 @@ final class _MessageGroup extends StatelessWidget {
   final Set<int> shownTranslatedMessageIds;
   final ValueChanged<int> onIncomingMessageTap;
   final ValueChanged<int> onRetryTranslation;
+  final _MessageLongPressCallback onMessageLongPress;
+  final _MessageBubbleKeyFor messageBubbleKeyFor;
 
   @override
   Widget build(BuildContext context) {
@@ -456,6 +838,8 @@ final class _MessageGroup extends StatelessWidget {
         messages: group.messages,
         latestReadMessageId: latestReadMessageId,
         now: now,
+        onMessageLongPress: onMessageLongPress,
+        messageBubbleKeyFor: messageBubbleKeyFor,
       );
     }
 
@@ -464,6 +848,8 @@ final class _MessageGroup extends StatelessWidget {
       shownTranslatedMessageIds: shownTranslatedMessageIds,
       onIncomingMessageTap: onIncomingMessageTap,
       onRetryTranslation: onRetryTranslation,
+      onMessageLongPress: onMessageLongPress,
+      messageBubbleKeyFor: messageBubbleKeyFor,
     );
   }
 }
@@ -474,12 +860,16 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.shownTranslatedMessageIds,
     required this.onIncomingMessageTap,
     required this.onRetryTranslation,
+    required this.onMessageLongPress,
+    required this.messageBubbleKeyFor,
   });
 
   final List<ChatMessage> messages;
   final Set<int> shownTranslatedMessageIds;
   final ValueChanged<int> onIncomingMessageTap;
   final ValueChanged<int> onRetryTranslation;
+  final _MessageLongPressCallback onMessageLongPress;
+  final _MessageBubbleKeyFor messageBubbleKeyFor;
 
   @override
   Widget build(BuildContext context) {
@@ -509,6 +899,8 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   onRetryTranslation: () {
                     onRetryTranslation(messages[index].id);
                   },
+                  onMessageLongPress: onMessageLongPress,
+                  bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
                 ),
                 if (index != messages.length - 1) const SizedBox(height: 5),
               ],
@@ -528,6 +920,8 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.showTranslation,
     required this.onMessageTap,
     required this.onRetryTranslation,
+    required this.onMessageLongPress,
+    required this.bubbleInteractionKey,
   });
 
   final ChatMessage message;
@@ -536,6 +930,8 @@ final class _IncomingMessageRow extends StatelessWidget {
   final bool showTranslation;
   final VoidCallback onMessageTap;
   final VoidCallback onRetryTranslation;
+  final _MessageLongPressCallback onMessageLongPress;
+  final GlobalKey bubbleInteractionKey;
 
   @override
   Widget build(BuildContext context) {
@@ -555,13 +951,24 @@ final class _IncomingMessageRow extends StatelessWidget {
       ),
     );
 
-    if (canTapBubble) {
-      bubble = GestureDetector(
+    bubble = _MessageCaptureBoundary(
+      key: bubbleInteractionKey,
+      child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: onMessageTap,
+        onTap: canTapBubble ? onMessageTap : null,
+        onLongPress: () {
+          unawaited(
+            _handleMessageBubbleLongPress(
+              context: context,
+              bubbleKey: bubbleInteractionKey,
+              message: message,
+              onMessageLongPress: onMessageLongPress,
+            ),
+          );
+        },
         child: bubble,
-      );
-    }
+      ),
+    );
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
@@ -774,11 +1181,15 @@ final class _OutgoingMessageGroup extends StatelessWidget {
     required this.messages,
     required this.latestReadMessageId,
     required this.now,
+    required this.onMessageLongPress,
+    required this.messageBubbleKeyFor,
   });
 
   final List<ChatMessage> messages;
   final int? latestReadMessageId;
   final DateTime now;
+  final _MessageLongPressCallback onMessageLongPress;
+  final _MessageBubbleKeyFor messageBubbleKeyFor;
 
   @override
   Widget build(BuildContext context) {
@@ -790,6 +1201,8 @@ final class _OutgoingMessageGroup extends StatelessWidget {
             message: messages[index],
             showTail: index == 0,
             showTime: index == messages.length - 1,
+            onMessageLongPress: onMessageLongPress,
+            bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
           ),
           if (messages[index].id == latestReadMessageId) ...[
             const SizedBox(height: 3),
@@ -817,11 +1230,15 @@ final class _OutgoingMessageRow extends StatelessWidget {
     required this.message,
     required this.showTail,
     required this.showTime,
+    required this.onMessageLongPress,
+    required this.bubbleInteractionKey,
   });
 
   final ChatMessage message;
   final bool showTail;
   final bool showTime;
+  final _MessageLongPressCallback onMessageLongPress;
+  final GlobalKey bubbleInteractionKey;
 
   @override
   Widget build(BuildContext context) {
@@ -843,16 +1260,35 @@ final class _OutgoingMessageRow extends StatelessWidget {
         ],
         Flexible(
           fit: FlexFit.loose,
-          child: _MessageBubble(
-            backgroundColor: AppColors.blue500,
-            direction: _BubbleDirection.outgoing,
-            showTail: showTail,
-            child: Text(
-              message.content,
-              softWrap: true,
-              strutStyle: _buildMessageStrutStyle(messageTextStyle),
-              textHeightBehavior: _messageTextHeightBehavior,
-              style: messageTextStyle,
+          child: _MessageCaptureBoundary(
+            key: bubbleInteractionKey,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onLongPress: () {
+                unawaited(
+                  _handleMessageBubbleLongPress(
+                    context: context,
+                    bubbleKey: bubbleInteractionKey,
+                    message: message,
+                    onMessageLongPress: onMessageLongPress,
+                  ),
+                );
+              },
+              child: _MessageBubble(
+                measurementKey: ValueKey<String>(
+                  'outgoing-bubble-${message.id}',
+                ),
+                backgroundColor: AppColors.blue500,
+                direction: _BubbleDirection.outgoing,
+                showTail: showTail,
+                child: Text(
+                  message.content,
+                  softWrap: true,
+                  strutStyle: _buildMessageStrutStyle(messageTextStyle),
+                  textHeightBehavior: _messageTextHeightBehavior,
+                  style: messageTextStyle,
+                ),
+              ),
             ),
           ),
         ),

@@ -56,5 +56,22 @@ void main() {
         ChatMessageAction.edit,
       ]);
     });
+
+    test(
+      'outgoing photo messages allow reply and unsend but not copy or edit',
+      () {
+        final List<ChatMessageAction> actions = availableChatMessageActions(
+          isOutgoing: true,
+          createdAt: createdAt,
+          now: createdAt,
+          isMedia: true,
+        );
+
+        expect(actions, const <ChatMessageAction>[
+          ChatMessageAction.reply,
+          ChatMessageAction.unsend,
+        ]);
+      },
+    );
   });
 }

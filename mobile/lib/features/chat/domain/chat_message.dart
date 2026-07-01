@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 enum ChatTranslationStatus { none, translating, translated, failed }
 
 final class ChatReplyReference {
@@ -10,6 +12,20 @@ final class ChatReplyReference {
   final int messageId;
   final int senderId;
   final String content;
+}
+
+final class ChatPhotoAttachment {
+  const ChatPhotoAttachment({
+    required this.assetId,
+    required this.previewBytes,
+    required this.width,
+    required this.height,
+  });
+
+  final String assetId;
+  final Uint8List previewBytes;
+  final int width;
+  final int height;
 }
 
 final class ChatMessage {
@@ -25,6 +41,7 @@ final class ChatMessage {
     this.translatedContent,
     this.translationFailureReason,
     this.replyTo,
+    this.photoAttachments = const <ChatPhotoAttachment>[],
   });
 
   final int id;
@@ -39,6 +56,23 @@ final class ChatMessage {
   final String? translatedContent;
   final String? translationFailureReason;
   final ChatReplyReference? replyTo;
+  final List<ChatPhotoAttachment> photoAttachments;
+
+  bool get isPhotoMessage {
+    return photoAttachments.isNotEmpty;
+  }
+
+  String get replyPreviewContent {
+    if (!isPhotoMessage) {
+      return content;
+    }
+
+    if (photoAttachments.length == 1) {
+      return 'Photo';
+    }
+
+    return '${photoAttachments.length} Photos';
+  }
 
   ChatMessage copyWith({
     String? content,
@@ -47,10 +81,12 @@ final class ChatMessage {
     String? translatedContent,
     String? translationFailureReason,
     ChatReplyReference? replyTo,
+    List<ChatPhotoAttachment>? photoAttachments,
     bool clearEditedAt = false,
     bool clearTranslatedContent = false,
     bool clearTranslationFailureReason = false,
     bool clearReplyTo = false,
+    bool clearPhotoAttachments = false,
   }) {
     return ChatMessage(
       id: id,
@@ -68,6 +104,9 @@ final class ChatMessage {
           ? null
           : translationFailureReason ?? this.translationFailureReason,
       replyTo: clearReplyTo ? null : replyTo ?? this.replyTo,
+      photoAttachments: clearPhotoAttachments
+          ? const <ChatPhotoAttachment>[]
+          : photoAttachments ?? this.photoAttachments,
     );
   }
 }

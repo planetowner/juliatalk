@@ -5,20 +5,27 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
 import '../../../design_system/app_typography.dart';
+import '../data/chat_photo_library.dart';
 import '../domain/chat_message_action.dart';
 import '../domain/chat_message.dart';
 import '../domain/chat_message_group.dart';
 import '../domain/chat_message_grouper.dart';
 import 'chat_date_formatter.dart';
+import 'chat_photo_picker.dart';
 import 'read_receipt_formatter.dart';
 
 const double _messageHorizontalPadding = 11;
 
 const double _messageToComposerGap = 12;
+
+const double _attachmentPanelFallbackHeight = 302;
+
+const Duration _bottomSurfaceAnimationDuration = Duration(milliseconds: 180);
 
 typedef _MessageLongPressCallback =
     Future<void> Function(ChatMessage message, GlobalKey bubbleKey);
@@ -119,7 +126,9 @@ StrutStyle _buildMessageStrutStyle(TextStyle style) {
 }
 
 final class ChatStylePreviewScreen extends StatefulWidget {
-  const ChatStylePreviewScreen({super.key});
+  const ChatStylePreviewScreen({super.key, this.photoLibrary});
+
+  final ChatPhotoLibrary? photoLibrary;
 
   static const int _currentUserId = 1;
   static const int _otherParticipantId = 2;
@@ -140,6 +149,9 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _messageFocusNode = FocusNode();
   final GlobalKey _messageInputHostKey = GlobalKey();
+  final GlobalKey _composerMeasureKey = GlobalKey();
+
+  late final ChatPhotoLibrary _photoLibrary;
 
   ChatMessage? _replyingToMessage;
   String? _replyingToContent;
@@ -148,13 +160,29 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 
   Timer? _keyboardTransitionTimer;
   Timer? _composerResizeTimer;
+  Timer? _bottomSurfaceHoldTimer;
 
   bool _keyboardTransitionActive = false;
   bool _pinBottomDuringComposerResize = false;
 
+  bool _attachmentPanelOpen = false;
+  bool _photoPickerOpen = false;
+
+  bool _photoPickerExpanded = false;
+  bool _photoPickerDragging = false;
+
+  double? _photoPickerCollapsedHeight;
+  double? _photoPickerHeight;
+
+  double _lastKeyboardHeight = _attachmentPanelFallbackHeight;
+
+  double? _heldBottomSurfaceHeight;
+
   @override
   void initState() {
     super.initState();
+
+    _photoLibrary = widget.photoLibrary ?? PhotoManagerChatPhotoLibrary();
 
     WidgetsBinding.instance.addObserver(this);
     _messageFocusNode.addListener(_handleMessageFocusChanged);
@@ -168,6 +196,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 
     _keyboardTransitionTimer?.cancel();
     _composerResizeTimer?.cancel();
+    _bottomSurfaceHoldTimer?.cancel();
 
     _messageController.dispose();
     _messageFocusNode.dispose();
@@ -175,8 +204,451 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     super.dispose();
   }
 
+  double _currentKeyboardHeight() {
+    final ui.FlutterView view = View.of(context);
+
+    return view.viewInsets.bottom / view.devicePixelRatio;
+  }
+
+  void _startBottomSurfacePinIfNeeded() {
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    _stopComposerResizePin();
+
+    if (messageListState == null || messageListState.isNearBottom) {
+      _startComposerResizePin();
+    }
+  }
+
+  void _scheduleBottomSurfaceHoldRelease() {
+    _bottomSurfaceHoldTimer?.cancel();
+
+    _bottomSurfaceHoldTimer = Timer(const Duration(milliseconds: 550), () {
+      if (!mounted || _heldBottomSurfaceHeight == null) {
+        return;
+      }
+
+      setState(() {
+        _heldBottomSurfaceHeight = null;
+      });
+    });
+  }
+
+  void _closeAttachmentPanelForKeyboard() {
+    if (!_attachmentPanelOpen) {
+      return;
+    }
+
+    _startBottomSurfacePinIfNeeded();
+    _bottomSurfaceHoldTimer?.cancel();
+
+    setState(() {
+      _attachmentPanelOpen = false;
+
+      // 키보드가 나타나는 동안 작성창 높이가 먼저 내려가지 않도록
+      // 기존 첨부 패널 높이를 잠시 유지한다.
+      _heldBottomSurfaceHeight = _lastKeyboardHeight;
+    });
+
+    _scheduleBottomSurfaceHoldRelease();
+  }
+
+  void _openAttachmentPanel() {
+    if (_attachmentPanelOpen) {
+      return;
+    }
+
+    final double keyboardHeight = _currentKeyboardHeight();
+
+    _stopKeyboardTransition();
+    _startBottomSurfacePinIfNeeded();
+    _bottomSurfaceHoldTimer?.cancel();
+
+    setState(() {
+      if (keyboardHeight > 0.5) {
+        _lastKeyboardHeight = keyboardHeight;
+      }
+
+      _heldBottomSurfaceHeight = null;
+      _photoPickerOpen = false;
+      _attachmentPanelOpen = true;
+    });
+
+    // 입력 내용은 지우지 않고 포커스와 키보드만 내린다.
+    _messageFocusNode.unfocus();
+  }
+
+  void _closeAttachmentPanelToDefault() {
+    if (!_attachmentPanelOpen &&
+        !_photoPickerOpen &&
+        _heldBottomSurfaceHeight == null) {
+      return;
+    }
+
+    _startBottomSurfacePinIfNeeded();
+    _bottomSurfaceHoldTimer?.cancel();
+
+    setState(_resetBottomSurfaceState);
+  }
+
+  void _handleAttachmentButtonPressed() {
+    if (_attachmentPanelOpen) {
+      _closeAttachmentPanelForKeyboard();
+      _messageFocusNode.requestFocus();
+      return;
+    }
+
+    _openAttachmentPanel();
+  }
+
+  void _openPhotoPicker() {
+    if (!_attachmentPanelOpen ||
+        _photoPickerOpen) {
+      return;
+    }
+
+    final BuildContext? composerContext =
+        _composerMeasureKey.currentContext;
+
+    final RenderObject? renderObject =
+        composerContext?.findRenderObject();
+
+    if (renderObject is! RenderBox ||
+        !renderObject.attached ||
+        !renderObject.hasSize) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) {
+          if (mounted) {
+            _openPhotoPicker();
+          }
+        },
+      );
+
+      return;
+    }
+
+    final double attachmentPanelHeight =
+        math.max(
+          _lastKeyboardHeight,
+          MediaQuery.viewPaddingOf(context).bottom,
+        );
+
+    // Photo 선택기의 최초 높이는 임의 비율이 아니라
+    // 현재 작성창 + 현재 첨부 패널의 실제 합산 높이다.
+    //
+    // 따라서 Photo로 전환해도 패널의 위쪽 경계가
+    // 기존 입력창 위쪽 경계와 정확히 같은 위치에 남는다.
+    final double collapsedHeight =
+        renderObject.size.height +
+        attachmentPanelHeight;
+
+    _startBottomSurfacePinIfNeeded();
+
+    setState(() {
+      _attachmentPanelOpen = false;
+      _photoPickerOpen = true;
+
+      _photoPickerExpanded = false;
+      _photoPickerDragging = false;
+
+      _photoPickerCollapsedHeight =
+          collapsedHeight;
+
+      _photoPickerHeight = collapsedHeight;
+
+      _heldBottomSurfaceHeight = null;
+    });
+  }
+
+  void _closePhotoPicker() {
+    if (!_photoPickerOpen) {
+      return;
+    }
+
+    _startBottomSurfacePinIfNeeded();
+
+    setState(() {
+      _photoPickerOpen = false;
+      _attachmentPanelOpen = true;
+
+      _photoPickerExpanded = false;
+      _photoPickerDragging = false;
+
+      _photoPickerCollapsedHeight = null;
+      _photoPickerHeight = null;
+    });
+  }
+
+  void _handlePhotoPickerDragStart(
+    DragStartDetails details,
+  ) {
+    if (!_photoPickerOpen) {
+      return;
+    }
+
+    setState(() {
+      _photoPickerDragging = true;
+    });
+  }
+
+  void _handlePhotoPickerDragUpdate(
+    DragUpdateDetails details, {
+    required double maximumHeight,
+  }) {
+    final double? currentHeight =
+        _photoPickerHeight;
+
+    final double? collapsedHeight =
+        _photoPickerCollapsedHeight;
+
+    if (!_photoPickerOpen ||
+        currentHeight == null ||
+        collapsedHeight == null) {
+      return;
+    }
+
+    final double nextHeight =
+        (currentHeight - details.delta.dy)
+            .clamp(
+              collapsedHeight,
+              maximumHeight,
+            )
+            .toDouble();
+
+    setState(() {
+      _photoPickerHeight = nextHeight;
+
+      _photoPickerExpanded =
+          nextHeight >
+          collapsedHeight + 32;
+    });
+  }
+
+  void _handlePhotoPickerDragEnd(
+    DragEndDetails details, {
+    required double maximumHeight,
+  }) {
+    final double? currentHeight =
+        _photoPickerHeight;
+
+    final double? collapsedHeight =
+        _photoPickerCollapsedHeight;
+
+    if (!_photoPickerOpen ||
+        currentHeight == null ||
+        collapsedHeight == null) {
+      return;
+    }
+
+    final double velocity =
+        details.primaryVelocity ?? 0;
+
+    final double expansionThreshold =
+        collapsedHeight +
+        ((maximumHeight - collapsedHeight) *
+            0.34);
+
+    final bool shouldExpand;
+
+    if (velocity <= -300) {
+      shouldExpand = true;
+    } else if (velocity >= 300) {
+      shouldExpand = false;
+    } else {
+      shouldExpand =
+          currentHeight >= expansionThreshold;
+    }
+
+    setState(() {
+      _photoPickerDragging = false;
+      _photoPickerExpanded = shouldExpand;
+
+      _photoPickerHeight = shouldExpand
+          ? maximumHeight
+          : collapsedHeight;
+    });
+  }
+
+  // 첨부 패널·Photo 선택기를 모두 닫고 Photo 크기 상태를 초기화한다.
+  void _resetBottomSurfaceState() {
+    _attachmentPanelOpen = false;
+    _photoPickerOpen = false;
+    _photoPickerExpanded = false;
+    _photoPickerDragging = false;
+    _photoPickerCollapsedHeight = null;
+    _photoPickerHeight = null;
+    _heldBottomSurfaceHeight = null;
+  }
+
+  // 사진 전송 직후 진행 중인 전환·타이머를 정리하고
+  // 하단 서피스를 닫은 뒤 최신 메시지로 스크롤한다.
+  void _dismissComposerAfterPhotoSend() {
+    _stopKeyboardTransition();
+    _stopComposerResizePin();
+    _bottomSurfaceHoldTimer?.cancel();
+
+    _messageFocusNode.unfocus();
+
+    setState(_resetBottomSurfaceState);
+
+    _scheduleScrollToBottom(animate: true);
+  }
+
+  Future<void> _sendSelectedPhotos(ChatPhotoSelectionResult result) async {
+    final List<ChatPhotoAttachment?> loadedAttachments =
+        await Future.wait<ChatPhotoAttachment?>(
+          result.assets.map((ChatPhotoAsset asset) async {
+            final bytes = await _photoLibrary.loadMessagePreview(
+              assetId: asset.id,
+            );
+
+            if (bytes == null) {
+              return null;
+            }
+
+            return ChatPhotoAttachment(
+              assetId: asset.id,
+              previewBytes: bytes,
+              width: asset.width,
+              height: asset.height,
+            );
+          }),
+        );
+
+    if (!mounted) {
+      return;
+    }
+
+    final List<ChatPhotoAttachment> attachments = loadedAttachments
+        .whereType<ChatPhotoAttachment>()
+        .toList(growable: false);
+
+    if (attachments.isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('The selected photos could not be loaded.'),
+          ),
+        );
+
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    messageListState.addOutgoingPhotoMessages(
+      attachments: attachments,
+      collage: result.collage,
+    );
+
+    _dismissComposerAfterPhotoSend();
+  }
+
+  Future<void> _openCamera() async {
+    final ImagePicker picker = ImagePicker();
+
+    // image_picker가 기기의 기본 카메라 앱을 실행한다.
+    // iOS는 최초 1회만 시스템 카메라 권한 팝업을 띄우고 결과를 기억하며,
+    // Android는 카메라 앱에 위임하므로 앱 차원의 반복 권한 요청이 없다.
+    XFile? capture;
+
+    try {
+      capture = await picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 92,
+        maxWidth: 1920,
+      );
+    } on PlatformException catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('The camera is not available.'),
+          ),
+        );
+
+      return;
+    }
+
+    // 사용자가 촬영을 취소하면 아무것도 전송하지 않는다.
+    if (!mounted || capture == null) {
+      return;
+    }
+
+    final Uint8List bytes = await capture.readAsBytes();
+
+    if (!mounted) {
+      return;
+    }
+
+    int width = 0;
+    int height = 0;
+
+    try {
+      final ui.Codec codec = await ui.instantiateImageCodec(bytes);
+      final ui.FrameInfo frame = await codec.getNextFrame();
+
+      width = frame.image.width;
+      height = frame.image.height;
+
+      frame.image.dispose();
+      codec.dispose();
+    } catch (_) {
+      // 디코딩에 실패해도 전송은 진행한다.
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    messageListState.addOutgoingPhotoMessages(
+      attachments: <ChatPhotoAttachment>[
+        ChatPhotoAttachment(
+          assetId: 'camera-${capture.name}',
+          previewBytes: bytes,
+          width: width > 0 ? width : 1080,
+          height: height > 0 ? height : 1440,
+        ),
+      ],
+      collage: false,
+    );
+
+    _dismissComposerAfterPhotoSend();
+  }
+
+  void _handleMessageInputTap() {
+    if (_attachmentPanelOpen) {
+      _closeAttachmentPanelForKeyboard();
+    }
+  }
+
   void _handleMessageFocusChanged() {
-    if (!_messageFocusNode.hasFocus || _keyboardTransitionActive) {
+    if (!_messageFocusNode.hasFocus) {
+      return;
+    }
+
+    // 첨부 패널 상태에서 입력창을 직접 탭한 경우에도
+    // × 버튼과 동일하게 키보드 상태로 전환한다.
+    if (_attachmentPanelOpen) {
+      _closeAttachmentPanelForKeyboard();
+    }
+
+    if (_keyboardTransitionActive) {
       return;
     }
 
@@ -191,7 +663,30 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 
   @override
   void didChangeMetrics() {
-    if (!mounted || !_keyboardTransitionActive) {
+    if (!mounted) {
+      return;
+    }
+
+    final double keyboardHeight = _currentKeyboardHeight();
+
+    // 첨부 패널을 띄운 채 키보드가 내려가는 중간 높이는
+    // 저장하지 않는다. 완전히 열린 키보드 높이만 사용한다.
+    if (keyboardHeight > 0.5 && !_attachmentPanelOpen) {
+      _lastKeyboardHeight = keyboardHeight;
+    }
+
+    final double? heldHeight = _heldBottomSurfaceHeight;
+
+    if (heldHeight != null && keyboardHeight >= heldHeight - 1) {
+      _bottomSurfaceHoldTimer?.cancel();
+      _bottomSurfaceHoldTimer = null;
+
+      setState(() {
+        _heldBottomSurfaceHeight = null;
+      });
+    }
+
+    if (!_keyboardTransitionActive) {
       return;
     }
 
@@ -299,22 +794,53 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     return false;
   }
 
-  void _dismissComposerKeyboard() {
+  void _dismissComposerSurface() {
     _stopKeyboardTransition();
     _stopComposerResizePin();
+
     _messageFocusNode.unfocus();
+    _closeAttachmentPanelToDefault();
   }
 
   Future<void> _prepareMessageActions() async {
     _stopKeyboardTransition();
     _stopComposerResizePin();
 
-    final bool keyboardWasVisible = View.of(context).viewInsets.bottom > 0;
+    final bool keyboardWasVisible = _currentKeyboardHeight() > 0.5;
+
+    final bool customBottomSurfaceWasOpen =
+        _attachmentPanelOpen || _photoPickerOpen;
+
+    final bool hadHeldBottomSurface = _heldBottomSurfaceHeight != null;
+
+    _bottomSurfaceHoldTimer?.cancel();
+    _bottomSurfaceHoldTimer = null;
 
     _messageFocusNode.unfocus();
 
-    if (!keyboardWasVisible) {
+    if (customBottomSurfaceWasOpen || hadHeldBottomSurface) {
+      setState(_resetBottomSurfaceState);
+    }
+
+    // 첨부 패널의 180ms 닫힘 전환이 끝난 뒤
+    // 변경된 위치에서 말풍선을 캡처한다.
+    if (customBottomSurfaceWasOpen) {
       await WidgetsBinding.instance.endOfFrame;
+
+      await Future<void>.delayed(_bottomSurfaceAnimationDuration);
+
+      if (!mounted) {
+        return;
+      }
+
+      await WidgetsBinding.instance.endOfFrame;
+    }
+
+    if (!keyboardWasVisible) {
+      if (!customBottomSurfaceWasOpen) {
+        await WidgetsBinding.instance.endOfFrame;
+      }
+
       return;
     }
 
@@ -326,8 +852,6 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       }
 
       if (View.of(context).viewInsets.bottom == 0) {
-        // 키보드가 사라진 뒤 확장된 채팅 영역의
-        // 레이아웃과 페인트가 한 번 더 완료되도록 기다린다.
         await WidgetsBinding.instance.endOfFrame;
         return;
       }
@@ -529,49 +1053,169 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
           systemNavigationBarIconBrightness: Brightness.dark,
         );
 
+    final MediaQueryData mediaQuery = MediaQuery.of(context);
+
+    final double keyboardHeight = mediaQuery.viewInsets.bottom;
+
+    final double systemBottomPadding = mediaQuery.viewPadding.bottom;
+
+    final double passiveBottomHeight = keyboardHeight > 0.5
+        ? keyboardHeight
+        : systemBottomPadding;
+
+    final double attachmentPanelHeight = math.max(
+      _lastKeyboardHeight,
+      systemBottomPadding,
+    );
+
+    final double resolvedPhotoPickerHeight =
+        _photoPickerHeight ??
+        _photoPickerCollapsedHeight ??
+        attachmentPanelHeight;
+
+    // 카카오톡 확장 화면은 화면 전체를 덮지 않고,
+    // 상단 상태 표시줄과 일부 채팅 상단을 남긴다.
+    // 첨부 이미지 비율상 전체 화면의 약 89% 높이다.
+    //
+    // 단, 확장 패널은 상단 바(56) 아래 영역에만 놓이므로
+    // 상태 표시줄뿐 아니라 상단 바 높이도 함께 빼야
+    // 카메라 컷아웃 등으로 상태 표시줄이 큰 기기에서
+    // 메시지 리스트가 음수로 눌려 하단이 넘치지 않는다.
+    final double photoPickerMaximumHeight =
+        math.max(
+          resolvedPhotoPickerHeight,
+          math.min(
+            mediaQuery.size.height * 0.89,
+            mediaQuery.size.height -
+                mediaQuery.padding.top -
+                _ChatTopBar.height -
+                12,
+          ),
+        );
+
+    final double bottomSurfaceHeight =
+        _photoPickerOpen
+        ? resolvedPhotoPickerHeight
+        : _attachmentPanelOpen
+        ? attachmentPanelHeight
+        : math.max(
+            passiveBottomHeight,
+            _heldBottomSurfaceHeight ?? 0,
+          );
+
+    final bool animateBottomSurfaceHeight =
+        !_photoPickerDragging &&
+        (_photoPickerOpen ||
+            _attachmentPanelOpen ||
+            _heldBottomSurfaceHeight != null ||
+            keyboardHeight <= 0.5);
+
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
       child: Scaffold(
         backgroundColor: ChatStylePreviewScreen._chatBackgroundColor,
-        resizeToAvoidBottomInset: true,
+        resizeToAvoidBottomInset: false,
         body: SafeArea(
-          child: Column(
+          bottom: false,
+          child: Stack(
             children: [
-              const _ChatTopBar(),
-              Expanded(
-                child: _MessageList(
-                  key: _messageListKey,
-                  currentUserId: ChatStylePreviewScreen._currentUserId,
-                  otherParticipantId:
-                      ChatStylePreviewScreen._otherParticipantId,
-                  onReplySelected: _beginReply,
-                  onEditSelected: _beginEdit,
-                  onBackgroundTap: _dismissComposerKeyboard,
-                  onPrepareMessageActions: _prepareMessageActions,
-                ),
+              Column(
+                children: [
+                  const _ChatTopBar(),
+                  Expanded(
+                    child: _MessageList(
+                      key: _messageListKey,
+                      currentUserId:
+                          ChatStylePreviewScreen._currentUserId,
+                      otherParticipantId:
+                          ChatStylePreviewScreen._otherParticipantId,
+                      onReplySelected: _beginReply,
+                      onEditSelected: _beginEdit,
+                      onBackgroundTap: _dismissComposerSurface,
+                      onPrepareMessageActions: _prepareMessageActions,
+                    ),
+                  ),
+                  NotificationListener<SizeChangedLayoutNotification>(
+                    onNotification: _handleComposerSizeChanged,
+                    child: SizeChangedLayoutNotifier(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (!_photoPickerOpen)
+                            SizedBox(
+                              key: _composerMeasureKey,
+                              child: _MessageComposer(
+                                controller: _messageController,
+                                focusNode: _messageFocusNode,
+                                inputHostKey: _messageInputHostKey,
+                                replyingToMessage: _replyingToMessage,
+                                replyingToContent: _replyingToContent,
+                                editingMessage: _editingMessage,
+                                editingOriginalContent:
+                                    _editingOriginalContent,
+                                currentUserId:
+                                    ChatStylePreviewScreen._currentUserId,
+                                otherParticipantName:
+                                    ChatStylePreviewScreen
+                                        ._otherParticipantName,
+                                attachmentPanelOpen: _attachmentPanelOpen,
+                                onCancelReply: _cancelReply,
+                                onCancelEdit: _cancelEdit,
+                                onSend: _sendMessage,
+                                onSaveEdit: _saveEdit,
+                                onTextChanged: _handleComposerTextChanged,
+                                onToggleAttachmentPanel:
+                                    _handleAttachmentButtonPressed,
+                                onInputTap: _handleMessageInputTap,
+                              ),
+                            ),
+                          _ComposerBottomSurface(
+                            height: bottomSurfaceHeight,
+                            showAttachmentPanel: _attachmentPanelOpen,
+                            showPhotoPicker: _photoPickerOpen,
+                            photoPickerExpanded: _photoPickerExpanded,
+                            animateHeight: animateBottomSurfaceHeight,
+                            photoLibrary: _photoLibrary,
+                            onPhotoPressed: _openPhotoPicker,
+                            onCameraPressed: _openCamera,
+                            onClosePhotoPicker: _closePhotoPicker,
+                            onSendPhotos: _sendSelectedPhotos,
+                            onPhotoPickerDragStart:
+                                _handlePhotoPickerDragStart,
+                            onPhotoPickerDragUpdate:
+                                (DragUpdateDetails details) {
+                                  _handlePhotoPickerDragUpdate(
+                                    details,
+                                    maximumHeight: photoPickerMaximumHeight,
+                                  );
+                                },
+                            onPhotoPickerDragEnd:
+                                (DragEndDetails details) {
+                                  _handlePhotoPickerDragEnd(
+                                    details,
+                                    maximumHeight: photoPickerMaximumHeight,
+                                  );
+                                },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              NotificationListener<SizeChangedLayoutNotification>(
-                onNotification: _handleComposerSizeChanged,
-                child: SizeChangedLayoutNotifier(
-                  child: _MessageComposer(
-                    controller: _messageController,
-                    focusNode: _messageFocusNode,
-                    inputHostKey: _messageInputHostKey,
-                    replyingToMessage: _replyingToMessage,
-                    replyingToContent: _replyingToContent,
-                    editingMessage: _editingMessage,
-                    editingOriginalContent: _editingOriginalContent,
-                    currentUserId: ChatStylePreviewScreen._currentUserId,
-                    otherParticipantName:
-                        ChatStylePreviewScreen._otherParticipantName,
-                    onCancelReply: _cancelReply,
-                    onCancelEdit: _cancelEdit,
-                    onSend: _sendMessage,
-                    onSaveEdit: _saveEdit,
-                    onTextChanged: _handleComposerTextChanged,
+
+              if (_photoPickerOpen && _photoPickerExpanded)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  right: 0,
+                  bottom: resolvedPhotoPickerHeight,
+                  child: const AbsorbPointer(
+                    child: ColoredBox(
+                      color: Color(0x52000000),
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
         ),
@@ -583,11 +1227,13 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 final class _ChatTopBar extends StatelessWidget {
   const _ChatTopBar();
 
+  static const double height = 56;
+
   @override
   Widget build(BuildContext context) {
     return SizedBox(
       key: const ValueKey<String>('chat-top-bar'),
-      height: 56,
+      height: height,
       child: Stack(
         alignment: Alignment.center,
         children: [
@@ -897,6 +1543,58 @@ final class _MessageListState extends State<_MessageList> {
       );
 
       _nextMessageId++;
+    });
+  }
+
+  void addOutgoingPhotoMessages({
+    required List<ChatPhotoAttachment> attachments,
+    required bool collage,
+  }) {
+    if (attachments.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      final DateTime baseCreatedAt = _previewNow.add(
+        const Duration(minutes: 1),
+      );
+
+      if (collage) {
+        _messages.add(
+          ChatMessage(
+            id: _nextMessageId,
+            senderId: widget.currentUserId,
+            recipientId: widget.otherParticipantId,
+            content: '',
+            createdAt: baseCreatedAt,
+            photoAttachments: List<ChatPhotoAttachment>.unmodifiable(
+              attachments,
+            ),
+          ),
+        );
+
+        _nextMessageId++;
+        _previewNow = baseCreatedAt;
+        return;
+      }
+
+      for (int index = 0; index < attachments.length; index++) {
+        final DateTime createdAt = baseCreatedAt.add(Duration(seconds: index));
+
+        _messages.add(
+          ChatMessage(
+            id: _nextMessageId,
+            senderId: widget.currentUserId,
+            recipientId: widget.otherParticipantId,
+            content: '',
+            createdAt: createdAt,
+            photoAttachments: <ChatPhotoAttachment>[attachments[index]],
+          ),
+        );
+
+        _nextMessageId++;
+        _previewNow = createdAt;
+      }
     });
   }
 
@@ -1283,6 +1981,10 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   String _displayedContentFor(ChatMessage message) {
+    if (message.isPhotoMessage) {
+      return message.replyPreviewContent;
+    }
+
     final String? translatedContent = message.translatedContent;
 
     if (_showTranslatedMessageIds.contains(message.id) &&
@@ -1327,6 +2029,7 @@ final class _MessageListState extends State<_MessageList> {
       isOutgoing: message.senderId == widget.currentUserId,
       createdAt: message.createdAt,
       now: _previewNow,
+      isMedia: message.isPhotoMessage,
     );
 
     ChatMessageAction? selectedAction;
@@ -1396,7 +2099,7 @@ final class _MessageListState extends State<_MessageList> {
         return;
 
       case ChatMessageAction.reply:
-        widget.onReplySelected(message, message.content);
+        widget.onReplySelected(message, message.replyPreviewContent);
         return;
 
       case ChatMessageAction.edit:
@@ -2474,6 +3177,34 @@ final class _OutgoingMessageRow extends StatelessWidget {
       fontWeight: AppTypography.regular,
     );
 
+    final Widget content = message.isPhotoMessage
+        ? _OutgoingPhotoMessage(
+            messageId: message.id,
+            measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+            attachments: message.photoAttachments,
+            isHighlighted: isHighlighted,
+          )
+        : _MessageBubble(
+            messageId: message.id,
+            measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+            backgroundColor: AppColors.blue500,
+            direction: _BubbleDirection.outgoing,
+            showTail: showTail,
+            isHighlighted: isHighlighted,
+            child: _ReplyMessageBody(
+              message: message,
+              isOutgoing: true,
+              onReplyQuoteTap: onReplyQuoteTap,
+              child: Text(
+                message.content,
+                softWrap: true,
+                strutStyle: _buildMessageStrutStyle(messageTextStyle),
+                textHeightBehavior: _messageTextHeightBehavior,
+                style: messageTextStyle,
+              ),
+            ),
+          );
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       crossAxisAlignment: CrossAxisAlignment.end,
@@ -2494,32 +3225,336 @@ final class _OutgoingMessageRow extends StatelessWidget {
               onLongPress: () {
                 unawaited(onMessageLongPress(message, bubbleInteractionKey));
               },
-              child: _MessageBubble(
-                messageId: message.id,
-                measurementKey: ValueKey<String>(
-                  'outgoing-bubble-${message.id}',
-                ),
-                backgroundColor: AppColors.blue500,
-                direction: _BubbleDirection.outgoing,
-                showTail: showTail,
-                isHighlighted: isHighlighted,
-                child: _ReplyMessageBody(
-                  message: message,
-                  isOutgoing: true,
-                  onReplyQuoteTap: onReplyQuoteTap,
-                  child: Text(
-                    message.content,
-                    softWrap: true,
-                    strutStyle: _buildMessageStrutStyle(messageTextStyle),
-                    textHeightBehavior: _messageTextHeightBehavior,
-                    style: messageTextStyle,
-                  ),
-                ),
-              ),
+              child: content,
             ),
           ),
         ),
       ],
+    );
+  }
+}
+
+final class _OutgoingPhotoMessage extends StatefulWidget {
+  const _OutgoingPhotoMessage({
+    required this.messageId,
+    required this.attachments,
+    required this.isHighlighted,
+    required this.measurementKey,
+  });
+
+  final int messageId;
+  final List<ChatPhotoAttachment> attachments;
+  final bool isHighlighted;
+  final Key measurementKey;
+
+  @override
+  State<_OutgoingPhotoMessage> createState() {
+    return _OutgoingPhotoMessageState();
+  }
+}
+
+final class _OutgoingPhotoMessageState extends State<_OutgoingPhotoMessage>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulseController;
+
+  late final Animation<double> _scaleAnimation;
+
+  late final Animation<double> _verticalOffsetAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 360),
+    );
+
+    _scaleAnimation = TweenSequence<double>([
+      TweenSequenceItem<double>(
+        tween: Tween<double>(
+          begin: 1,
+          end: 1.026,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 22,
+      ),
+      TweenSequenceItem<double>(
+        tween: Tween<double>(
+          begin: 1.026,
+          end: 0.995,
+        ).chain(CurveTween(curve: Curves.easeInOutCubic)),
+        weight: 28,
+      ),
+      TweenSequenceItem<double>(
+        tween: Tween<double>(
+          begin: 0.995,
+          end: 1,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 50,
+      ),
+    ]).animate(_pulseController);
+
+    _verticalOffsetAnimation = TweenSequence<double>([
+      TweenSequenceItem<double>(
+        tween: Tween<double>(begin: 0, end: -1.4),
+        weight: 22,
+      ),
+      TweenSequenceItem<double>(
+        tween: Tween<double>(begin: -1.4, end: 0.5),
+        weight: 28,
+      ),
+      TweenSequenceItem<double>(
+        tween: Tween<double>(begin: 0.5, end: 0),
+        weight: 50,
+      ),
+    ]).animate(_pulseController);
+
+    if (widget.isHighlighted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _pulseController.forward(from: 0);
+        }
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(_OutgoingPhotoMessage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (widget.isHighlighted && !oldWidget.isHighlighted) {
+      _pulseController.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _pulseController,
+      child: _PhotoMessageCollage(attachments: widget.attachments),
+      builder: (BuildContext context, Widget? child) {
+        final double progress = _pulseController.value;
+
+        final double overlayStrength = progress <= 0.22
+            ? progress / 0.22
+            : (1 - progress) / 0.78;
+
+        return Transform.translate(
+          offset: Offset(0, _verticalOffsetAnimation.value),
+          child: Transform.scale(
+            key: ValueKey<String>('message-pulse-${widget.messageId}'),
+            scale: _scaleAnimation.value,
+            alignment: Alignment.centerRight,
+            child: Stack(
+              key: widget.measurementKey,
+              children: [
+                child!,
+                if (progress > 0)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: ClipRRect(
+                        borderRadius: const BorderRadius.all(
+                          Radius.circular(14),
+                        ),
+                        child: ColoredBox(
+                          color: AppColors.black.withAlpha(
+                            (18 * overlayStrength.clamp(0.0, 1.0)).round(),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (widget.isHighlighted)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: SizedBox.expand(
+                        key: ValueKey<String>(
+                          'message-highlight-'
+                          '${widget.messageId}',
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+final class _PhotoMessageCollage extends StatelessWidget {
+  const _PhotoMessageCollage({required this.attachments});
+
+  final List<ChatPhotoAttachment> attachments;
+
+  @override
+  Widget build(BuildContext context) {
+    final double width = math.min(260, MediaQuery.sizeOf(context).width * 0.68);
+
+    if (attachments.length == 1) {
+      final ChatPhotoAttachment attachment = attachments.first;
+
+      final double sourceAspectRatio = attachment.height <= 0
+          ? 1
+          : attachment.width / attachment.height;
+
+      final double aspectRatio = sourceAspectRatio.clamp(0.75, 1.5).toDouble();
+
+      final double height = (width / aspectRatio).clamp(150, 260).toDouble();
+
+      return ClipRRect(
+        borderRadius: const BorderRadius.all(Radius.circular(14)),
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: _PhotoMessageImage(attachment: attachment, itemIndex: 0),
+        ),
+      );
+    }
+
+    if (attachments.length == 2) {
+      return ClipRRect(
+        borderRadius: const BorderRadius.all(Radius.circular(14)),
+        child: SizedBox(
+          width: width,
+          height: width * 0.66,
+          child: Row(
+            children: [
+              Expanded(
+                child: _PhotoMessageImage(
+                  attachment: attachments[0],
+                  itemIndex: 0,
+                ),
+              ),
+              const SizedBox(width: 2),
+              Expanded(
+                child: _PhotoMessageImage(
+                  attachment: attachments[1],
+                  itemIndex: 1,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (attachments.length == 3) {
+      return ClipRRect(
+        borderRadius: const BorderRadius.all(Radius.circular(14)),
+        child: SizedBox(
+          width: width,
+          height: width * 0.78,
+          child: Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: _PhotoMessageImage(
+                  attachment: attachments[0],
+                  itemIndex: 0,
+                ),
+              ),
+              const SizedBox(width: 2),
+              Expanded(
+                flex: 2,
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: _PhotoMessageImage(
+                        attachment: attachments[1],
+                        itemIndex: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Expanded(
+                      child: _PhotoMessageImage(
+                        attachment: attachments[2],
+                        itemIndex: 2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final List<ChatPhotoAttachment> visible = attachments.take(4).toList();
+
+    return ClipRRect(
+      borderRadius: const BorderRadius.all(Radius.circular(14)),
+      child: SizedBox(
+        width: width,
+        height: width,
+        child: GridView.builder(
+          physics: const NeverScrollableScrollPhysics(),
+          padding: EdgeInsets.zero,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: 2,
+            crossAxisSpacing: 2,
+          ),
+          itemCount: visible.length,
+          itemBuilder: (BuildContext context, int index) {
+            final int hiddenCount = index == 3 ? attachments.length - 4 : 0;
+
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                _PhotoMessageImage(
+                  attachment: visible[index],
+                  itemIndex: index,
+                ),
+                if (hiddenCount > 0)
+                  ColoredBox(
+                    color: AppColors.black.withAlpha(112),
+                    child: Center(
+                      child: Text(
+                        '+$hiddenCount',
+                        style: AppTypography.typography4.copyWith(
+                          color: AppColors.white,
+                          fontWeight: AppTypography.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+final class _PhotoMessageImage extends StatelessWidget {
+  const _PhotoMessageImage({required this.attachment, required this.itemIndex});
+
+  final ChatPhotoAttachment attachment;
+  final int itemIndex;
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.memory(
+      attachment.previewBytes,
+      key: ValueKey<String>(
+        'photo-message-'
+        '${attachment.assetId}-'
+        '$itemIndex',
+      ),
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      filterQuality: FilterQuality.medium,
     );
   }
 }
@@ -2850,6 +3885,306 @@ final class _MessageTime extends StatelessWidget {
   }
 }
 
+final class _AttachmentPanelActionData {
+  const _AttachmentPanelActionData({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.foregroundColor,
+  });
+
+  final String id;
+  final String label;
+  final IconData icon;
+  final Color foregroundColor;
+}
+
+final class _ComposerBottomSurface extends StatelessWidget {
+  const _ComposerBottomSurface({
+    required this.height,
+    required this.showAttachmentPanel,
+    required this.showPhotoPicker,
+    required this.photoPickerExpanded,
+    required this.animateHeight,
+    required this.photoLibrary,
+    required this.onPhotoPressed,
+    required this.onCameraPressed,
+    required this.onClosePhotoPicker,
+    required this.onSendPhotos,
+    required this.onPhotoPickerDragStart,
+    required this.onPhotoPickerDragUpdate,
+    required this.onPhotoPickerDragEnd,
+  });
+
+  final double height;
+  final bool showAttachmentPanel;
+  final bool showPhotoPicker;
+  final bool animateHeight;
+
+  final bool photoPickerExpanded;
+
+  final ChatPhotoLibrary photoLibrary;
+
+  final VoidCallback onPhotoPressed;
+  final VoidCallback onCameraPressed;
+  final VoidCallback onClosePhotoPicker;
+  final ChatPhotoSendCallback onSendPhotos;
+
+  final GestureDragStartCallback
+      onPhotoPickerDragStart;
+
+  final GestureDragUpdateCallback
+      onPhotoPickerDragUpdate;
+
+  final GestureDragEndCallback
+      onPhotoPickerDragEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    late final Key surfaceKey;
+    late final Widget surface;
+
+    if (showPhotoPicker) {
+      surfaceKey = const ValueKey<String>(
+        'photo-picker-visible',
+      );
+
+      surface = ChatPhotoPicker(
+        photoLibrary: photoLibrary,
+        expanded: photoPickerExpanded,
+        onClose: onClosePhotoPicker,
+        onSend: onSendPhotos,
+        onHandleDragStart:
+            onPhotoPickerDragStart,
+        onHandleDragUpdate:
+            onPhotoPickerDragUpdate,
+        onHandleDragEnd:
+            onPhotoPickerDragEnd,
+      );
+    } else if (showAttachmentPanel) {
+      surfaceKey = const ValueKey<String>(
+        'attachment-panel-visible',
+      );
+
+      surface = _ChatAttachmentPanel(
+        onPhotoPressed: onPhotoPressed,
+        onCameraPressed: onCameraPressed,
+      );
+    } else {
+      surfaceKey = const ValueKey<String>(
+        'attachment-panel-hidden',
+      );
+
+      surface = const SizedBox.shrink();
+    }
+
+    return AnimatedContainer(
+      key: const ValueKey<String>(
+        'composer-bottom-surface',
+      ),
+      width: double.infinity,
+      height: height,
+      duration: animateHeight
+          ? _bottomSurfaceAnimationDuration
+          : Duration.zero,
+      curve: Curves.easeOutCubic,
+      clipBehavior: Clip.hardEdge,
+      decoration: const BoxDecoration(
+        color: AppColors.white,
+      ),
+      child: AnimatedSwitcher(
+        duration: const Duration(
+          milliseconds: 140,
+        ),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+
+        // AnimatedSwitcher의 기본 Stack은 자식에게
+        // 느슨한 가로 제약을 줄 수 있다.
+        // 모든 하단 패널을 부모 너비와 높이에 강제로 맞춘다.
+        layoutBuilder: (
+          Widget? currentChild,
+          List<Widget> previousChildren,
+        ) {
+          return Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              ...previousChildren,
+              ?currentChild,
+            ],
+          );
+        },
+
+        transitionBuilder: (
+          Widget child,
+          Animation<double> animation,
+        ) {
+          final Animation<Offset> position =
+              Tween<Offset>(
+                begin: const Offset(0, 0.04),
+                end: Offset.zero,
+              ).animate(
+                CurvedAnimation(
+                  parent: animation,
+                  curve: Curves.easeOutCubic,
+                ),
+              );
+
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(
+              position: position,
+              child: child,
+            ),
+          );
+        },
+
+        child: SizedBox.expand(
+          key: surfaceKey,
+          child: surface,
+        ),
+      ),
+    );
+  }
+}
+
+final class _ChatAttachmentPanel extends StatelessWidget {
+  const _ChatAttachmentPanel({
+    required this.onPhotoPressed,
+    required this.onCameraPressed,
+  });
+
+  final VoidCallback onPhotoPressed;
+  final VoidCallback onCameraPressed;
+
+  static const List<_AttachmentPanelActionData> _actions = [
+    _AttachmentPanelActionData(
+      id: 'photo',
+      label: 'Photo',
+      icon: Icons.image_rounded,
+      foregroundColor: AppColors.green500,
+    ),
+    _AttachmentPanelActionData(
+      id: 'camera',
+      label: 'Camera',
+      icon: Icons.photo_camera_rounded,
+      foregroundColor: AppColors.blue500,
+    ),
+    _AttachmentPanelActionData(
+      id: 'call',
+      label: 'Call',
+      icon: Icons.call_rounded,
+      foregroundColor: AppColors.green500,
+    ),
+    _AttachmentPanelActionData(
+      id: 'file',
+      label: 'File',
+      icon: Icons.insert_drive_file_rounded,
+      foregroundColor: AppColors.grey600,
+    ),
+    _AttachmentPanelActionData(
+      id: 'voice-memo',
+      label: 'Voice Memo',
+      icon: Icons.graphic_eq_rounded,
+      foregroundColor: AppColors.red500,
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final double bottomSafePadding = MediaQuery.viewPaddingOf(context).bottom;
+
+    return Material(
+      key: const ValueKey<String>('attachment-panel'),
+      color: AppColors.white,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          border: Border(top: BorderSide(color: AppColors.grey100)),
+        ),
+        child: GridView.builder(
+          key: const ValueKey<String>('attachment-panel-grid'),
+          padding: EdgeInsets.fromLTRB(
+            10,
+            26,
+            10,
+            math.max(18, bottomSafePadding + 12),
+          ),
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 4,
+            mainAxisExtent: 106,
+          ),
+          itemCount: _actions.length,
+          itemBuilder: (BuildContext context, int index) {
+            final _AttachmentPanelActionData action = _actions[index];
+
+            final VoidCallback onPressed;
+
+            switch (action.id) {
+              case 'photo':
+                onPressed = onPhotoPressed;
+              case 'camera':
+                onPressed = onCameraPressed;
+              default:
+                onPressed = () {};
+            }
+
+            return _AttachmentPanelAction(
+              action: action,
+              onPressed: onPressed,
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+final class _AttachmentPanelAction extends StatelessWidget {
+  const _AttachmentPanelAction({required this.action, required this.onPressed});
+
+  final _AttachmentPanelActionData action;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      key: ValueKey<String>('attachment-action-${action.id}'),
+      borderRadius: const BorderRadius.all(Radius.circular(16)),
+      onTap: () {
+        Feedback.forTap(context);
+        onPressed();
+      },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox.square(
+            dimension: 54,
+            child: DecoratedBox(
+              decoration: const BoxDecoration(
+                color: AppColors.grey100,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(action.icon, size: 28, color: action.foregroundColor),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            action.label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: AppTypography.subTypography11.copyWith(
+              color: AppColors.grey900,
+              fontWeight: AppTypography.regular,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 final class _MessageComposer extends StatelessWidget {
   const _MessageComposer({
     required this.controller,
@@ -2861,11 +4196,14 @@ final class _MessageComposer extends StatelessWidget {
     required this.editingOriginalContent,
     required this.currentUserId,
     required this.otherParticipantName,
+    required this.attachmentPanelOpen,
     required this.onCancelReply,
     required this.onCancelEdit,
     required this.onSend,
     required this.onSaveEdit,
     required this.onTextChanged,
+    required this.onToggleAttachmentPanel,
+    required this.onInputTap,
   });
 
   final TextEditingController controller;
@@ -2877,11 +4215,15 @@ final class _MessageComposer extends StatelessWidget {
   final String? editingOriginalContent;
   final int currentUserId;
   final String otherParticipantName;
+  final bool attachmentPanelOpen;
+
   final VoidCallback onCancelReply;
   final VoidCallback onCancelEdit;
   final VoidCallback onSend;
   final VoidCallback onSaveEdit;
   final ValueChanged<String> onTextChanged;
+  final VoidCallback onToggleAttachmentPanel;
+  final VoidCallback onInputTap;
 
   @override
   Widget build(BuildContext context) {
@@ -2952,12 +4294,16 @@ final class _MessageComposer extends StatelessWidget {
                 _ComposerLastLineAction(
                   child: _ComposerCircleButton(
                     buttonKey: const ValueKey<String>('message-attachment'),
-                    tooltip: 'Attachments',
-                    icon: Icons.add_rounded,
-                    iconSize: 29,
+                    tooltip: attachmentPanelOpen
+                        ? 'Open keyboard'
+                        : 'Attachments',
+                    icon: attachmentPanelOpen
+                        ? Icons.close_rounded
+                        : Icons.add_rounded,
+                    iconSize: attachmentPanelOpen ? 27 : 29,
                     backgroundColor: AppColors.white,
                     foregroundColor: AppColors.grey700,
-                    onPressed: () {},
+                    onPressed: onToggleAttachmentPanel,
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -3288,6 +4634,7 @@ final class _MessageComposer extends StatelessWidget {
         key: const ValueKey<String>('message-input'),
         controller: controller,
         focusNode: focusNode,
+        onTap: onInputTap,
         onChanged: onTextChanged,
         minLines: 1,
         maxLines: 4,
@@ -3378,7 +4725,26 @@ final class _ComposerCircleButton extends StatelessWidget {
           child: InkWell(
             customBorder: const CircleBorder(),
             onTap: onPressed,
-            child: Icon(icon, size: iconSize, color: foregroundColor),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 140),
+              switchInCurve: Curves.easeOut,
+              switchOutCurve: Curves.easeIn,
+              transitionBuilder: (Widget child, Animation<double> animation) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: ScaleTransition(scale: animation, child: child),
+                );
+              },
+              child: Icon(
+                icon,
+                key: ValueKey<String>(
+                  '${icon.codePoint}-'
+                  '${icon.fontFamily}',
+                ),
+                size: iconSize,
+                color: foregroundColor,
+              ),
+            ),
           ),
         ),
       ),

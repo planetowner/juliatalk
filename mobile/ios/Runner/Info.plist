@@ -66,5 +66,13 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>JuliaTalk needs access to your photo library so you can choose and send photos in chats.</string>
+
+	<key>NSCameraUsageDescription</key>
+	<string>JuliaTalk needs access to your camera so you can take and send photos in chats.</string>
+
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
 </dict>
 </plist>

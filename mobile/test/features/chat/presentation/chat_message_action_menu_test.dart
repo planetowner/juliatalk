@@ -1756,4 +1756,269 @@ void main() {
       );
     },
   );
+
+  testWidgets('attachment button opens the five-action panel', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    final Finder panelFinder = find.byKey(
+      const ValueKey<String>('attachment-panel'),
+    );
+
+    expect(panelFinder, findsOneWidget);
+
+    expect(tester.getSize(panelFinder).height, closeTo(302, 0.1));
+
+    expect(find.text('Photo'), findsOneWidget);
+    expect(find.text('Camera'), findsOneWidget);
+    expect(find.text('Call'), findsOneWidget);
+    expect(find.text('File'), findsOneWidget);
+    expect(find.text('Voice Memo'), findsOneWidget);
+
+    expect(find.text('Location'), findsNothing);
+    expect(find.text('Contacts'), findsNothing);
+    expect(find.text('Scheduled Message'), findsNothing);
+    expect(find.text('Capture'), findsNothing);
+    expect(find.text('Events'), findsNothing);
+
+    final EditableText editableText = tester.widget<EditableText>(
+      find.byType(EditableText),
+    );
+
+    expect(editableText.focusNode.hasFocus, isFalse);
+  });
+
+  testWidgets('attachment panel and keyboard mode preserve the draft', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('message-input')),
+      '작성 중인 메시지',
+    );
+    await tester.pump();
+
+    EditableText editableText = tester.widget<EditableText>(
+      find.byType(EditableText),
+    );
+
+    expect(editableText.focusNode.hasFocus, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsOneWidget,
+    );
+
+    editableText = tester.widget<EditableText>(find.byType(EditableText));
+
+    expect(editableText.focusNode.hasFocus, isFalse);
+
+    expect(editableText.controller.text, '작성 중인 메시지');
+
+    // 첨부 패널 상태의 같은 버튼은 × 역할을 한다.
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsNothing,
+    );
+
+    editableText = tester.widget<EditableText>(find.byType(EditableText));
+
+    expect(editableText.focusNode.hasFocus, isTrue);
+
+    expect(editableText.controller.text, '작성 중인 메시지');
+  });
+
+  testWidgets('tapping the chat background closes the attachment panel', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 2600));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsOneWidget,
+    );
+
+    final Rect listRect = tester.getRect(
+      find.byKey(const ValueKey<String>('message-list-tap-area')),
+    );
+
+    await tester.tapAt(Offset(listRect.center.dx, listRect.bottom - 20));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsNothing,
+    );
+
+    final EditableText editableText = tester.widget<EditableText>(
+      find.byType(EditableText),
+    );
+
+    expect(editableText.focusNode.hasFocus, isFalse);
+  });
+
+  testWidgets('scrolling the conversation keeps the attachment panel open', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    await tester.drag(
+      find.byKey(const ValueKey<String>('message-list')),
+      const Offset(0, 220),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'long pressing a message closes the attachment panel before actions',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(420, 900));
+
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+      });
+
+      await tester.pumpWidget(const JuliaTalkPreviewApp());
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('message-attachment')),
+      );
+      await tester.pumpAndSettle();
+
+      await _showMessage(tester, find.text('더 번식 안 하고 너만 있는거면 내가 잘 키워줄게'));
+
+      expect(
+        find.byKey(const ValueKey<String>('attachment-panel')),
+        findsOneWidget,
+      );
+
+      await tester.longPress(find.text('더 번식 안 하고 너만 있는거면 내가 잘 키워줄게'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey<String>('attachment-panel')),
+        findsNothing,
+      );
+
+      expect(
+        find.byKey(const ValueKey<String>('message-action-menu')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('reply navigation keeps the attachment panel open', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    await _showMessage(tester, find.text('抱歉啦欧巴'));
+
+    await tester.longPress(find.text('抱歉啦欧巴'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Reply'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('message-input')),
+      'dd',
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    await _scrollChatToBottom(tester);
+
+    final Finder quoteAreaFinder = find.byKey(
+      const ValueKey<String>('reply-quote-area-9'),
+    );
+
+    expect(quoteAreaFinder, findsOneWidget);
+
+    await tester.tap(quoteAreaFinder);
+    await tester.pump();
+
+    await _pumpUntilFound(
+      tester,
+      find.byKey(const ValueKey<String>('back-to-reply-message')),
+    );
+
+    expect(
+      find.byKey(const ValueKey<String>('attachment-panel')),
+      findsOneWidget,
+    );
+
+    expect(
+      find.byKey(const ValueKey<String>('back-to-reply-message')),
+      findsOneWidget,
+    );
+  });
 }

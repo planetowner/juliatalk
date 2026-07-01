@@ -6,10 +6,11 @@ List<ChatMessageAction> availableChatMessageActions({
   required bool isOutgoing,
   required DateTime createdAt,
   required DateTime now,
+  bool isMedia = false,
 }) {
   if (!isOutgoing) {
-    return const <ChatMessageAction>[
-      ChatMessageAction.copy,
+    return <ChatMessageAction>[
+      if (!isMedia) ChatMessageAction.copy,
       ChatMessageAction.reply,
     ];
   }
@@ -21,9 +22,9 @@ List<ChatMessageAction> availableChatMessageActions({
       elapsedSinceCreation <= chatMessageUnsendWindow;
 
   return <ChatMessageAction>[
-    ChatMessageAction.copy,
+    if (!isMedia) ChatMessageAction.copy,
     ChatMessageAction.reply,
-    ChatMessageAction.edit,
+    if (!isMedia) ChatMessageAction.edit,
     if (canUnsend) ChatMessageAction.unsend,
   ];
 }

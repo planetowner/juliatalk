@@ -2,6 +2,25 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/main.dart';
 
+Future<void> _scrollConversationToStart(WidgetTester tester) async {
+  final Finder messageListFinder = find.byKey(
+    const ValueKey<String>('message-list'),
+  );
+
+  final Finder scrollableFinder = find.descendant(
+    of: messageListFinder,
+    matching: find.byType(Scrollable),
+  );
+
+  final ScrollableState scrollableState = tester.state<ScrollableState>(
+    scrollableFinder,
+  );
+
+  scrollableState.position.jumpTo(scrollableState.position.minScrollExtent);
+
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('one-line Chinese and Korean messages use the same height', (
     WidgetTester tester,
@@ -15,6 +34,8 @@ void main() {
     await tester.pumpWidget(const JuliaTalkPreviewApp());
 
     await tester.pumpAndSettle();
+
+    await _scrollConversationToStart(tester);
 
     final Finder bubbleFinder = find.byKey(
       const ValueKey<String>('incoming-bubble-1'),

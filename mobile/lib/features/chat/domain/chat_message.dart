@@ -20,6 +20,7 @@ final class ChatMessage {
     required this.content,
     required this.createdAt,
     this.readAt,
+    this.editedAt,
     this.translationStatus = ChatTranslationStatus.none,
     this.translatedContent,
     this.translationFailureReason,
@@ -32,6 +33,7 @@ final class ChatMessage {
   final String content;
   final DateTime createdAt;
   final DateTime? readAt;
+  final DateTime? editedAt;
 
   final ChatTranslationStatus translationStatus;
   final String? translatedContent;
@@ -39,10 +41,13 @@ final class ChatMessage {
   final ChatReplyReference? replyTo;
 
   ChatMessage copyWith({
+    String? content,
+    DateTime? editedAt,
     ChatTranslationStatus? translationStatus,
     String? translatedContent,
     String? translationFailureReason,
     ChatReplyReference? replyTo,
+    bool clearEditedAt = false,
     bool clearTranslatedContent = false,
     bool clearTranslationFailureReason = false,
     bool clearReplyTo = false,
@@ -51,9 +56,10 @@ final class ChatMessage {
       id: id,
       senderId: senderId,
       recipientId: recipientId,
-      content: content,
+      content: content ?? this.content,
       createdAt: createdAt,
       readAt: readAt,
+      editedAt: clearEditedAt ? null : editedAt ?? this.editedAt,
       translationStatus: translationStatus ?? this.translationStatus,
       translatedContent: clearTranslatedContent
           ? null

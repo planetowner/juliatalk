@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,19 +18,35 @@ password_hash = PasswordHash.recommended()
 
 
 def load_jwt_secret() -> str:
+    environment_secret = os.getenv("JWT_SECRET")
+
+    if environment_secret is not None:
+        environment_secret = environment_secret.strip()
+
+        if not environment_secret:
+            raise RuntimeError(
+                "JWT_SECRET environment variable is empty."
+            )
+
+        return environment_secret
+
     if not JWT_SECRET_PATH.exists():
         raise RuntimeError(
-            f"JWT secret file not found: {JWT_SECRET_PATH}"
+            "JWT secret was not found in the "
+            "JWT_SECRET environment variable or file: "
+            f"{JWT_SECRET_PATH}"
         )
 
-    secret = JWT_SECRET_PATH.read_text(
+    file_secret = JWT_SECRET_PATH.read_text(
         encoding="utf-8"
     ).strip()
 
-    if not secret:
-        raise RuntimeError("JWT secret file is empty.")
+    if not file_secret:
+        raise RuntimeError(
+            "JWT secret file is empty."
+        )
 
-    return secret
+    return file_secret
 
 
 JWT_SECRET = load_jwt_secret()

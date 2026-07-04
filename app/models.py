@@ -4,6 +4,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     func,
@@ -70,9 +71,40 @@ class Message(Base):
         Text,
     )
 
+    message_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="text",
+        server_default="text",
+        index=True,
+    )
+
+    metadata_json: Mapped[dict | None] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=True,
+    )
+
+    reply_to_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id"),
+        nullable=True,
+        index=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
+    )
+
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
     )
 
     read_at: Mapped[datetime | None] = mapped_column(

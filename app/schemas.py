@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +13,14 @@ TranslationStatus = Literal[
     "pending",
     "completed",
     "failed",
+]
+
+MessageType = Literal[
+    "text",
+    "photo",
+    "file",
+    "voice_memo",
+    "call",
 ]
 
 
@@ -68,9 +76,31 @@ class MessageCreate(BaseModel):
     )
 
     content: str = Field(
+        default="",
+        max_length=10000,
+    )
+
+    message_type: MessageType = "text"
+
+    metadata: dict[str, Any] | None = None
+
+    reply_to_message_id: int | None = Field(
+        default=None,
+        greater_than=0,
+    )
+
+
+class MessageUpdate(BaseModel):
+    content: str = Field(
         min_length=1,
         max_length=10000,
     )
+
+
+class MessageReplyReferenceRead(BaseModel):
+    message_id: int
+    sender_id: int
+    content: str
 
 
 class MessageRead(BaseModel):
@@ -83,7 +113,12 @@ class MessageRead(BaseModel):
     recipient_id: int
 
     content: str
+    message_type: MessageType
+    metadata: dict[str, Any] | None
+    reply_to_message_id: int | None
+    reply_to: MessageReplyReferenceRead | None
     created_at: datetime
+    edited_at: datetime | None
     read_at: datetime | None
 
     source_language: LanguageCode

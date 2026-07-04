@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -42,6 +44,60 @@ typedef _ReplySelectedCallback =
     void Function(ChatMessage message, String displayedContent);
 
 typedef _EditSelectedCallback = void Function(ChatMessage message);
+
+typedef ChatTextMessageSender =
+    Future<ChatMessage> Function({
+      required String content,
+      ChatReplyReference? replyTo,
+    });
+
+typedef ChatPhotoMessageSender =
+    Future<List<ChatMessage>> Function({
+      required List<ChatPhotoAttachment> attachments,
+      required bool collage,
+      ChatReplyReference? replyTo,
+    });
+
+typedef ChatFileMessageSender =
+    Future<ChatMessage> Function({
+      required ChatFileAttachment file,
+      ChatReplyReference? replyTo,
+    });
+
+typedef ChatVoiceMemoMessageSender =
+    Future<ChatMessage> Function({
+      required Duration duration,
+      ChatReplyReference? replyTo,
+    });
+
+typedef ChatCallMessageSender =
+    Future<ChatMessage> Function({
+      required ChatCallAttachment call,
+    });
+
+typedef ChatTextMessageEditor =
+    Future<ChatMessage> Function({
+      required int messageId,
+      required String content,
+    });
+
+typedef ChatMessageDeleter =
+    Future<void> Function({
+      required int messageId,
+    });
+
+enum _CallNowAction { voice, video }
+
+enum _AudioOutputRoute { phone, speaker, bluetooth }
+
+enum _VoiceMemoSheetMode { idle, recording, recorded, playing }
+
+final class _SearchMatch {
+  const _SearchMatch({required this.start, required this.end});
+
+  final int start;
+  final int end;
+}
 
 final class _CapturedMessageBubble {
   const _CapturedMessageBubble({required this.image, required this.rect});
@@ -126,9 +182,34 @@ StrutStyle _buildMessageStrutStyle(TextStyle style) {
 }
 
 final class ChatStylePreviewScreen extends StatefulWidget {
-  const ChatStylePreviewScreen({super.key, this.photoLibrary});
+  const ChatStylePreviewScreen({
+    super.key,
+    this.photoLibrary,
+    this.initialMessages,
+    this.currentUserId = _currentUserId,
+    this.otherParticipantId = _otherParticipantId,
+    this.otherParticipantName = _otherParticipantName,
+    this.onSendTextMessage,
+    this.onSendPhotoMessages,
+    this.onSendFileMessage,
+    this.onSendVoiceMemoMessage,
+    this.onSendCallMessage,
+    this.onEditTextMessage,
+    this.onDeleteMessage,
+  });
 
   final ChatPhotoLibrary? photoLibrary;
+  final List<ChatMessage>? initialMessages;
+  final int currentUserId;
+  final int otherParticipantId;
+  final String otherParticipantName;
+  final ChatTextMessageSender? onSendTextMessage;
+  final ChatPhotoMessageSender? onSendPhotoMessages;
+  final ChatFileMessageSender? onSendFileMessage;
+  final ChatVoiceMemoMessageSender? onSendVoiceMemoMessage;
+  final ChatCallMessageSender? onSendCallMessage;
+  final ChatTextMessageEditor? onEditTextMessage;
+  final ChatMessageDeleter? onDeleteMessage;
 
   static const int _currentUserId = 1;
   static const int _otherParticipantId = 2;
@@ -148,6 +229,8 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _messageFocusNode = FocusNode();
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
   final GlobalKey _messageInputHostKey = GlobalKey();
   final GlobalKey _composerMeasureKey = GlobalKey();
 
@@ -161,6 +244,8 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
   Timer? _keyboardTransitionTimer;
   Timer? _composerResizeTimer;
   Timer? _bottomSurfaceHoldTimer;
+  Timer? _voiceCallConnectionTimer;
+  Timer? _voiceCallTicker;
 
   bool _keyboardTransitionActive = false;
   bool _pinBottomDuringComposerResize = false;
@@ -178,11 +263,24 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 
   double? _heldBottomSurfaceHeight;
 
+  DateTime? _voiceCallStartedAt;
+  DateTime? _voiceCallConnectedAt;
+  bool _voiceCallScreenVisible = false;
+  bool _voiceCallMuted = false;
+  _AudioOutputRoute _audioOutputRoute = _AudioOutputRoute.speaker;
+
+  bool _searchModeActive = false;
+  bool _searchDateSheetOpen = false;
+  String _searchQuery = '';
+  List<int> _searchResultMessageIds = const <int>[];
+  int? _searchResultIndex;
+  DateTime? _selectedSearchDate;
+
   @override
   void initState() {
     super.initState();
 
-    _photoLibrary = widget.photoLibrary ?? PhotoManagerChatPhotoLibrary();
+    _photoLibrary = widget.photoLibrary ?? MockChatPhotoLibrary();
 
     WidgetsBinding.instance.addObserver(this);
     _messageFocusNode.addListener(_handleMessageFocusChanged);
@@ -197,9 +295,13 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _keyboardTransitionTimer?.cancel();
     _composerResizeTimer?.cancel();
     _bottomSurfaceHoldTimer?.cancel();
+    _voiceCallConnectionTimer?.cancel();
+    _voiceCallTicker?.cancel();
 
     _messageController.dispose();
     _messageFocusNode.dispose();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
 
     super.dispose();
   }
@@ -480,9 +582,9 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _heldBottomSurfaceHeight = null;
   }
 
-  // 사진 전송 직후 진행 중인 전환·타이머를 정리하고
+  // 첨부(사진·카메라·파일) 전송 직후 진행 중인 전환·타이머를 정리하고
   // 하단 서피스를 닫은 뒤 최신 메시지로 스크롤한다.
-  void _dismissComposerAfterPhotoSend() {
+  void _dismissComposerAfterAttachmentSend() {
     _stopKeyboardTransition();
     _stopComposerResizePin();
     _bottomSurfaceHoldTimer?.cancel();
@@ -492,6 +594,31 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     setState(_resetBottomSurfaceState);
 
     _scheduleScrollToBottom(animate: true);
+  }
+
+  ChatReplyReference? _currentReplyReference() {
+    final ChatMessage? replyingToMessage = _replyingToMessage;
+    final String? replyingToContent = _replyingToContent;
+
+    if (replyingToMessage == null || replyingToContent == null) {
+      return null;
+    }
+
+    return ChatReplyReference(
+      messageId: replyingToMessage.id,
+      senderId: replyingToMessage.senderId,
+      content: replyingToContent,
+    );
+  }
+
+  void _showChatOperationFailure(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _sendSelectedPhotos(ChatPhotoSelectionResult result) async {
@@ -541,12 +668,33 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       return;
     }
 
-    messageListState.addOutgoingPhotoMessages(
-      attachments: attachments,
-      collage: result.collage,
-    );
+    final ChatPhotoMessageSender? sender = widget.onSendPhotoMessages;
 
-    _dismissComposerAfterPhotoSend();
+    if (sender == null) {
+      messageListState.addOutgoingPhotoMessages(
+        attachments: attachments,
+        collage: result.collage,
+      );
+    } else {
+      try {
+        final List<ChatMessage> messages = await sender(
+          attachments: attachments,
+          collage: result.collage,
+          replyTo: _currentReplyReference(),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        messageListState.addMessages(messages);
+      } catch (_) {
+        _showChatOperationFailure('Photo sending failed.');
+        return;
+      }
+    }
+
+    _dismissComposerAfterAttachmentSend();
   }
 
   Future<void> _openCamera() async {
@@ -616,19 +764,157 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       return;
     }
 
-    messageListState.addOutgoingPhotoMessages(
-      attachments: <ChatPhotoAttachment>[
-        ChatPhotoAttachment(
-          assetId: 'camera-${capture.name}',
-          previewBytes: bytes,
-          width: width > 0 ? width : 1080,
-          height: height > 0 ? height : 1440,
-        ),
-      ],
-      collage: false,
+    final ChatPhotoAttachment attachment = ChatPhotoAttachment(
+      assetId: 'camera-${capture.name}',
+      previewBytes: bytes,
+      width: width > 0 ? width : 1080,
+      height: height > 0 ? height : 1440,
     );
 
-    _dismissComposerAfterPhotoSend();
+    final ChatPhotoMessageSender? sender = widget.onSendPhotoMessages;
+
+    if (sender == null) {
+      messageListState.addOutgoingPhotoMessages(
+        attachments: <ChatPhotoAttachment>[attachment],
+        collage: false,
+      );
+    } else {
+      try {
+        final List<ChatMessage> messages = await sender(
+          attachments: <ChatPhotoAttachment>[attachment],
+          collage: false,
+          replyTo: _currentReplyReference(),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        messageListState.addMessages(messages);
+      } catch (_) {
+        _showChatOperationFailure('Photo sending failed.');
+        return;
+      }
+    }
+
+    _dismissComposerAfterAttachmentSend();
+  }
+
+  Future<void> _openFile() async {
+    // file_picker가 기기의 기본 문서 선택기(iOS는 Files 앱)를 연다.
+    // 사용자가 직접 파일을 고르는 방식이라 별도 권한 팝업이 없다.
+    FilePickerResult? result;
+
+    try {
+      result = await FilePicker.platform.pickFiles();
+    } on PlatformException catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('The file picker is not available.'),
+          ),
+        );
+
+      return;
+    }
+
+    // 사용자가 선택을 취소하면 아무것도 전송하지 않는다.
+    if (!mounted || result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final PlatformFile file = result.files.first;
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final ChatFileAttachment attachment = ChatFileAttachment(
+      name: file.name,
+      sizeBytes: file.size,
+    );
+
+    final ChatFileMessageSender? sender = widget.onSendFileMessage;
+
+    if (sender == null) {
+      messageListState.addOutgoingFileMessage(
+        name: attachment.name,
+        sizeBytes: attachment.sizeBytes,
+      );
+    } else {
+      try {
+        final ChatMessage message = await sender(
+          file: attachment,
+          replyTo: _currentReplyReference(),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        messageListState.addMessage(message);
+      } catch (_) {
+        _showChatOperationFailure('File sending failed.');
+        return;
+      }
+    }
+
+    _dismissComposerAfterAttachmentSend();
+  }
+
+  Future<void> _openVoiceMemoSheet() async {
+    _dismissComposerSurface();
+
+    final Duration? duration = await showModalBottomSheet<Duration>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: AppColors.black.withAlpha(112),
+      isScrollControlled: true,
+      builder: (BuildContext context) {
+        return const _VoiceMemoSheet();
+      },
+    );
+
+    if (!mounted || duration == null) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final ChatVoiceMemoMessageSender? sender = widget.onSendVoiceMemoMessage;
+
+    if (sender == null) {
+      messageListState.addOutgoingVoiceMemoMessage(duration: duration);
+    } else {
+      try {
+        final ChatMessage message = await sender(
+          duration: duration,
+          replyTo: _currentReplyReference(),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        messageListState.addMessage(message);
+      } catch (_) {
+        _showChatOperationFailure('Voice memo sending failed.');
+        return;
+      }
+    }
+
+    _dismissComposerAfterAttachmentSend();
   }
 
   void _handleMessageInputTap() {
@@ -802,6 +1088,260 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _closeAttachmentPanelToDefault();
   }
 
+  int? get _currentSearchMessageId {
+    final int? resultIndex = _searchResultIndex;
+
+    if (resultIndex == null ||
+        resultIndex < 0 ||
+        resultIndex >= _searchResultMessageIds.length) {
+      return null;
+    }
+
+    return _searchResultMessageIds[resultIndex];
+  }
+
+  bool get _hasSearchQuery {
+    return _searchQuery.trim().isNotEmpty;
+  }
+
+  bool get _canMoveToPreviousSearchResult {
+    final int? resultIndex = _searchResultIndex;
+
+    return _hasSearchQuery && resultIndex != null && resultIndex > 0;
+  }
+
+  bool get _canMoveToNextSearchResult {
+    final int? resultIndex = _searchResultIndex;
+
+    return _hasSearchQuery &&
+        resultIndex != null &&
+        resultIndex < _searchResultMessageIds.length - 1;
+  }
+
+  void _enterSearchMode() {
+    if (_searchModeActive) {
+      _searchFocusNode.requestFocus();
+      return;
+    }
+
+    _dismissComposerSurface();
+
+    setState(() {
+      _searchModeActive = true;
+      _searchQuery = _searchController.text;
+      _searchResultMessageIds = const <int>[];
+      _searchResultIndex = null;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      _searchFocusNode.requestFocus();
+      _syncSearchResults();
+    });
+  }
+
+  void _exitSearchMode() {
+    if (!_searchModeActive) {
+      return;
+    }
+
+    if (_searchDateSheetOpen) {
+      Navigator.of(context).maybePop();
+      _searchDateSheetOpen = false;
+    }
+
+    _searchFocusNode.unfocus();
+    _searchController.clear();
+
+    setState(() {
+      _searchModeActive = false;
+      _searchQuery = '';
+      _searchResultMessageIds = const <int>[];
+      _searchResultIndex = null;
+      _selectedSearchDate = null;
+    });
+  }
+
+  void _syncSearchResults({bool scrollToFirstResult = false}) {
+    if (!_searchModeActive) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+    final List<int> resultMessageIds =
+        messageListState?.searchMessageIds(_searchQuery) ?? const <int>[];
+
+    final int? nextIndex = resultMessageIds.isEmpty ? null : 0;
+
+    setState(() {
+      _searchResultMessageIds = resultMessageIds;
+      _searchResultIndex = nextIndex;
+    });
+
+    if (scrollToFirstResult && nextIndex != null) {
+      _scrollToCurrentSearchResult();
+    }
+  }
+
+  void _handleSearchQueryChanged(String value) {
+    setState(() {
+      _searchQuery = value;
+    });
+
+    _syncSearchResults(scrollToFirstResult: value.trim().isNotEmpty);
+  }
+
+  void _clearSearchQuery() {
+    if (_searchController.text.isEmpty) {
+      return;
+    }
+
+    _searchController.clear();
+    _handleSearchQueryChanged('');
+  }
+
+  void _submitSearch(String value) {
+    _syncSearchResults(scrollToFirstResult: true);
+    _searchFocusNode.unfocus();
+  }
+
+  void _scrollToCurrentSearchResult() {
+    final int? messageId = _currentSearchMessageId;
+
+    if (messageId == null) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    unawaited(messageListState.scrollToSearchMessage(messageId));
+  }
+
+  void _moveToPreviousSearchResult() {
+    if (!_canMoveToPreviousSearchResult) {
+      return;
+    }
+
+    setState(() {
+      _searchResultIndex = _searchResultIndex! - 1;
+    });
+
+    _scrollToCurrentSearchResult();
+  }
+
+  void _moveToNextSearchResult() {
+    if (!_canMoveToNextSearchResult) {
+      return;
+    }
+
+    setState(() {
+      _searchResultIndex = _searchResultIndex! + 1;
+    });
+
+    _scrollToCurrentSearchResult();
+  }
+
+  Future<void> _openSearchDateSheet() async {
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final Set<DateTime> searchableDates = messageListState.searchableMessageDates();
+
+    if (searchableDates.isEmpty) {
+      return;
+    }
+
+    _searchFocusNode.unfocus();
+
+    setState(() {
+      _searchDateSheetOpen = true;
+    });
+
+    final ChatMessage? currentSearchMessage = _currentSearchMessageId == null
+        ? null
+        : messageListState.findMessage(_currentSearchMessageId!);
+
+    final DateTime latestSearchableDate = searchableDates.reduce(
+      (DateTime a, DateTime b) => a.isBefore(b) ? b : a,
+    );
+
+    final DateTime initialDate =
+        _selectedSearchDate ??
+        (currentSearchMessage == null
+            ? latestSearchableDate
+            : _dateOnly(currentSearchMessage.createdAt));
+
+    final DateTime? selectedDate = await showModalBottomSheet<DateTime>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: AppColors.black.withAlpha(112),
+      isScrollControlled: true,
+      builder: (BuildContext context) {
+        return _SearchDateSheet(
+          initialDate: initialDate,
+          enabledDates: searchableDates,
+        );
+      },
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _searchDateSheetOpen = false;
+    });
+
+    if (selectedDate == null) {
+      return;
+    }
+
+    _handleSearchDateSelected(selectedDate);
+  }
+
+  void _handleSearchDateSelected(DateTime selectedDate) {
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final DateTime normalizedDate = _dateOnly(selectedDate);
+
+    setState(() {
+      _selectedSearchDate = normalizedDate;
+    });
+
+    if (_hasSearchQuery && _searchResultMessageIds.isNotEmpty) {
+      final int matchingIndex = _searchResultMessageIds.indexWhere((int id) {
+        final ChatMessage? message = messageListState.findMessage(id);
+
+        return message != null && _dateOnly(message.createdAt) == normalizedDate;
+      });
+
+      if (matchingIndex != -1) {
+        setState(() {
+          _searchResultIndex = matchingIndex;
+        });
+
+        _scrollToCurrentSearchResult();
+        return;
+      }
+    }
+
+    unawaited(messageListState.scrollToSearchDate(normalizedDate));
+  }
+
   Future<void> _prepareMessageActions() async {
     _stopKeyboardTransition();
     _stopComposerResizePin();
@@ -960,7 +1500,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _messageFocusNode.unfocus();
   }
 
-  void _saveEdit() {
+  Future<void> _saveEdit() async {
     final ChatMessage? editingMessage = _editingMessage;
     final String? originalContent = _editingOriginalContent;
 
@@ -974,12 +1514,38 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       return;
     }
 
-    final bool didUpdate =
-        _messageListKey.currentState?.updateMessageContent(
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final ChatTextMessageEditor? editor = widget.onEditTextMessage;
+
+    final bool didUpdate;
+
+    if (editor == null) {
+      didUpdate = messageListState.updateMessageContent(
+        messageId: editingMessage.id,
+        content: updatedContent,
+      );
+    } else {
+      try {
+        final ChatMessage updatedMessage = await editor(
           messageId: editingMessage.id,
           content: updatedContent,
-        ) ??
-        false;
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        didUpdate = messageListState.replaceMessage(updatedMessage);
+      } catch (_) {
+        _showChatOperationFailure('Message editing failed.');
+        return;
+      }
+    }
 
     if (!didUpdate) {
       return;
@@ -998,7 +1564,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _restoreComposerFocusAfterModeChange(animateInitialScroll: true);
   }
 
-  void _sendMessage() {
+  Future<void> _sendMessage() async {
     if (_editingMessage != null) {
       return;
     }
@@ -1017,22 +1583,32 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       return;
     }
 
-    final ChatMessage? replyingToMessage = _replyingToMessage;
-    final String? replyingToContent = _replyingToContent;
-
-    final ChatReplyReference? replyTo =
-        replyingToMessage == null || replyingToContent == null
-        ? null
-        : ChatReplyReference(
-            messageId: replyingToMessage.id,
-            senderId: replyingToMessage.senderId,
-            content: replyingToContent,
-          );
+    final ChatReplyReference? replyTo = _currentReplyReference();
 
     _stopKeyboardTransition();
     _stopComposerResizePin();
 
-    messageListState.addOutgoingMessage(content: content, replyTo: replyTo);
+    final ChatTextMessageSender? sender = widget.onSendTextMessage;
+
+    if (sender == null) {
+      messageListState.addOutgoingMessage(content: content, replyTo: replyTo);
+    } else {
+      try {
+        final ChatMessage message = await sender(
+          content: content,
+          replyTo: replyTo,
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        messageListState.addMessage(message);
+      } catch (_) {
+        _showChatOperationFailure('Message sending failed.');
+        return;
+      }
+    }
 
     _messageController.clear();
 
@@ -1044,14 +1620,258 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _restoreComposerFocusAfterModeChange(animateInitialScroll: true);
   }
 
+  bool get _hasActiveVoiceCall {
+    return _voiceCallStartedAt != null;
+  }
+
+  bool get _voiceCallConnected {
+    return _voiceCallConnectedAt != null;
+  }
+
+  Duration get _voiceCallElapsed {
+    final DateTime? connectedAt = _voiceCallConnectedAt;
+
+    if (connectedAt == null) {
+      return Duration.zero;
+    }
+
+    return DateTime.now().difference(connectedAt);
+  }
+
+  Future<void> _openCallNowSheet() async {
+    if (_hasActiveVoiceCall) {
+      _showVoiceCallScreen();
+      return;
+    }
+
+    _dismissComposerSurface();
+
+    final _CallNowAction? action = await showModalBottomSheet<_CallNowAction>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: AppColors.black.withAlpha(112),
+      isScrollControlled: true,
+      builder: (BuildContext context) {
+        return const _CallNowSheet();
+      },
+    );
+
+    if (!mounted || action == null) {
+      return;
+    }
+
+    switch (action) {
+      case _CallNowAction.voice:
+        _startVoiceCall();
+      case _CallNowAction.video:
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            const SnackBar(content: Text('Video call is not available yet.')),
+          );
+    }
+  }
+
+  void _startVoiceCall() {
+    _voiceCallConnectionTimer?.cancel();
+    _voiceCallTicker?.cancel();
+
+    unawaited(
+      _addCallMessage(
+        outcome: ChatCallOutcome.started,
+        duration: Duration.zero,
+        advanceClock: true,
+      ),
+    );
+
+    setState(() {
+      _voiceCallStartedAt = DateTime.now();
+      _voiceCallConnectedAt = null;
+      _voiceCallScreenVisible = true;
+      _voiceCallMuted = false;
+      _audioOutputRoute = _AudioOutputRoute.speaker;
+    });
+
+    _voiceCallConnectionTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (!mounted || !_hasActiveVoiceCall || _voiceCallConnected) {
+        return;
+      }
+
+      setState(() {
+        _voiceCallConnectedAt = DateTime.now();
+      });
+    });
+
+    _voiceCallTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || !_hasActiveVoiceCall) {
+        return;
+      }
+
+      setState(() {});
+    });
+  }
+
+  Future<void> _addCallMessage({
+    required ChatCallOutcome outcome,
+    required Duration duration,
+    required bool advanceClock,
+  }) async {
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    final ChatCallMessageSender? sender = widget.onSendCallMessage;
+
+    if (sender == null) {
+      messageListState.addOutgoingCallMessage(
+        outcome: outcome,
+        duration: duration,
+        advanceClock: advanceClock,
+      );
+    } else {
+      try {
+        final ChatMessage message = await sender(
+          call: ChatCallAttachment(
+            kind: ChatCallKind.voice,
+            outcome: outcome,
+            duration: duration,
+          ),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        messageListState.addMessage(message);
+      } catch (_) {
+        _showChatOperationFailure('Call record saving failed.');
+        return;
+      }
+    }
+
+    _scheduleScrollToBottom(animate: true);
+  }
+
+  void _showVoiceCallScreen() {
+    if (!_hasActiveVoiceCall) {
+      return;
+    }
+
+    setState(() {
+      _voiceCallScreenVisible = true;
+    });
+  }
+
+  void _returnToChatDuringCall() {
+    if (!_hasActiveVoiceCall) {
+      return;
+    }
+
+    setState(() {
+      _voiceCallScreenVisible = false;
+    });
+  }
+
+  void _toggleVoiceCallMute() {
+    if (!_hasActiveVoiceCall) {
+      return;
+    }
+
+    setState(() {
+      _voiceCallMuted = !_voiceCallMuted;
+    });
+  }
+
+  Future<void> _chooseAudioOutputRoute() async {
+    if (!_hasActiveVoiceCall) {
+      return;
+    }
+
+    final _AudioOutputRoute? route =
+        await showModalBottomSheet<_AudioOutputRoute>(
+          context: context,
+          backgroundColor: Colors.transparent,
+          barrierColor: AppColors.black.withAlpha(112),
+          builder: (BuildContext context) {
+            return _AudioOutputSheet(selectedRoute: _audioOutputRoute);
+          },
+        );
+
+    if (!mounted || route == null) {
+      return;
+    }
+
+    setState(() {
+      _audioOutputRoute = route;
+    });
+  }
+
+  void _endVoiceCall() {
+    if (!_hasActiveVoiceCall) {
+      return;
+    }
+
+    final bool wasConnected = _voiceCallConnected;
+    final Duration duration = _voiceCallElapsed;
+
+    _voiceCallConnectionTimer?.cancel();
+    _voiceCallTicker?.cancel();
+
+    setState(() {
+      _voiceCallStartedAt = null;
+      _voiceCallConnectedAt = null;
+      _voiceCallScreenVisible = false;
+      _voiceCallMuted = false;
+      _audioOutputRoute = _AudioOutputRoute.speaker;
+    });
+
+    unawaited(
+      _addCallMessage(
+        outcome: wasConnected
+            ? ChatCallOutcome.ended
+            : ChatCallOutcome.cancelled,
+        duration: duration,
+        advanceClock: false,
+      ),
+    );
+  }
+
+  String _searchCounterText() {
+    if (!_hasSearchQuery) {
+      return '';
+    }
+
+    final int? resultIndex = _searchResultIndex;
+
+    if (resultIndex == null || _searchResultMessageIds.isEmpty) {
+      return '0/0';
+    }
+
+    return '${resultIndex + 1}/${_searchResultMessageIds.length}';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.dark
-        .copyWith(
-          statusBarColor: ChatStylePreviewScreen._chatBackgroundColor,
-          systemNavigationBarColor: ChatStylePreviewScreen._chatBackgroundColor,
-          systemNavigationBarIconBrightness: Brightness.dark,
-        );
+    final bool showingVoiceCallScreen =
+        _voiceCallScreenVisible && _hasActiveVoiceCall;
+
+    final SystemUiOverlayStyle overlayStyle =
+        (showingVoiceCallScreen
+                ? SystemUiOverlayStyle.light
+                : SystemUiOverlayStyle.dark)
+            .copyWith(
+              statusBarColor: showingVoiceCallScreen
+                  ? AppColors.black
+                  : ChatStylePreviewScreen._chatBackgroundColor,
+              systemNavigationBarColor: showingVoiceCallScreen
+                  ? AppColors.black
+                  : ChatStylePreviewScreen._chatBackgroundColor,
+              systemNavigationBarIconBrightness: showingVoiceCallScreen
+                  ? Brightness.light
+                  : Brightness.dark,
+            );
 
     final MediaQueryData mediaQuery = MediaQuery.of(context);
 
@@ -1103,6 +1923,19 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
             _heldBottomSurfaceHeight ?? 0,
           );
 
+    final double searchToolbarBottom = keyboardHeight > 0.5
+        ? keyboardHeight + 10
+        : systemBottomPadding + 10;
+
+    final bool showActiveVoiceCallBanner =
+        !_searchModeActive && _hasActiveVoiceCall && !showingVoiceCallScreen;
+
+    final double messageListBottomPadding = _searchModeActive
+        ? searchToolbarBottom + 70
+        : _messageToComposerGap;
+
+    final double messageListTopPadding = 8;
+
     final bool animateBottomSurfaceHeight =
         !_photoPickerDragging &&
         (_photoPickerOpen ||
@@ -1113,96 +1946,146 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
       child: Scaffold(
-        backgroundColor: ChatStylePreviewScreen._chatBackgroundColor,
+        backgroundColor: showingVoiceCallScreen
+            ? AppColors.black
+            : ChatStylePreviewScreen._chatBackgroundColor,
         resizeToAvoidBottomInset: false,
         body: SafeArea(
+          top: false,
           bottom: false,
           child: Stack(
             children: [
               Column(
                 children: [
-                  const _ChatTopBar(),
                   Expanded(
                     child: _MessageList(
                       key: _messageListKey,
-                      currentUserId:
-                          ChatStylePreviewScreen._currentUserId,
-                      otherParticipantId:
-                          ChatStylePreviewScreen._otherParticipantId,
+                      initialMessages: widget.initialMessages,
+                      currentUserId: widget.currentUserId,
+                      otherParticipantId: widget.otherParticipantId,
+                      otherParticipantName: widget.otherParticipantName,
+                      onDeleteMessage: widget.onDeleteMessage,
                       onReplySelected: _beginReply,
                       onEditSelected: _beginEdit,
-                      onBackgroundTap: _dismissComposerSurface,
+                      onBackgroundTap: _searchModeActive
+                          ? _searchFocusNode.unfocus
+                          : _dismissComposerSurface,
                       onPrepareMessageActions: _prepareMessageActions,
+                      searchQuery: _searchModeActive ? _searchQuery : '',
+                      activeSearchMessageId: _currentSearchMessageId,
+                      topPadding: messageListTopPadding,
+                      bottomPadding: messageListBottomPadding,
                     ),
                   ),
-                  NotificationListener<SizeChangedLayoutNotification>(
-                    onNotification: _handleComposerSizeChanged,
-                    child: SizeChangedLayoutNotifier(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (!_photoPickerOpen)
-                            SizedBox(
-                              key: _composerMeasureKey,
-                              child: _MessageComposer(
-                                controller: _messageController,
-                                focusNode: _messageFocusNode,
-                                inputHostKey: _messageInputHostKey,
-                                replyingToMessage: _replyingToMessage,
-                                replyingToContent: _replyingToContent,
-                                editingMessage: _editingMessage,
-                                editingOriginalContent:
-                                    _editingOriginalContent,
-                                currentUserId:
-                                    ChatStylePreviewScreen._currentUserId,
-                                otherParticipantName:
-                                    ChatStylePreviewScreen
-                                        ._otherParticipantName,
-                                attachmentPanelOpen: _attachmentPanelOpen,
-                                onCancelReply: _cancelReply,
-                                onCancelEdit: _cancelEdit,
-                                onSend: _sendMessage,
-                                onSaveEdit: _saveEdit,
-                                onTextChanged: _handleComposerTextChanged,
-                                onToggleAttachmentPanel:
-                                    _handleAttachmentButtonPressed,
-                                onInputTap: _handleMessageInputTap,
+                  if (!_searchModeActive)
+                    NotificationListener<SizeChangedLayoutNotification>(
+                      onNotification: _handleComposerSizeChanged,
+                      child: SizeChangedLayoutNotifier(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (!_photoPickerOpen)
+                              SizedBox(
+                                key: _composerMeasureKey,
+                                child: _MessageComposer(
+                                  controller: _messageController,
+                                  focusNode: _messageFocusNode,
+                                  inputHostKey: _messageInputHostKey,
+                                  replyingToMessage: _replyingToMessage,
+                                  replyingToContent: _replyingToContent,
+                                  editingMessage: _editingMessage,
+                                  editingOriginalContent:
+                                      _editingOriginalContent,
+                                  currentUserId: widget.currentUserId,
+                                  otherParticipantName:
+                                      widget.otherParticipantName,
+                                  attachmentPanelOpen: _attachmentPanelOpen,
+                                  onCancelReply: _cancelReply,
+                                  onCancelEdit: _cancelEdit,
+                                  onSend: () {
+                                    unawaited(_sendMessage());
+                                  },
+                                  onSaveEdit: () {
+                                    unawaited(_saveEdit());
+                                  },
+                                  onTextChanged: _handleComposerTextChanged,
+                                  onToggleAttachmentPanel:
+                                      _handleAttachmentButtonPressed,
+                                  onInputTap: _handleMessageInputTap,
+                                  onVoiceMemoPressed: _openVoiceMemoSheet,
+                                ),
                               ),
+                            _ComposerBottomSurface(
+                              height: bottomSurfaceHeight,
+                              showAttachmentPanel: _attachmentPanelOpen,
+                              showPhotoPicker: _photoPickerOpen,
+                              photoPickerExpanded: _photoPickerExpanded,
+                              animateHeight: animateBottomSurfaceHeight,
+                              photoLibrary: _photoLibrary,
+                              onPhotoPressed: _openPhotoPicker,
+                              onCameraPressed: _openCamera,
+                              onCallPressed: _openCallNowSheet,
+                              onFilePressed: _openFile,
+                              onVoiceMemoPressed: _openVoiceMemoSheet,
+                              onClosePhotoPicker: _closePhotoPicker,
+                              onSendPhotos: _sendSelectedPhotos,
+                              onPhotoPickerDragStart:
+                                  _handlePhotoPickerDragStart,
+                              onPhotoPickerDragUpdate:
+                                  (DragUpdateDetails details) {
+                                    _handlePhotoPickerDragUpdate(
+                                      details,
+                                      maximumHeight: photoPickerMaximumHeight,
+                                    );
+                                  },
+                              onPhotoPickerDragEnd:
+                                  (DragEndDetails details) {
+                                    _handlePhotoPickerDragEnd(
+                                      details,
+                                      maximumHeight: photoPickerMaximumHeight,
+                                    );
+                                  },
                             ),
-                          _ComposerBottomSurface(
-                            height: bottomSurfaceHeight,
-                            showAttachmentPanel: _attachmentPanelOpen,
-                            showPhotoPicker: _photoPickerOpen,
-                            photoPickerExpanded: _photoPickerExpanded,
-                            animateHeight: animateBottomSurfaceHeight,
-                            photoLibrary: _photoLibrary,
-                            onPhotoPressed: _openPhotoPicker,
-                            onCameraPressed: _openCamera,
-                            onClosePhotoPicker: _closePhotoPicker,
-                            onSendPhotos: _sendSelectedPhotos,
-                            onPhotoPickerDragStart:
-                                _handlePhotoPickerDragStart,
-                            onPhotoPickerDragUpdate:
-                                (DragUpdateDetails details) {
-                                  _handlePhotoPickerDragUpdate(
-                                    details,
-                                    maximumHeight: photoPickerMaximumHeight,
-                                  );
-                                },
-                            onPhotoPickerDragEnd:
-                                (DragEndDetails details) {
-                                  _handlePhotoPickerDragEnd(
-                                    details,
-                                    maximumHeight: photoPickerMaximumHeight,
-                                  );
-                                },
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
                   ),
                 ],
               ),
+
+              if (!showingVoiceCallScreen)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  right: 0,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_searchModeActive)
+                        _ChatSearchTopBar(
+                          controller: _searchController,
+                          focusNode: _searchFocusNode,
+                          hasText: _searchController.text.isNotEmpty,
+                          onChanged: _handleSearchQueryChanged,
+                          onSubmitted: _submitSearch,
+                          onClear: _clearSearchQuery,
+                          onCancel: _exitSearchMode,
+                        )
+                      else
+                        _ChatTopBar(
+                          participantName: widget.otherParticipantName,
+                          onSearchPressed: _enterSearchMode,
+                          onCallPressed: _openCallNowSheet,
+                        ),
+                      if (showActiveVoiceCallBanner)
+                        _ActiveVoiceCallBanner(
+                          connected: _voiceCallConnected,
+                          elapsed: _voiceCallElapsed,
+                          onPressed: _showVoiceCallScreen,
+                        ),
+                    ],
+                  ),
+                ),
 
               if (_photoPickerOpen && _photoPickerExpanded)
                 Positioned(
@@ -1216,6 +2099,35 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
                     ),
                   ),
                 ),
+              if (showingVoiceCallScreen)
+                Positioned.fill(
+                  child: _VoiceCallScreen(
+                    participantName: widget.otherParticipantName,
+                    connected: _voiceCallConnected,
+                    elapsed: _voiceCallElapsed,
+                    muted: _voiceCallMuted,
+                    audioOutputRoute: _audioOutputRoute,
+                    onReturnToChat: _returnToChatDuringCall,
+                    onToggleMute: _toggleVoiceCallMute,
+                    onEndCall: _endVoiceCall,
+                    onChooseAudioOutput: _chooseAudioOutputRoute,
+                  ),
+                ),
+              if (_searchModeActive && !showingVoiceCallScreen)
+                Positioned(
+                  left: 20,
+                  right: 20,
+                  bottom: searchToolbarBottom,
+                  child: _ChatSearchToolbar(
+                    counterText: _searchCounterText(),
+                    showCounter: _hasSearchQuery,
+                    canMovePrevious: _canMoveToPreviousSearchResult,
+                    canMoveNext: _canMoveToNextSearchResult,
+                    onDateSearchPressed: _openSearchDateSheet,
+                    onMovePrevious: _moveToPreviousSearchResult,
+                    onMoveNext: _moveToNextSearchResult,
+                  ),
+                ),
             ],
           ),
         ),
@@ -1225,52 +2137,1851 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
 }
 
 final class _ChatTopBar extends StatelessWidget {
-  const _ChatTopBar();
+  const _ChatTopBar({
+    required this.participantName,
+    required this.onSearchPressed,
+    required this.onCallPressed,
+  });
 
   static const double height = 56;
+
+  final String participantName;
+  final VoidCallback onSearchPressed;
+  final VoidCallback onCallPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final double topPadding = MediaQuery.paddingOf(context).top;
+
+    return _TranslucentTopBarSurface(
+      key: const ValueKey<String>('chat-top-bar'),
+      height: topPadding + height,
+      child: Padding(
+        padding: EdgeInsets.only(top: topPadding),
+        child: SizedBox(
+          height: height,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              IgnorePointer(
+                child: Text(
+                  participantName,
+                  style: AppTypography.typography4.copyWith(
+                    color: AppColors.grey900,
+                    fontWeight: AppTypography.bold,
+                  ),
+                ),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: 'Search',
+                        onPressed: onSearchPressed,
+                        icon: const Icon(
+                          Icons.search_rounded,
+                          size: 28,
+                          color: AppColors.grey700,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Call',
+                        onPressed: onCallPressed,
+                        icon: const Icon(
+                          Icons.call_outlined,
+                          size: 26,
+                          color: AppColors.grey700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _TranslucentTopBarSurface extends StatelessWidget {
+  const _TranslucentTopBarSurface({
+    required this.height,
+    required this.child,
+    super.key,
+  });
+
+  static const double _blurFadeOverflow = 104;
+
+  final double height;
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      key: const ValueKey<String>('chat-top-bar'),
       height: height,
       child: Stack(
-        alignment: Alignment.center,
+        clipBehavior: Clip.none,
         children: [
-          Text(
-            'Lia',
-            style: AppTypography.typography4.copyWith(
-              color: AppColors.grey900,
-              fontWeight: AppTypography.bold,
+          Positioned(
+            left: 0,
+            top: 0,
+            right: 0,
+            height: height + _blurFadeOverflow,
+            child: const IgnorePointer(child: _TopBarGradientBlur()),
+          ),
+          Positioned.fill(child: child),
+        ],
+      ),
+    );
+  }
+}
+
+final class _TopBarGradientBlur extends StatelessWidget {
+  const _TopBarGradientBlur();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const _TopBarBlurFade(
+          sigma: 42,
+          alphas: [255, 255, 232, 92, 0],
+          stops: [0, 0.32, 0.58, 0.9, 1],
+        ),
+        const _TopBarBlurFade(
+          sigma: 24,
+          alphas: [255, 242, 172, 64, 0],
+          stops: [0, 0.48, 0.72, 0.92, 1],
+        ),
+        DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.surface.withAlpha(214),
+                AppColors.surface.withAlpha(150),
+                AppColors.surface.withAlpha(64),
+                AppColors.surface.withAlpha(0),
+              ],
+              stops: [0, 0.36, 0.74, 1],
             ),
           ),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: 'Search',
-                    onPressed: null,
-                    icon: const Icon(
-                      Icons.search_rounded,
-                      size: 28,
-                      color: AppColors.grey700,
+        ),
+      ],
+    );
+  }
+}
+
+final class _TopBarBlurFade extends StatelessWidget {
+  const _TopBarBlurFade({
+    required this.sigma,
+    required this.alphas,
+    required this.stops,
+  });
+
+  final double sigma;
+  final List<int> alphas;
+  final List<double> stops;
+
+  @override
+  Widget build(BuildContext context) {
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (Rect bounds) {
+        return LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            for (final int alpha in alphas) AppColors.black.withAlpha(alpha),
+          ],
+          stops: stops,
+        ).createShader(bounds);
+      },
+      child: ClipRect(
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
+          child: const SizedBox.expand(),
+        ),
+      ),
+    );
+  }
+}
+
+final class _ChatSearchTopBar extends StatelessWidget {
+  const _ChatSearchTopBar({
+    required this.controller,
+    required this.focusNode,
+    required this.hasText,
+    required this.onChanged,
+    required this.onSubmitted,
+    required this.onClear,
+    required this.onCancel,
+  });
+
+  static const double height = 56;
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool hasText;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<String> onSubmitted;
+  final VoidCallback onClear;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final double topPadding = MediaQuery.paddingOf(context).top;
+
+    return _TranslucentTopBarSurface(
+      key: const ValueKey<String>('chat-search-top-bar'),
+      height: topPadding + height,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(18, topPadding + 7, 16, 7),
+        child: Row(
+          children: [
+            Expanded(
+              child: SizedBox(
+                height: 42,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: AppColors.grey100.withAlpha(204),
+                    borderRadius: AppRadius.borderRadius12,
+                  ),
+                  child: TextField(
+                    key: const ValueKey<String>('chat-search-input'),
+                    controller: controller,
+                    focusNode: focusNode,
+                    autofocus: true,
+                    textAlignVertical: TextAlignVertical.center,
+                    textInputAction: TextInputAction.search,
+                    onChanged: onChanged,
+                    onSubmitted: onSubmitted,
+                    cursorColor: AppColors.primary,
+                    style: AppTypography.typography4.copyWith(
+                      color: AppColors.grey900,
+                      fontWeight: AppTypography.medium,
+                    ),
+                    decoration: InputDecoration(
+                      // 테마의 filled:true(grey100)가 사각형으로 채워져
+                      // DecoratedBox의 둥근 모서리를 덮으므로 끈다.
+                      filled: false,
+                      hintText: 'Search',
+                      hintStyle: AppTypography.typography4.copyWith(
+                        color: AppColors.grey500,
+                        fontWeight: AppTypography.medium,
+                      ),
+                      prefixIconConstraints: const BoxConstraints(
+                        minWidth: 50,
+                        minHeight: 42,
+                      ),
+                      prefixIcon: const Padding(
+                        padding: EdgeInsets.only(left: 14, right: 10),
+                        child: Icon(
+                          Icons.search_rounded,
+                          color: AppColors.grey700,
+                          size: 24,
+                        ),
+                      ),
+                      suffixIconConstraints: const BoxConstraints(
+                        minWidth: 42,
+                        minHeight: 42,
+                      ),
+                      suffixIcon: hasText
+                          ? IconButton(
+                              tooltip: 'Clear search',
+                              onPressed: onClear,
+                              padding: EdgeInsets.zero,
+                              icon: const Icon(
+                                Icons.cancel_rounded,
+                                color: AppColors.grey600,
+                                size: 22,
+                              ),
+                            )
+                          : null,
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      isDense: true,
+                      contentPadding: EdgeInsets.zero,
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Call',
-                    onPressed: null,
-                    icon: const Icon(
-                      Icons.call_outlined,
-                      size: 26,
-                      color: AppColors.grey700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            TextButton(
+              onPressed: onCancel,
+              style: TextButton.styleFrom(
+                foregroundColor: AppColors.grey900,
+                minimumSize: const Size(64, 42),
+                padding: EdgeInsets.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                'Cancel',
+                style: AppTypography.typography4.copyWith(
+                  color: AppColors.grey900,
+                  fontWeight: AppTypography.medium,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _ChatSearchToolbar extends StatelessWidget {
+  const _ChatSearchToolbar({
+    required this.counterText,
+    required this.showCounter,
+    required this.canMovePrevious,
+    required this.canMoveNext,
+    required this.onDateSearchPressed,
+    required this.onMovePrevious,
+    required this.onMoveNext,
+  });
+
+  final String counterText;
+  final bool showCounter;
+  final bool canMovePrevious;
+  final bool canMoveNext;
+  final VoidCallback onDateSearchPressed;
+  final VoidCallback onMovePrevious;
+  final VoidCallback onMoveNext;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      key: const ValueKey<String>('chat-search-toolbar'),
+      color: AppColors.white.withAlpha(238),
+      elevation: 5,
+      shadowColor: AppColors.black.withAlpha(22),
+      borderRadius: AppRadius.borderRadiusFull,
+      clipBehavior: Clip.antiAlias,
+      child: SizedBox(
+        height: 56,
+        child: Row(
+          children: [
+            const SizedBox(width: 14),
+            _SearchToolIconButton(
+              semanticLabel: 'Search by date',
+              onPressed: onDateSearchPressed,
+              child: const _CalendarSearchIcon(),
+            ),
+            Expanded(
+              child: Center(
+                child: showCounter
+                    ? Text(
+                        counterText,
+                        key: const ValueKey<String>('chat-search-counter'),
+                        style: AppTypography.typography5.copyWith(
+                          color: AppColors.grey900,
+                          fontWeight: AppTypography.bold,
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+            _SearchChevronButton(
+              semanticLabel: 'Previous search result',
+              icon: Icons.keyboard_arrow_up_rounded,
+              enabled: canMovePrevious,
+              onPressed: onMovePrevious,
+            ),
+            const SizedBox(width: 6),
+            _SearchChevronButton(
+              semanticLabel: 'Next search result',
+              icon: Icons.keyboard_arrow_down_rounded,
+              enabled: canMoveNext,
+              onPressed: onMoveNext,
+            ),
+            const SizedBox(width: 10),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _SearchToolIconButton extends StatelessWidget {
+  const _SearchToolIconButton({
+    required this.semanticLabel,
+    required this.onPressed,
+    required this.child,
+  });
+
+  final String semanticLabel;
+  final VoidCallback? onPressed;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: semanticLabel,
+      enabled: onPressed != null,
+      child: SizedBox.square(
+        dimension: 44,
+        child: IconButton(
+          tooltip: semanticLabel,
+          onPressed: onPressed,
+          padding: EdgeInsets.zero,
+          icon: child,
+        ),
+      ),
+    );
+  }
+}
+
+final class _SearchChevronButton extends StatelessWidget {
+  const _SearchChevronButton({
+    required this.semanticLabel,
+    required this.icon,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String semanticLabel;
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.white,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: SizedBox.square(
+        dimension: 44,
+        child: IconButton(
+          tooltip: semanticLabel,
+          onPressed: enabled ? onPressed : null,
+          padding: EdgeInsets.zero,
+          icon: Icon(
+            icon,
+            size: 31,
+            color: enabled ? AppColors.grey900 : AppColors.grey300,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _CalendarSearchIcon extends StatelessWidget {
+  const _CalendarSearchIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.center,
+      children: const [
+        Icon(
+          Icons.calendar_today_rounded,
+          color: AppColors.grey900,
+          size: 26,
+        ),
+        Positioned(
+          right: 4,
+          bottom: 4,
+          child: Icon(
+            Icons.search_rounded,
+            color: AppColors.grey900,
+            size: 13,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+final class _SearchDateSheet extends StatefulWidget {
+  const _SearchDateSheet({
+    required this.initialDate,
+    required this.enabledDates,
+  });
+
+  final DateTime initialDate;
+  final Set<DateTime> enabledDates;
+
+  @override
+  State<_SearchDateSheet> createState() {
+    return _SearchDateSheetState();
+  }
+}
+
+final class _SearchDateSheetState extends State<_SearchDateSheet> {
+  static const List<String> _weekdayLabels = <String>[
+    'S',
+    'M',
+    'T',
+    'W',
+    'T',
+    'F',
+    'S',
+  ];
+
+  late final Set<DateTime> _enabledDates;
+  late final List<DateTime> _enabledMonths;
+  late DateTime _visibleMonth;
+  late DateTime _selectedDate;
+
+  bool _monthPickerOpen = false;
+  int _temporaryYear = 0;
+  int _temporaryMonth = 0;
+  FixedExtentScrollController? _yearController;
+  FixedExtentScrollController? _monthController;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _enabledDates = widget.enabledDates.map(_dateOnly).toSet();
+    _enabledMonths =
+        _enabledDates.map(_monthOnly).toSet().toList()
+          ..sort((DateTime a, DateTime b) => a.compareTo(b));
+    _selectedDate = _dateOnly(widget.initialDate);
+    _visibleMonth = _monthOnly(widget.initialDate);
+  }
+
+  @override
+  void dispose() {
+    _yearController?.dispose();
+    _monthController?.dispose();
+    super.dispose();
+  }
+
+  bool get _canMoveToPreviousMonth {
+    return _enabledMonths.any((DateTime month) => month.isBefore(_visibleMonth));
+  }
+
+  bool get _canMoveToNextMonth {
+    return _enabledMonths.any((DateTime month) => month.isAfter(_visibleMonth));
+  }
+
+  List<int> get _enabledYears {
+    return _enabledMonths.map((DateTime month) => month.year).toSet().toList()
+      ..sort();
+  }
+
+  List<int> _enabledMonthsForYear(int year) {
+    return <int>[
+      for (final DateTime month in _enabledMonths)
+        if (month.year == year) month.month,
+    ];
+  }
+
+  void _moveMonth(int delta) {
+    final DateTime nextMonth = _addMonths(_visibleMonth, delta);
+
+    if (!_enabledMonths.contains(nextMonth)) {
+      return;
+    }
+
+    setState(() {
+      _visibleMonth = nextMonth;
+    });
+  }
+
+  void _openMonthPicker() {
+    final List<int> years = _enabledYears;
+    _temporaryYear = _visibleMonth.year;
+    _temporaryMonth = _visibleMonth.month;
+    _yearController?.dispose();
+    _monthController?.dispose();
+    _yearController = FixedExtentScrollController(
+      initialItem: math.max(0, years.indexOf(_temporaryYear)),
+    );
+    _monthController = FixedExtentScrollController(
+      initialItem: math.max(
+        0,
+        _enabledMonthsForYear(_temporaryYear).indexOf(_temporaryMonth),
+      ),
+    );
+
+    setState(() {
+      _monthPickerOpen = true;
+    });
+  }
+
+  void _cancelMonthPicker() {
+    setState(() {
+      _monthPickerOpen = false;
+    });
+  }
+
+  void _applyMonthPicker() {
+    final DateTime selectedMonth = DateTime(_temporaryYear, _temporaryMonth);
+
+    if (!_enabledMonths.contains(selectedMonth)) {
+      return;
+    }
+
+    setState(() {
+      _visibleMonth = selectedMonth;
+      _monthPickerOpen = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final double bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+
+    return SafeArea(
+      top: false,
+      bottom: false,
+      child: Material(
+        color: AppColors.white,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(24),
+          topRight: Radius.circular(24),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(24, 22, 24, bottomPadding + 22),
+          child: _monthPickerOpen
+              ? _buildMonthPicker(context)
+              : _buildCalendar(context),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    final bool showUpCaret = _monthPickerOpen;
+
+    return SizedBox(
+      height: 48,
+      child: Row(
+        children: [
+          _MonthChevronButton(
+            semanticLabel: 'Previous month',
+            icon: Icons.chevron_left_rounded,
+            enabled: !_monthPickerOpen && _canMoveToPreviousMonth,
+            onPressed: () {
+              _moveMonth(-1);
+            },
+          ),
+          Expanded(
+            child: Center(
+              child: TextButton(
+                onPressed: _monthPickerOpen ? null : _openMonthPicker,
+                style: TextButton.styleFrom(
+                  foregroundColor: AppColors.grey900,
+                  disabledForegroundColor: AppColors.grey900,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _formatSearchMonth(_visibleMonth),
+                      style: AppTypography.typography4.copyWith(
+                        color: AppColors.grey900,
+                        fontWeight: AppTypography.bold,
+                      ),
+                    ),
+                    Icon(
+                      showUpCaret
+                          ? Icons.arrow_drop_up_rounded
+                          : Icons.arrow_drop_down_rounded,
+                      color: AppColors.grey900,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          _MonthChevronButton(
+            semanticLabel: 'Next month',
+            icon: Icons.chevron_right_rounded,
+            enabled: !_monthPickerOpen && _canMoveToNextMonth,
+            onPressed: () {
+              _moveMonth(1);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCalendar(BuildContext context) {
+    final int leadingBlankCount =
+        DateTime(_visibleMonth.year, _visibleMonth.month).weekday % 7;
+    final int dayCount = _daysInMonth(
+      _visibleMonth.year,
+      _visibleMonth.month,
+    );
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildHeader(),
+        const SizedBox(height: 18),
+        Row(
+          children: [
+            for (final String label in _weekdayLabels)
+              Expanded(
+                child: Center(
+                  child: Text(
+                    label,
+                    style: AppTypography.typography7.copyWith(
+                      color: AppColors.grey600,
+                      fontWeight: AppTypography.medium,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        GridView.count(
+          crossAxisCount: 7,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 10,
+          crossAxisSpacing: 4,
+          children: [
+            for (int index = 0; index < leadingBlankCount; index++)
+              const SizedBox.shrink(),
+            for (int day = 1; day <= dayCount; day++)
+              _SearchDateCell(
+                date: DateTime(_visibleMonth.year, _visibleMonth.month, day),
+                selected: _selectedDate ==
+                    DateTime(_visibleMonth.year, _visibleMonth.month, day),
+                enabled: _enabledDates.contains(
+                  DateTime(_visibleMonth.year, _visibleMonth.month, day),
+                ),
+                onSelected: (DateTime date) {
+                  setState(() {
+                    _selectedDate = _dateOnly(date);
+                  });
+
+                  Navigator.of(context).pop(_dateOnly(date));
+                },
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMonthPicker(BuildContext context) {
+    final List<int> years = _enabledYears;
+    final List<int> months = _enabledMonthsForYear(_temporaryYear);
+    final bool canApply = months.contains(_temporaryMonth);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildHeader(),
+        const SizedBox(height: 36),
+        Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              height: 45,
+              decoration: const BoxDecoration(
+                color: AppColors.grey100,
+                borderRadius: BorderRadius.all(Radius.circular(12)),
+              ),
+            ),
+            SizedBox(
+              height: 156,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: CupertinoPicker(
+                      scrollController: _yearController,
+                      itemExtent: 45,
+                      selectionOverlay: const SizedBox.shrink(),
+                      onSelectedItemChanged: (int index) {
+                        final int year = years[index];
+                        final List<int> yearMonths = _enabledMonthsForYear(
+                          year,
+                        );
+
+                        setState(() {
+                          _temporaryYear = year;
+                          if (!yearMonths.contains(_temporaryMonth)) {
+                            _temporaryMonth = yearMonths.first;
+                          }
+                        });
+                      },
+                      children: [
+                        for (final int year in years)
+                          Center(
+                            child: Text(
+                              '$year',
+                              style: AppTypography.typography3.copyWith(
+                                color: year == _temporaryYear
+                                    ? AppColors.grey900
+                                    : AppColors.grey400,
+                                fontWeight: AppTypography.medium,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: CupertinoPicker(
+                      scrollController: _monthController,
+                      itemExtent: 45,
+                      selectionOverlay: const SizedBox.shrink(),
+                      onSelectedItemChanged: (int index) {
+                        setState(() {
+                          _temporaryMonth = months[index];
+                        });
+                      },
+                      children: [
+                        for (final int month in months)
+                          Center(
+                            child: Text(
+                              _monthName(month),
+                              style: AppTypography.typography3.copyWith(
+                                color: month == _temporaryMonth
+                                    ? AppColors.grey900
+                                    : AppColors.grey400,
+                                fontWeight: AppTypography.medium,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ],
               ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 42),
+        Row(
+          children: [
+            Expanded(
+              child: _SearchDateSheetButton(
+                label: 'Cancel',
+                onPressed: _cancelMonthPicker,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _SearchDateSheetButton(
+                label: 'OK',
+                onPressed: canApply ? _applyMonthPicker : null,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  String _monthName(int month) {
+    return switch (month) {
+      1 => 'January',
+      2 => 'February',
+      3 => 'March',
+      4 => 'April',
+      5 => 'May',
+      6 => 'June',
+      7 => 'July',
+      8 => 'August',
+      9 => 'September',
+      10 => 'October',
+      11 => 'November',
+      12 => 'December',
+      _ => '$month',
+    };
+  }
+}
+
+final class _MonthChevronButton extends StatelessWidget {
+  const _MonthChevronButton({
+    required this.semanticLabel,
+    required this.icon,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String semanticLabel;
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: semanticLabel,
+      onPressed: enabled ? onPressed : null,
+      icon: Icon(
+        icon,
+        size: 32,
+        color: enabled ? AppColors.grey900 : AppColors.grey300,
+      ),
+    );
+  }
+}
+
+final class _SearchDateCell extends StatelessWidget {
+  const _SearchDateCell({
+    required this.date,
+    required this.selected,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+  final DateTime date;
+  final bool selected;
+  final bool enabled;
+  final ValueChanged<DateTime> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color textColor = selected
+        ? AppColors.white
+        : enabled
+        ? AppColors.grey900
+        : AppColors.grey300;
+
+    return Center(
+      child: SizedBox.square(
+        dimension: 42,
+        child: Material(
+          color: selected ? AppColors.blue500 : Colors.transparent,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: enabled ? () => onSelected(date) : null,
+            child: Center(
+              child: Text(
+                '${date.day}',
+                style: AppTypography.typography5.copyWith(
+                  color: textColor,
+                  fontWeight: selected
+                      ? AppTypography.bold
+                      : AppTypography.medium,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _SearchDateSheetButton extends StatelessWidget {
+  const _SearchDateSheetButton({
+    required this.label,
+    required this.onPressed,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 52,
+      child: TextButton(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          backgroundColor: AppColors.grey100,
+          foregroundColor: AppColors.grey900,
+          disabledForegroundColor: AppColors.grey400,
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(10)),
+          ),
+        ),
+        child: Text(
+          label,
+          style: AppTypography.typography5.copyWith(
+            fontWeight: AppTypography.medium,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _formatCallDuration(Duration duration) {
+  final int totalSeconds = duration.inSeconds.clamp(0, 359999).toInt();
+  final int hours = totalSeconds ~/ 3600;
+  final int minutes = (totalSeconds % 3600) ~/ 60;
+  final int seconds = totalSeconds % 60;
+
+  String twoDigits(int value) {
+    return value.toString().padLeft(2, '0');
+  }
+
+  if (hours > 0) {
+    return '$hours:${twoDigits(minutes)}:${twoDigits(seconds)}';
+  }
+
+  return '${twoDigits(minutes)}:${twoDigits(seconds)}';
+}
+
+String _formatVoiceMemoSheetDuration(Duration duration) {
+  final int totalSeconds = duration.inSeconds.clamp(0, 5999).toInt();
+  final int minutes = totalSeconds ~/ 60;
+  final int seconds = totalSeconds % 60;
+
+  return '${minutes.toString().padLeft(2, '0')}:'
+      '${seconds.toString().padLeft(2, '0')}';
+}
+
+String _formatVoiceMemoBubbleDuration(Duration duration) {
+  final int totalSeconds = duration.inSeconds.clamp(0, 5999).toInt();
+  final int minutes = totalSeconds ~/ 60;
+  final int seconds = totalSeconds % 60;
+
+  return '$minutes:${seconds.toString().padLeft(2, '0')}';
+}
+
+final class _CallNowSheet extends StatelessWidget {
+  const _CallNowSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final double bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+
+    return SafeArea(
+      top: false,
+      bottom: false,
+      child: Material(
+        color: AppColors.grey50,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(28),
+          topRight: Radius.circular(28),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(18, 36, 18, bottomPadding + 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Call Now',
+                  style: AppTypography.typography4.copyWith(
+                    color: AppColors.grey900,
+                    fontWeight: AppTypography.bold,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _CallNowOption(
+                  label: 'Voice Call',
+                  icon: Icons.call_rounded,
+                  onTap: () {
+                    Navigator.of(context).pop(_CallNowAction.voice);
+                  },
+                ),
+                const SizedBox(height: 16),
+                _CallNowOption(
+                  label: 'Video Call',
+                  icon: Icons.videocam_rounded,
+                  onTap: () {
+                    Navigator.of(context).pop(_CallNowAction.video);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _CallNowOption extends StatelessWidget {
+  const _CallNowOption({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.white,
+      borderRadius: AppRadius.borderRadius16,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(
+          height: 82,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            child: Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  alignment: Alignment.center,
+                  decoration: const BoxDecoration(
+                    color: AppColors.green50,
+                    borderRadius: BorderRadius.all(Radius.circular(16)),
+                  ),
+                  child: Icon(icon, size: 25, color: AppColors.green500),
+                ),
+                const SizedBox(width: 18),
+                Text(
+                  label,
+                  style: AppTypography.typography5.copyWith(
+                    color: AppColors.grey900,
+                    fontWeight: AppTypography.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VoiceMemoSheet extends StatefulWidget {
+  const _VoiceMemoSheet();
+
+  @override
+  State<_VoiceMemoSheet> createState() {
+    return _VoiceMemoSheetState();
+  }
+}
+
+final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
+  Timer? _timer;
+  _VoiceMemoSheetMode _mode = _VoiceMemoSheetMode.idle;
+  Duration _elapsed = Duration.zero;
+  Duration _playbackPosition = Duration.zero;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _startRecording() {
+    _timer?.cancel();
+    setState(() {
+      _mode = _VoiceMemoSheetMode.recording;
+      _elapsed = Duration.zero;
+      _playbackPosition = Duration.zero;
+    });
+
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _elapsed += const Duration(seconds: 1);
+      });
+    });
+  }
+
+  void _stopRecording() {
+    if (_mode != _VoiceMemoSheetMode.recording) {
+      return;
+    }
+
+    _timer?.cancel();
+    _timer = null;
+
+    setState(() {
+      _mode = _VoiceMemoSheetMode.recorded;
+      if (_elapsed.inSeconds == 0) {
+        _elapsed = const Duration(seconds: 1);
+      }
+      _playbackPosition = Duration.zero;
+    });
+  }
+
+  void _resetRecording() {
+    _timer?.cancel();
+    _timer = null;
+
+    setState(() {
+      _mode = _VoiceMemoSheetMode.idle;
+      _elapsed = Duration.zero;
+      _playbackPosition = Duration.zero;
+    });
+  }
+
+  void _togglePlayback() {
+    if (_mode == _VoiceMemoSheetMode.playing) {
+      _timer?.cancel();
+      _timer = null;
+
+      setState(() {
+        _mode = _VoiceMemoSheetMode.recorded;
+      });
+      return;
+    }
+
+    if (_elapsed == Duration.zero) {
+      return;
+    }
+
+    _timer?.cancel();
+    setState(() {
+      _mode = _VoiceMemoSheetMode.playing;
+      _playbackPosition = Duration.zero;
+    });
+
+    _timer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (!mounted) {
+        return;
+      }
+
+      final Duration nextPosition =
+          _playbackPosition + const Duration(milliseconds: 250);
+
+      if (nextPosition >= _elapsed) {
+        _timer?.cancel();
+        _timer = null;
+
+        setState(() {
+          _mode = _VoiceMemoSheetMode.recorded;
+          _playbackPosition = Duration.zero;
+        });
+        return;
+      }
+
+      setState(() {
+        _playbackPosition = nextPosition;
+      });
+    });
+  }
+
+  void _sendVoiceMemo() {
+    final Duration duration = _elapsed.inSeconds == 0
+        ? const Duration(seconds: 1)
+        : _elapsed;
+
+    Navigator.of(context).pop(duration);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final double bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+
+    return SafeArea(
+      top: false,
+      bottom: false,
+      child: Material(
+        key: const ValueKey<String>('voice-memo-sheet'),
+        color: AppColors.white,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(28),
+          topRight: Radius.circular(28),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(18, 12, 18, bottomPadding + 34),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 44,
+                height: 5,
+                decoration: const BoxDecoration(
+                  color: AppColors.grey400,
+                  borderRadius: BorderRadius.all(Radius.circular(3)),
+                ),
+              ),
+              const SizedBox(height: 34),
+              Text(
+                'Voice Memo',
+                style: AppTypography.typography4.copyWith(
+                  color: AppColors.grey900,
+                  fontWeight: AppTypography.bold,
+                ),
+              ),
+              const SizedBox(height: 38),
+              _VoiceMemoRecorderBar(
+                mode: _mode,
+                elapsed: _elapsed,
+                playbackPosition: _playbackPosition,
+                onPlayPressed: _togglePlayback,
+              ),
+              const SizedBox(height: 74),
+              SizedBox(
+                height: 72,
+                child: _VoiceMemoRecorderControls(
+                  mode: _mode,
+                  onRecordPressed: _startRecording,
+                  onStopPressed: _stopRecording,
+                  onResetPressed: _resetRecording,
+                  onSendPressed: _sendVoiceMemo,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VoiceMemoRecorderBar extends StatelessWidget {
+  const _VoiceMemoRecorderBar({
+    required this.mode,
+    required this.elapsed,
+    required this.playbackPosition,
+    required this.onPlayPressed,
+  });
+
+  final _VoiceMemoSheetMode mode;
+  final Duration elapsed;
+  final Duration playbackPosition;
+  final VoidCallback onPlayPressed;
+
+  bool get _hasRecording {
+    return mode != _VoiceMemoSheetMode.idle;
+  }
+
+  bool get _canPlay {
+    return mode == _VoiceMemoSheetMode.recorded ||
+        mode == _VoiceMemoSheetMode.playing;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isActive = _hasRecording;
+    final Color backgroundColor = isActive
+        ? AppColors.primary
+        : AppColors.grey100;
+    final Color foregroundColor = isActive ? AppColors.white : AppColors.grey500;
+    final Duration displayDuration = elapsed;
+    final double progress = elapsed.inMilliseconds == 0
+        ? 0
+        : playbackPosition.inMilliseconds / elapsed.inMilliseconds;
+
+    return SizedBox(
+      height: 84,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          borderRadius: AppRadius.borderRadius16,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 22),
+          child: Row(
+            children: [
+              if (_canPlay) ...[
+                _VoiceMemoInlinePlayButton(
+                  playing: mode == _VoiceMemoSheetMode.playing,
+                  color: foregroundColor,
+                  onPressed: onPlayPressed,
+                ),
+                const SizedBox(width: 14),
+              ],
+              Expanded(
+                child: _hasRecording
+                    ? _VoiceMemoWaveform(
+                        color: foregroundColor,
+                        progress: progress.clamp(0, 1).toDouble(),
+                        emphasized: mode == _VoiceMemoSheetMode.recording ||
+                            mode == _VoiceMemoSheetMode.playing,
+                      )
+                    : const SizedBox.shrink(),
+              ),
+              const SizedBox(width: 18),
+              Text(
+                _formatVoiceMemoSheetDuration(displayDuration),
+                style: AppTypography.typography4.copyWith(
+                  color: foregroundColor,
+                  fontWeight: AppTypography.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VoiceMemoInlinePlayButton extends StatelessWidget {
+  const _VoiceMemoInlinePlayButton({
+    required this.playing,
+    required this.color,
+    required this.onPressed,
+  });
+
+  final bool playing;
+  final Color color;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      key: const ValueKey<String>('voice-memo-preview-play'),
+      onPressed: onPressed,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+      icon: Icon(
+        playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+        size: 34,
+        color: color,
+      ),
+    );
+  }
+}
+
+final class _VoiceMemoRecorderControls extends StatelessWidget {
+  const _VoiceMemoRecorderControls({
+    required this.mode,
+    required this.onRecordPressed,
+    required this.onStopPressed,
+    required this.onResetPressed,
+    required this.onSendPressed,
+  });
+
+  final _VoiceMemoSheetMode mode;
+  final VoidCallback onRecordPressed;
+  final VoidCallback onStopPressed;
+  final VoidCallback onResetPressed;
+  final VoidCallback onSendPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (mode == _VoiceMemoSheetMode.idle) {
+      return Center(
+        child: _VoiceMemoRoundButton(
+          key: const ValueKey<String>('voice-memo-record'),
+          size: 58,
+          backgroundColor: AppColors.error,
+          foregroundColor: AppColors.white,
+          onPressed: onRecordPressed,
+          child: const SizedBox.shrink(),
+        ),
+      );
+    }
+
+    final Widget centerButton = mode == _VoiceMemoSheetMode.recording
+        ? _VoiceMemoRoundButton(
+            key: const ValueKey<String>('voice-memo-stop'),
+            size: 58,
+            backgroundColor: AppColors.grey50,
+            foregroundColor: AppColors.grey900,
+            onPressed: onStopPressed,
+            child: const Icon(Icons.stop_rounded, size: 34),
+          )
+        : _VoiceMemoRoundButton(
+            key: const ValueKey<String>('voice-memo-reset'),
+            size: 58,
+            backgroundColor: AppColors.white,
+            foregroundColor: AppColors.grey900,
+            onPressed: onResetPressed,
+            child: const Icon(Icons.replay_rounded, size: 38),
+          );
+
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        centerButton,
+        Align(
+          alignment: Alignment.centerRight,
+          child: _VoiceMemoRoundButton(
+            key: const ValueKey<String>('voice-memo-send'),
+            size: 58,
+            backgroundColor: AppColors.primary,
+            foregroundColor: AppColors.white,
+            onPressed: onSendPressed,
+            child: const Icon(Icons.arrow_upward_rounded, size: 36),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+final class _VoiceMemoRoundButton extends StatelessWidget {
+  const _VoiceMemoRoundButton({
+    required this.size,
+    required this.backgroundColor,
+    required this.foregroundColor,
+    required this.onPressed,
+    required this.child,
+    super.key,
+  });
+
+  final double size;
+  final Color backgroundColor;
+  final Color foregroundColor;
+  final VoidCallback onPressed;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: backgroundColor.withAlpha(24),
+        shape: BoxShape.circle,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(7),
+        child: Material(
+          color: backgroundColor,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: SizedBox.square(
+              dimension: size,
+              child: IconTheme(
+                data: IconThemeData(color: foregroundColor),
+                child: Center(child: child),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VoiceMemoWaveform extends StatelessWidget {
+  const _VoiceMemoWaveform({
+    required this.color,
+    this.progress = 0,
+    this.emphasized = false,
+  });
+
+  final Color color;
+  final double progress;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _VoiceMemoWaveformPainter(
+        color: color,
+        progress: progress,
+        emphasized: emphasized,
+      ),
+      child: const SizedBox.expand(),
+    );
+  }
+}
+
+final class _VoiceMemoWaveformPainter extends CustomPainter {
+  const _VoiceMemoWaveformPainter({
+    required this.color,
+    required this.progress,
+    required this.emphasized,
+  });
+
+  final Color color;
+  final double progress;
+  final bool emphasized;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) {
+      return;
+    }
+
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill
+      ..strokeCap = StrokeCap.round;
+
+    const int count = 42;
+    final double step = size.width / (count - 1);
+    final double centerY = size.height / 2;
+    final double clampedProgress = progress.clamp(0, 1).toDouble();
+    final int activeIndex = emphasized
+        ? (clampedProgress * (count - 1)).round().clamp(8, count - 9).toInt()
+        : count ~/ 2;
+
+    for (int index = 0; index < count; index++) {
+      final double x = index * step;
+      final int distanceFromActive = (index - activeIndex).abs();
+      final bool isBar = distanceFromActive <= 3;
+
+      if (!isBar) {
+        canvas.drawCircle(Offset(x, centerY), 2.2, paint);
+        continue;
+      }
+
+      final double normalized = 1 - distanceFromActive / 4;
+      final double barHeight = 16 + normalized * 24;
+      final RRect bar = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(x, centerY),
+          width: 4.2,
+          height: barHeight,
+        ),
+        const Radius.circular(3),
+      );
+
+      canvas.drawRRect(bar, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_VoiceMemoWaveformPainter oldDelegate) {
+    return oldDelegate.color != color ||
+        oldDelegate.progress != progress ||
+        oldDelegate.emphasized != emphasized;
+  }
+}
+
+final class _ActiveVoiceCallBanner extends StatelessWidget {
+  const _ActiveVoiceCallBanner({
+    required this.connected,
+    required this.elapsed,
+    required this.onPressed,
+  });
+
+  final bool connected;
+  final Duration elapsed;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final String semanticLabel = connected
+        ? 'Voice call ${_formatCallDuration(elapsed)}'
+        : 'Voice call connecting';
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
+        child: Semantics(
+          button: true,
+          label: semanticLabel,
+          child: Material(
+            key: const ValueKey<String>('active-voice-call-banner'),
+            color: AppColors.green500,
+            borderRadius: AppRadius.borderRadius16,
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onPressed,
+              child: SizedBox(
+                width: connected ? 126 : 122,
+                height: 52,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.call_rounded,
+                      size: 28,
+                      color: AppColors.white,
+                    ),
+                    SizedBox(width: connected ? 14 : 18),
+                    if (connected)
+                      Text(
+                        _formatCallDuration(elapsed),
+                        style: AppTypography.typography5.copyWith(
+                          color: AppColors.white,
+                          fontWeight: AppTypography.bold,
+                        ),
+                      )
+                    else
+                      const _ActiveCallDots(),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _ActiveCallDots extends StatelessWidget {
+  const _ActiveCallDots();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _ActiveCallDot(color: AppColors.white.withAlpha(122)),
+        const SizedBox(width: 5),
+        _ActiveCallDot(color: AppColors.white.withAlpha(122)),
+        const SizedBox(width: 5),
+        _ActiveCallDot(color: AppColors.white.withAlpha(122)),
+      ],
+    );
+  }
+}
+
+final class _ActiveCallDot extends StatelessWidget {
+  const _ActiveCallDot({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.square(
+      dimension: 8,
+      child: DecoratedBox(
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+    );
+  }
+}
+
+final class _VoiceCallScreen extends StatelessWidget {
+  const _VoiceCallScreen({
+    required this.participantName,
+    required this.connected,
+    required this.elapsed,
+    required this.muted,
+    required this.audioOutputRoute,
+    required this.onReturnToChat,
+    required this.onToggleMute,
+    required this.onEndCall,
+    required this.onChooseAudioOutput,
+  });
+
+  final String participantName;
+  final bool connected;
+  final Duration elapsed;
+  final bool muted;
+  final _AudioOutputRoute audioOutputRoute;
+  final VoidCallback onReturnToChat;
+  final VoidCallback onToggleMute;
+  final VoidCallback onEndCall;
+  final VoidCallback onChooseAudioOutput;
+
+  @override
+  Widget build(BuildContext context) {
+    final double bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+
+    return Material(
+      key: const ValueKey<String>('voice-call-screen'),
+      color: AppColors.black,
+      child: Column(
+        children: [
+          SizedBox(
+            height: 106,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 22),
+                child: _CallTopButton(
+                  icon: Icons.picture_in_picture_alt_rounded,
+                  tooltip: 'Back to chat',
+                  onPressed: onReturnToChat,
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 18),
+              child: Container(
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: AppColors.grey900,
+                  borderRadius: AppRadius.borderRadius24,
+                ),
+                child: LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints constraints) {
+                    final double topSpacing = (constraints.maxHeight * 0.12)
+                        .clamp(72.0, 116.0)
+                        .toDouble();
+
+                    return Column(
+                      children: [
+                        SizedBox(height: topSpacing),
+                        Text(
+                          participantName,
+                          style: AppTypography.typography2.copyWith(
+                            color: AppColors.white,
+                            fontWeight: AppTypography.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          connected
+                              ? _formatCallDuration(elapsed)
+                              : 'Connecting...',
+                          style: AppTypography.typography5.copyWith(
+                            color: AppColors.white,
+                            fontWeight: AppTypography.medium,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        connected
+                            ? Text(
+                                'Voice Call',
+                                style: AppTypography.subTypography11.copyWith(
+                                  color: AppColors.grey400,
+                                  fontWeight: AppTypography.medium,
+                                ),
+                              )
+                            : const _ConnectingDots(),
+                        SizedBox(height: constraints.maxHeight * 0.08),
+                        Container(
+                          width: 112,
+                          height: 112,
+                          alignment: Alignment.center,
+                          decoration: const BoxDecoration(
+                            color: AppColors.blue100,
+                            borderRadius: BorderRadius.all(
+                              Radius.circular(32),
+                            ),
+                          ),
+                          child: const Icon(
+                            Icons.person_rounded,
+                            size: 64,
+                            color: AppColors.blue50,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(28, 0, 28, bottomPadding + 24),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _CallControlButton(
+                  tooltip: muted ? 'Unmute' : 'Mute',
+                  icon: muted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                  active: muted,
+                  onPressed: onToggleMute,
+                ),
+                const SizedBox(width: 34),
+                _EndCallButton(onPressed: onEndCall),
+                const SizedBox(width: 34),
+                _CallControlButton(
+                  tooltip: audioOutputRoute.label,
+                  icon: audioOutputRoute.icon,
+                  active: audioOutputRoute != _AudioOutputRoute.phone,
+                  onPressed: onChooseAudioOutput,
+                ),
+              ],
             ),
           ),
         ],
@@ -1279,23 +3990,368 @@ final class _ChatTopBar extends StatelessWidget {
   }
 }
 
+final class _ConnectingDots extends StatelessWidget {
+  const _ConnectingDots();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: const [
+        _ConnectingDot(),
+        SizedBox(width: 9),
+        _ConnectingDot(),
+        SizedBox(width: 9),
+        _ConnectingDot(),
+      ],
+    );
+  }
+}
+
+final class _ConnectingDot extends StatelessWidget {
+  const _ConnectingDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox.square(
+      dimension: 10,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: AppColors.blue500,
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
+final class _CallTopButton extends StatelessWidget {
+  const _CallTopButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(icon, size: 32, color: AppColors.white),
+    );
+  }
+}
+
+final class _CallControlButton extends StatelessWidget {
+  const _CallControlButton({
+    required this.tooltip,
+    required this.icon,
+    required this.active,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final bool active;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: SizedBox.square(
+        dimension: 66,
+        child: Material(
+          color: active ? AppColors.grey700 : AppColors.grey800,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: Icon(icon, size: 31, color: AppColors.white),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _EndCallButton extends StatelessWidget {
+  const _EndCallButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'End call',
+      child: SizedBox.square(
+        dimension: 72,
+        child: Material(
+          color: AppColors.red500,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: const Icon(
+              Icons.call_end_rounded,
+              size: 34,
+              color: AppColors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _AudioOutputSheet extends StatelessWidget {
+  const _AudioOutputSheet({required this.selectedRoute});
+
+  final _AudioOutputRoute selectedRoute;
+
+  @override
+  Widget build(BuildContext context) {
+    final double bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+
+    return SafeArea(
+      top: false,
+      child: Material(
+        color: AppColors.white,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(28),
+          topRight: Radius.circular(28),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(18, 12, 18, bottomPadding + 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 44,
+                height: 5,
+                decoration: const BoxDecoration(
+                  color: AppColors.grey300,
+                  borderRadius: BorderRadius.all(Radius.circular(3)),
+                ),
+              ),
+              const SizedBox(height: 22),
+              Text(
+                'Audio Output',
+                style: AppTypography.typography4.copyWith(
+                  color: AppColors.grey900,
+                  fontWeight: AppTypography.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              for (final _AudioOutputRoute route in _AudioOutputRoute.values)
+                _AudioOutputOption(
+                  route: route,
+                  selected: route == selectedRoute,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _AudioOutputOption extends StatelessWidget {
+  const _AudioOutputOption({required this.route, required this.selected});
+
+  final _AudioOutputRoute route;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: AppRadius.borderRadius16,
+        onTap: () {
+          Navigator.of(context).pop(route);
+        },
+        child: SizedBox(
+          height: 58,
+          child: Row(
+            children: [
+              const SizedBox(width: 4),
+              Icon(route.icon, size: 25, color: AppColors.grey700),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  route.label,
+                  style: AppTypography.subTypography10.copyWith(
+                    color: AppColors.grey900,
+                    fontWeight: AppTypography.medium,
+                  ),
+                ),
+              ),
+              if (selected)
+                const Icon(Icons.check_rounded, color: AppColors.blue500),
+              const SizedBox(width: 4),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+extension on _AudioOutputRoute {
+  String get label {
+    return switch (this) {
+      _AudioOutputRoute.phone => 'Phone',
+      _AudioOutputRoute.speaker => 'Speaker',
+      _AudioOutputRoute.bluetooth => 'Bluetooth Headset',
+    };
+  }
+
+  IconData get icon {
+    return switch (this) {
+      _AudioOutputRoute.phone => Icons.phone_in_talk_rounded,
+      _AudioOutputRoute.speaker => Icons.volume_up_rounded,
+      _AudioOutputRoute.bluetooth => Icons.headphones_rounded,
+    };
+  }
+}
+
+String _normalizeSearchQuery(String query) {
+  return query.trim().toLowerCase();
+}
+
+DateTime _dateOnly(DateTime value) {
+  final DateTime local = value.toLocal();
+
+  return DateTime(local.year, local.month, local.day);
+}
+
+DateTime _monthOnly(DateTime value) {
+  final DateTime local = value.toLocal();
+
+  return DateTime(local.year, local.month);
+}
+
+DateTime _addMonths(DateTime value, int delta) {
+  return DateTime(value.year, value.month + delta);
+}
+
+int _daysInMonth(int year, int month) {
+  return DateTime(year, month + 1, 0).day;
+}
+
+String _formatSearchMonth(DateTime month) {
+  return '${month.year}.${month.month.toString().padLeft(2, '0')}';
+}
+
+List<String> _searchableTextSegmentsFor(ChatMessage message) {
+  final List<String> segments = <String>[];
+
+  if (!message.isPhotoMessage &&
+      !message.isFileMessage &&
+      !message.isCallMessage) {
+    if (message.content.trim().isNotEmpty) {
+      segments.add(message.content);
+    }
+
+    final String? translatedContent = message.translatedContent;
+
+    if (translatedContent != null && translatedContent.trim().isNotEmpty) {
+      segments.add(translatedContent);
+    }
+
+    final String? replyContent = message.replyTo?.content;
+
+    if (replyContent != null && replyContent.trim().isNotEmpty) {
+      segments.add(replyContent);
+    }
+  }
+
+  return segments;
+}
+
+bool _messageMatchesSearchQuery(
+  ChatMessage message,
+  String normalizedQuery,
+) {
+  if (normalizedQuery.isEmpty) {
+    return false;
+  }
+
+  for (final String segment in _searchableTextSegmentsFor(message)) {
+    if (segment.toLowerCase().contains(normalizedQuery)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+List<_SearchMatch> _searchMatchesIn(String text, String query) {
+  final String normalizedQuery = _normalizeSearchQuery(query);
+
+  if (normalizedQuery.isEmpty || text.isEmpty) {
+    return const <_SearchMatch>[];
+  }
+
+  final String normalizedText = text.toLowerCase();
+  final List<_SearchMatch> matches = <_SearchMatch>[];
+
+  int start = 0;
+
+  while (start < normalizedText.length) {
+    final int index = normalizedText.indexOf(normalizedQuery, start);
+
+    if (index == -1) {
+      break;
+    }
+
+    final int end = index + normalizedQuery.length;
+    matches.add(_SearchMatch(start: index, end: end));
+    start = end;
+  }
+
+  return List<_SearchMatch>.unmodifiable(matches);
+}
+
 final class _MessageList extends StatefulWidget {
   const _MessageList({
+    required this.initialMessages,
     required this.currentUserId,
     required this.otherParticipantId,
+    required this.otherParticipantName,
+    required this.onDeleteMessage,
     required this.onReplySelected,
     required this.onEditSelected,
     required this.onBackgroundTap,
     required this.onPrepareMessageActions,
+    required this.searchQuery,
+    required this.activeSearchMessageId,
+    required this.topPadding,
+    required this.bottomPadding,
     super.key,
   });
 
+  final List<ChatMessage>? initialMessages;
   final int currentUserId;
   final int otherParticipantId;
+  final String otherParticipantName;
+  final ChatMessageDeleter? onDeleteMessage;
   final _ReplySelectedCallback onReplySelected;
   final _EditSelectedCallback onEditSelected;
   final VoidCallback onBackgroundTap;
   final Future<void> Function() onPrepareMessageActions;
+  final String searchQuery;
+  final int? activeSearchMessageId;
+  final double topPadding;
+  final double bottomPadding;
 
   @override
   State<_MessageList> createState() {
@@ -1345,7 +4401,9 @@ final class _MessageListState extends State<_MessageList> {
 
     _previewNow = DateTime(2026, 7, 1, 12, 51);
 
-    _messages = [
+    _messages = widget.initialMessages != null
+        ? List<ChatMessage>.of(widget.initialMessages!)
+        : [
       ChatMessage(
         id: 1,
         senderId: 2,
@@ -1464,7 +4522,13 @@ final class _MessageListState extends State<_MessageList> {
             '还想和你抱抱睡觉觉 然后亲亲',
         createdAt: DateTime(2026, 7, 1, 12, 50, 45),
       ),
-    ];
+          ];
+
+    if (widget.initialMessages != null && _messages.isNotEmpty) {
+      _nextMessageId =
+          _messages.map((ChatMessage message) => message.id).reduce(math.max) +
+          1;
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _resolveInitialScrollPosition();
@@ -1522,6 +4586,94 @@ final class _MessageListState extends State<_MessageList> {
     _scrollController.dispose();
 
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MessageList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (widget.initialMessages == null ||
+        identical(widget.initialMessages, oldWidget.initialMessages)) {
+      return;
+    }
+
+    _messages = List<ChatMessage>.of(widget.initialMessages!);
+
+    if (_messages.isNotEmpty) {
+      _nextMessageId =
+          _messages.map((ChatMessage message) => message.id).reduce(math.max) +
+          1;
+    }
+  }
+
+  void addMessage(ChatMessage message) {
+    setState(() {
+      final int existingIndex = _messages.indexWhere(
+        (ChatMessage existingMessage) => existingMessage.id == message.id,
+      );
+
+      if (existingIndex == -1) {
+        _messages.add(message);
+      } else {
+        _messages[existingIndex] = message;
+      }
+
+      _messages.sort(_compareMessages);
+      _nextMessageId = math.max(_nextMessageId, message.id + 1);
+    });
+  }
+
+  void addMessages(List<ChatMessage> messages) {
+    if (messages.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      for (final ChatMessage message in messages) {
+        final int existingIndex = _messages.indexWhere(
+          (ChatMessage existingMessage) => existingMessage.id == message.id,
+        );
+
+        if (existingIndex == -1) {
+          _messages.add(message);
+        } else {
+          _messages[existingIndex] = message;
+        }
+
+        _nextMessageId = math.max(_nextMessageId, message.id + 1);
+      }
+
+      _messages.sort(_compareMessages);
+    });
+  }
+
+  bool replaceMessage(ChatMessage message) {
+    final int messageIndex = _messages.indexWhere(
+      (ChatMessage existingMessage) => existingMessage.id == message.id,
+    );
+
+    if (messageIndex == -1) {
+      return false;
+    }
+
+    setState(() {
+      _messages[messageIndex] = message;
+      _messages.sort(_compareMessages);
+    });
+
+    return true;
+  }
+
+  int _compareMessages(ChatMessage first, ChatMessage second) {
+    final int createdAtComparison = first.createdAt.compareTo(
+      second.createdAt,
+    );
+
+    if (createdAtComparison != 0) {
+      return createdAtComparison;
+    }
+
+    return first.id.compareTo(second.id);
   }
 
   void addOutgoingMessage({
@@ -1598,6 +4750,88 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
+  void addOutgoingFileMessage({
+    required String name,
+    required int sizeBytes,
+  }) {
+    setState(() {
+      _previewNow = _previewNow.add(const Duration(minutes: 1));
+
+      _messages.add(
+        ChatMessage(
+          id: _nextMessageId,
+          senderId: widget.currentUserId,
+          recipientId: widget.otherParticipantId,
+          content: '',
+          createdAt: _previewNow,
+          fileAttachment: ChatFileAttachment(
+            name: name,
+            sizeBytes: sizeBytes,
+          ),
+        ),
+      );
+
+      _nextMessageId++;
+    });
+  }
+
+  void addOutgoingVoiceMemoMessage({required Duration duration}) {
+    setState(() {
+      _previewNow = _previewNow.add(const Duration(minutes: 1));
+
+      _messages.add(
+        ChatMessage(
+          id: _nextMessageId,
+          senderId: widget.currentUserId,
+          recipientId: widget.otherParticipantId,
+          content: '',
+          createdAt: _previewNow,
+          voiceMemoAttachment: ChatVoiceMemoAttachment(
+            duration: duration,
+          ),
+        ),
+      );
+
+      _nextMessageId++;
+    });
+  }
+
+  void addOutgoingCallMessage({
+    required ChatCallOutcome outcome,
+    required Duration duration,
+    bool advanceClock = true,
+  }) {
+    setState(() {
+      final DateTime createdAt;
+
+      if (advanceClock) {
+        createdAt = _previewNow.add(const Duration(minutes: 1));
+      } else {
+        final int seconds = math.max(1, duration.inSeconds);
+        createdAt = _previewNow.add(Duration(seconds: seconds));
+      }
+
+      _previewNow = createdAt;
+
+      _messages.add(
+        ChatMessage(
+          id: _nextMessageId,
+          senderId: widget.currentUserId,
+          recipientId: widget.otherParticipantId,
+          content: '',
+          createdAt: createdAt,
+          callAttachment: ChatCallAttachment(
+            kind: ChatCallKind.voice,
+            outcome: outcome,
+            duration: duration,
+          ),
+        ),
+      );
+
+      _nextMessageId++;
+    });
+  }
+
   bool updateMessageContent({required int messageId, required String content}) {
     final int messageIndex = _messages.indexWhere(
       (ChatMessage message) => message.id == messageId,
@@ -1616,6 +4850,70 @@ final class _MessageListState extends State<_MessageList> {
     });
 
     return true;
+  }
+
+  List<int> searchMessageIds(String query) {
+    final String normalizedQuery = _normalizeSearchQuery(query);
+
+    if (normalizedQuery.isEmpty) {
+      return const <int>[];
+    }
+
+    final List<ChatMessage> sortedMessages = List<ChatMessage>.of(_messages)
+      ..sort(
+        (ChatMessage first, ChatMessage second) {
+          final int createdAtComparison = first.createdAt.compareTo(
+            second.createdAt,
+          );
+
+          if (createdAtComparison != 0) {
+            return createdAtComparison;
+          }
+
+          return first.id.compareTo(second.id);
+        },
+      );
+
+    return <int>[
+      for (final ChatMessage message in sortedMessages)
+        if (_messageMatchesSearchQuery(message, normalizedQuery)) message.id,
+    ];
+  }
+
+  Set<DateTime> searchableMessageDates() {
+    return <DateTime>{
+      for (final ChatMessage message in _messages)
+        if (_searchableTextSegmentsFor(message).isNotEmpty)
+          _dateOnly(message.createdAt),
+    };
+  }
+
+  int? firstSearchableMessageIdOnDate(DateTime date) {
+    final DateTime targetDate = _dateOnly(date);
+
+    final List<ChatMessage> sortedMessages = List<ChatMessage>.of(_messages)
+      ..sort(
+        (ChatMessage first, ChatMessage second) {
+          final int createdAtComparison = first.createdAt.compareTo(
+            second.createdAt,
+          );
+
+          if (createdAtComparison != 0) {
+            return createdAtComparison;
+          }
+
+          return first.id.compareTo(second.id);
+        },
+      );
+
+    for (final ChatMessage message in sortedMessages) {
+      if (_dateOnly(message.createdAt) == targetDate &&
+          _searchableTextSegmentsFor(message).isNotEmpty) {
+        return message.id;
+      }
+    }
+
+    return null;
   }
 
   bool get isNearBottom {
@@ -1804,6 +5102,20 @@ final class _MessageListState extends State<_MessageList> {
     return false;
   }
 
+  Future<bool> scrollToSearchMessage(int messageId) {
+    return _scrollToMessage(messageId, alignment: 0.24);
+  }
+
+  Future<bool> scrollToSearchDate(DateTime date) async {
+    final int? messageId = firstSearchableMessageIdOnDate(date);
+
+    if (messageId == null) {
+      return false;
+    }
+
+    return _scrollToMessage(messageId, alignment: 0.24);
+  }
+
   void _flashMessage(int messageId) {
     if (!mounted || _findMessage(messageId) == null) {
       return;
@@ -1976,12 +5288,24 @@ final class _MessageListState extends State<_MessageList> {
     }
   }
 
+  void _handleFileMessageTap(ChatMessage message) {
+    if (message.fileAttachment == null) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text('File preview is not available yet.')),
+      );
+  }
+
   void _retryTranslation(int messageId) {
     unawaited(_startTranslation(messageId));
   }
 
   String _displayedContentFor(ChatMessage message) {
-    if (message.isPhotoMessage) {
+    if (message.isPhotoMessage || message.isFileMessage || message.isCallMessage) {
       return message.replyPreviewContent;
     }
 
@@ -2029,7 +5353,7 @@ final class _MessageListState extends State<_MessageList> {
       isOutgoing: message.senderId == widget.currentUserId,
       createdAt: message.createdAt,
       now: _previewNow,
-      isMedia: message.isPhotoMessage,
+      isMedia: message.isPhotoMessage || message.isFileMessage || message.isCallMessage,
     );
 
     ChatMessageAction? selectedAction;
@@ -2107,12 +5431,26 @@ final class _MessageListState extends State<_MessageList> {
         return;
 
       case ChatMessageAction.unsend:
-        _unsendMessage(message.id);
+        unawaited(_unsendMessage(message.id));
         return;
     }
   }
 
-  void _unsendMessage(int messageId) {
+  Future<void> _unsendMessage(int messageId) async {
+    final ChatMessageDeleter? deleter = widget.onDeleteMessage;
+
+    if (deleter != null) {
+      try {
+        await deleter(messageId: messageId);
+      } catch (_) {
+        return;
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
     if (_highlightedMessageId == messageId) {
       _messageHighlightTimer?.cancel();
     }
@@ -2210,6 +5548,10 @@ final class _MessageListState extends State<_MessageList> {
     return null;
   }
 
+  ChatMessage? findMessage(int messageId) {
+    return _findMessage(messageId);
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<ChatMessageGroup> groups = groupChatMessages(_messages);
@@ -2231,7 +5573,12 @@ final class _MessageListState extends State<_MessageList> {
             key: const ValueKey<String>('message-list'),
             controller: _scrollController,
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, _messageToComposerGap),
+            padding: EdgeInsets.fromLTRB(
+              8,
+              widget.topPadding,
+              8,
+              widget.bottomPadding,
+            ),
             children: _buildTimeline(
               groups: groups,
               latestReadMessageId: latestReadMessageId,
@@ -2285,11 +5632,15 @@ final class _MessageListState extends State<_MessageList> {
         _MessageGroup(
           group: group,
           currentUserId: widget.currentUserId,
+          otherParticipantName: widget.otherParticipantName,
           latestReadMessageId: latestReadMessageId,
           now: _previewNow,
           shownTranslatedMessageIds: _showTranslatedMessageIds,
-          highlightedMessageId: _highlightedMessageId,
+          highlightedMessageId:
+              _highlightedMessageId ?? widget.activeSearchMessageId,
+          searchQuery: widget.searchQuery,
           onIncomingMessageTap: _handleIncomingMessageTap,
+          onFileMessageTap: _handleFileMessageTap,
           onRetryTranslation: _retryTranslation,
           onMessageLongPress: _handleMessageLongPress,
           onReplyQuoteTap: _handleReplyQuoteTap,
@@ -2528,13 +5879,19 @@ extension on ChatMessageAction {
 final class _ReplyMessageBody extends StatelessWidget {
   const _ReplyMessageBody({
     required this.message,
+    required this.currentUserId,
+    required this.otherParticipantName,
     required this.isOutgoing,
+    required this.searchQuery,
     required this.onReplyQuoteTap,
     required this.child,
   });
 
   final ChatMessage message;
+  final int currentUserId;
+  final String otherParticipantName;
   final bool isOutgoing;
+  final String searchQuery;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final Widget child;
 
@@ -2548,9 +5905,9 @@ final class _ReplyMessageBody extends StatelessWidget {
       messageBody = child;
     } else {
       final String authorLabel =
-          replyTo.senderId == ChatStylePreviewScreen._currentUserId
+          replyTo.senderId == currentUserId
           ? 'Me'
-          : ChatStylePreviewScreen._otherParticipantName;
+          : otherParticipantName;
 
       final Color primaryColor = isOutgoing
           ? AppColors.white
@@ -2588,8 +5945,9 @@ final class _ReplyMessageBody extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 1),
-            Text(
-              replyTo.content,
+            _SearchHighlightedText(
+              text: replyTo.content,
+              query: searchQuery,
               key: ValueKey<String>('reply-message-preview-${message.id}'),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
@@ -2709,11 +6067,14 @@ final class _MessageGroup extends StatelessWidget {
   const _MessageGroup({
     required this.group,
     required this.currentUserId,
+    required this.otherParticipantName,
     required this.latestReadMessageId,
     required this.now,
     required this.shownTranslatedMessageIds,
     required this.highlightedMessageId,
+    required this.searchQuery,
     required this.onIncomingMessageTap,
+    required this.onFileMessageTap,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -2722,11 +6083,14 @@ final class _MessageGroup extends StatelessWidget {
 
   final ChatMessageGroup group;
   final int currentUserId;
+  final String otherParticipantName;
   final int? latestReadMessageId;
   final DateTime now;
   final Set<int> shownTranslatedMessageIds;
   final int? highlightedMessageId;
+  final String searchQuery;
   final ValueChanged<int> onIncomingMessageTap;
+  final ValueChanged<ChatMessage> onFileMessageTap;
   final ValueChanged<int> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -2737,9 +6101,13 @@ final class _MessageGroup extends StatelessWidget {
     if (group.senderId == currentUserId) {
       return _OutgoingMessageGroup(
         messages: group.messages,
+        currentUserId: currentUserId,
+        otherParticipantName: otherParticipantName,
         latestReadMessageId: latestReadMessageId,
         now: now,
         highlightedMessageId: highlightedMessageId,
+        searchQuery: searchQuery,
+        onFileMessageTap: onFileMessageTap,
         onMessageLongPress: onMessageLongPress,
         onReplyQuoteTap: onReplyQuoteTap,
         messageBubbleKeyFor: messageBubbleKeyFor,
@@ -2748,9 +6116,13 @@ final class _MessageGroup extends StatelessWidget {
 
     return _IncomingMessageGroup(
       messages: group.messages,
+      currentUserId: currentUserId,
+      otherParticipantName: otherParticipantName,
       shownTranslatedMessageIds: shownTranslatedMessageIds,
       highlightedMessageId: highlightedMessageId,
+      searchQuery: searchQuery,
       onIncomingMessageTap: onIncomingMessageTap,
+      onFileMessageTap: onFileMessageTap,
       onRetryTranslation: onRetryTranslation,
       onMessageLongPress: onMessageLongPress,
       onReplyQuoteTap: onReplyQuoteTap,
@@ -2762,9 +6134,13 @@ final class _MessageGroup extends StatelessWidget {
 final class _IncomingMessageGroup extends StatelessWidget {
   const _IncomingMessageGroup({
     required this.messages,
+    required this.currentUserId,
+    required this.otherParticipantName,
     required this.shownTranslatedMessageIds,
     required this.highlightedMessageId,
+    required this.searchQuery,
     required this.onIncomingMessageTap,
+    required this.onFileMessageTap,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -2772,9 +6148,13 @@ final class _IncomingMessageGroup extends StatelessWidget {
   });
 
   final List<ChatMessage> messages;
+  final int currentUserId;
+  final String otherParticipantName;
   final Set<int> shownTranslatedMessageIds;
   final int? highlightedMessageId;
+  final String searchQuery;
   final ValueChanged<int> onIncomingMessageTap;
+  final ValueChanged<ChatMessage> onFileMessageTap;
   final ValueChanged<int> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -2797,15 +6177,19 @@ final class _IncomingMessageGroup extends StatelessWidget {
               for (int index = 0; index < messages.length; index++) ...[
                 _IncomingMessageRow(
                   message: messages[index],
+                  currentUserId: currentUserId,
+                  otherParticipantName: otherParticipantName,
                   showTail: index == 0,
                   showTime: index == messages.length - 1,
                   showTranslation: shownTranslatedMessageIds.contains(
                     messages[index].id,
                   ),
                   isHighlighted: messages[index].id == highlightedMessageId,
+                  searchQuery: searchQuery,
                   onMessageTap: () {
                     onIncomingMessageTap(messages[index].id);
                   },
+                  onFileMessageTap: onFileMessageTap,
                   onRetryTranslation: () {
                     onRetryTranslation(messages[index].id);
                   },
@@ -2826,11 +6210,15 @@ final class _IncomingMessageGroup extends StatelessWidget {
 final class _IncomingMessageRow extends StatelessWidget {
   const _IncomingMessageRow({
     required this.message,
+    required this.currentUserId,
+    required this.otherParticipantName,
     required this.showTail,
     required this.showTime,
     required this.showTranslation,
     required this.isHighlighted,
+    required this.searchQuery,
     required this.onMessageTap,
+    required this.onFileMessageTap,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -2838,11 +6226,15 @@ final class _IncomingMessageRow extends StatelessWidget {
   });
 
   final ChatMessage message;
+  final int currentUserId;
+  final String otherParticipantName;
   final bool showTail;
   final bool showTime;
   final bool showTranslation;
   final bool isHighlighted;
+  final String searchQuery;
   final VoidCallback onMessageTap;
+  final ValueChanged<ChatMessage> onFileMessageTap;
   final VoidCallback onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -2850,34 +6242,82 @@ final class _IncomingMessageRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bool isFileMessage = message.isFileMessage;
+    final bool isPhotoMessage = message.isPhotoMessage;
+    final bool isCallMessage = message.isCallMessage;
+    final bool isVoiceMemoMessage = message.isVoiceMemoMessage;
     final bool canTapBubble =
-        message.translationStatus == ChatTranslationStatus.none ||
-        message.translationStatus == ChatTranslationStatus.translated;
+        isFileMessage ||
+        (!isPhotoMessage &&
+            !isCallMessage &&
+            !isVoiceMemoMessage &&
+            (message.translationStatus == ChatTranslationStatus.none ||
+                message.translationStatus == ChatTranslationStatus.translated));
 
-    Widget bubble = _MessageBubble(
-      messageId: message.id,
-      measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
-      backgroundColor: AppColors.grey100,
-      direction: _BubbleDirection.incoming,
-      showTail: showTail,
-      isHighlighted: isHighlighted,
-      child: _IncomingMessageContent(
-        message: message,
-        showTranslation: showTranslation,
-        onRetryTranslation: onRetryTranslation,
-        onReplyQuoteTap: onReplyQuoteTap,
-      ),
-    );
+    final Widget content;
 
-    bubble = _MessageCaptureBoundary(
+    if (isPhotoMessage) {
+      content = _PhotoMessage(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
+        attachments: message.photoAttachments,
+        isHighlighted: isHighlighted,
+        pulseAlignment: Alignment.centerLeft,
+      );
+    } else if (isCallMessage) {
+      content = _CallMessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
+        attachment: message.callAttachment!,
+        isHighlighted: isHighlighted,
+      );
+    } else if (isVoiceMemoMessage) {
+      content = _VoiceMemoMessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
+        attachment: message.voiceMemoAttachment!,
+        isHighlighted: isHighlighted,
+      );
+    } else {
+      content = _MessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
+        backgroundColor: AppColors.grey100,
+        direction: _BubbleDirection.incoming,
+        showTail: showTail,
+        isHighlighted: isHighlighted,
+            child: isFileMessage
+                ? _FileMessageContent(
+                    attachment: message.fileAttachment!,
+                    isOutgoing: false,
+                  )
+                : _IncomingMessageContent(
+                    message: message,
+                    currentUserId: currentUserId,
+                    otherParticipantName: otherParticipantName,
+                    showTranslation: showTranslation,
+                    searchQuery: searchQuery,
+                    onRetryTranslation: onRetryTranslation,
+                    onReplyQuoteTap: onReplyQuoteTap,
+              ),
+      );
+    }
+
+    final Widget bubble = _MessageCaptureBoundary(
       key: bubbleInteractionKey,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: canTapBubble ? onMessageTap : null,
+        onTap: canTapBubble
+            ? isFileMessage
+                  ? () {
+                      onFileMessageTap(message);
+                    }
+                  : onMessageTap
+            : null,
         onLongPress: () {
           unawaited(onMessageLongPress(message, bubbleInteractionKey));
         },
-        child: bubble,
+        child: content,
       ),
     );
 
@@ -2900,13 +6340,19 @@ final class _IncomingMessageRow extends StatelessWidget {
 final class _IncomingMessageContent extends StatelessWidget {
   const _IncomingMessageContent({
     required this.message,
+    required this.currentUserId,
+    required this.otherParticipantName,
     required this.showTranslation,
+    required this.searchQuery,
     required this.onRetryTranslation,
     required this.onReplyQuoteTap,
   });
 
   final ChatMessage message;
+  final int currentUserId;
+  final String otherParticipantName;
   final bool showTranslation;
+  final String searchQuery;
   final VoidCallback onRetryTranslation;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
 
@@ -2924,20 +6370,32 @@ final class _IncomingMessageContent extends StatelessWidget {
     final Widget messageText;
 
     if (hasCompletedTranslation) {
+      final bool searchMatchesOriginal = _searchMatchesIn(
+        message.content,
+        searchQuery,
+      ).isNotEmpty;
+      final bool searchMatchesTranslation = _searchMatchesIn(
+        message.translatedContent!,
+        searchQuery,
+      ).isNotEmpty;
+      final bool showSearchTranslation =
+          searchQuery.trim().isNotEmpty &&
+          searchMatchesTranslation &&
+          !searchMatchesOriginal;
+
       messageText = _AnimatedTranslationText(
         messageId: message.id,
         originalContent: message.content,
         translatedContent: message.translatedContent!,
-        showTranslation: showTranslation,
+        showTranslation: showTranslation || showSearchTranslation,
+        searchQuery: searchQuery,
         style: messageTextStyle,
       );
     } else {
-      messageText = Text(
-        message.content,
+      messageText = _SearchHighlightedText(
+        text: message.content,
+        query: searchQuery,
         key: ValueKey<String>('original-message-${message.id}'),
-        softWrap: true,
-        strutStyle: _buildMessageStrutStyle(messageTextStyle),
-        textHeightBehavior: _messageTextHeightBehavior,
         style: messageTextStyle,
       );
     }
@@ -2965,7 +6423,10 @@ final class _IncomingMessageContent extends StatelessWidget {
       alignment: Alignment.topLeft,
       child: _ReplyMessageBody(
         message: message,
+        currentUserId: currentUserId,
+        otherParticipantName: otherParticipantName,
         isOutgoing: false,
+        searchQuery: searchQuery,
         onReplyQuoteTap: onReplyQuoteTap,
         child: messageBody,
       ),
@@ -3052,6 +6513,7 @@ final class _AnimatedTranslationText extends StatelessWidget {
     required this.originalContent,
     required this.translatedContent,
     required this.showTranslation,
+    required this.searchQuery,
     required this.style,
   });
 
@@ -3059,6 +6521,7 @@ final class _AnimatedTranslationText extends StatelessWidget {
   final String originalContent;
   final String translatedContent;
   final bool showTranslation;
+  final String searchQuery;
   final TextStyle style;
 
   @override
@@ -3084,33 +6547,112 @@ final class _AnimatedTranslationText extends StatelessWidget {
       transitionBuilder: (Widget child, Animation<double> animation) {
         return FadeTransition(opacity: animation, child: child);
       },
-      child: Text(
-        displayedContent,
+      child: _SearchHighlightedText(
+        text: displayedContent,
+        query: searchQuery,
         key: ValueKey<String>(displayedKey),
-        softWrap: true,
-        strutStyle: _buildMessageStrutStyle(style),
-        textHeightBehavior: _messageTextHeightBehavior,
         style: style,
       ),
     );
   }
 }
 
+final class _SearchHighlightedText extends StatelessWidget {
+  const _SearchHighlightedText({
+    required this.text,
+    required this.query,
+    required this.style,
+    this.maxLines,
+    this.overflow,
+    super.key,
+  });
+
+  final String text;
+  final String query;
+  final TextStyle style;
+  final int? maxLines;
+  final TextOverflow? overflow;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<_SearchMatch> matches = _searchMatchesIn(text, query);
+
+    if (matches.isEmpty) {
+      return Text(
+        text,
+        maxLines: maxLines,
+        overflow: overflow,
+        softWrap: true,
+        strutStyle: _buildMessageStrutStyle(style),
+        style: style,
+        textHeightBehavior: _messageTextHeightBehavior,
+      );
+    }
+
+    return Text.rich(
+      _buildSpan(matches),
+      maxLines: maxLines,
+      overflow: overflow,
+      softWrap: true,
+      strutStyle: _buildMessageStrutStyle(style),
+      textHeightBehavior: _messageTextHeightBehavior,
+    );
+  }
+
+  TextSpan _buildSpan(List<_SearchMatch> matches) {
+    final List<InlineSpan> children = <InlineSpan>[];
+    int cursor = 0;
+
+    for (final _SearchMatch match in matches) {
+      if (match.start > cursor) {
+        children.add(
+          TextSpan(text: text.substring(cursor, match.start)),
+        );
+      }
+
+      children.add(
+        TextSpan(
+          text: text.substring(match.start, match.end),
+          style: style.copyWith(
+            backgroundColor: AppColors.primary.withAlpha(54),
+          ),
+        ),
+      );
+
+      cursor = match.end;
+    }
+
+    if (cursor < text.length) {
+      children.add(TextSpan(text: text.substring(cursor)));
+    }
+
+    return TextSpan(style: style, children: children);
+  }
+}
+
 final class _OutgoingMessageGroup extends StatelessWidget {
   const _OutgoingMessageGroup({
     required this.messages,
+    required this.currentUserId,
+    required this.otherParticipantName,
     required this.latestReadMessageId,
     required this.now,
     required this.highlightedMessageId,
+    required this.searchQuery,
+    required this.onFileMessageTap,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.messageBubbleKeyFor,
   });
 
   final List<ChatMessage> messages;
+  final int currentUserId;
+  final String otherParticipantName;
   final int? latestReadMessageId;
   final DateTime now;
   final int? highlightedMessageId;
+  final String searchQuery;
+  final ValueChanged<ChatMessage> onFileMessageTap;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final _MessageBubbleKeyFor messageBubbleKeyFor;
@@ -3123,9 +6665,13 @@ final class _OutgoingMessageGroup extends StatelessWidget {
         for (int index = 0; index < messages.length; index++) ...[
           _OutgoingMessageRow(
             message: messages[index],
+            currentUserId: currentUserId,
+            otherParticipantName: otherParticipantName,
             showTail: index == 0,
             showTime: index == messages.length - 1,
             isHighlighted: messages[index].id == highlightedMessageId,
+            searchQuery: searchQuery,
+            onFileMessageTap: onFileMessageTap,
             onMessageLongPress: onMessageLongPress,
             onReplyQuoteTap: onReplyQuoteTap,
             bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
@@ -3154,18 +6700,26 @@ final class _OutgoingMessageGroup extends StatelessWidget {
 final class _OutgoingMessageRow extends StatelessWidget {
   const _OutgoingMessageRow({
     required this.message,
+    required this.currentUserId,
+    required this.otherParticipantName,
     required this.showTail,
     required this.showTime,
     required this.isHighlighted,
+    required this.searchQuery,
+    required this.onFileMessageTap,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.bubbleInteractionKey,
   });
 
   final ChatMessage message;
+  final int currentUserId;
+  final String otherParticipantName;
   final bool showTail;
   final bool showTime;
   final bool isHighlighted;
+  final String searchQuery;
+  final ValueChanged<ChatMessage> onFileMessageTap;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final GlobalKey bubbleInteractionKey;
@@ -3177,33 +6731,67 @@ final class _OutgoingMessageRow extends StatelessWidget {
       fontWeight: AppTypography.regular,
     );
 
-    final Widget content = message.isPhotoMessage
-        ? _OutgoingPhotoMessage(
-            messageId: message.id,
-            measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
-            attachments: message.photoAttachments,
-            isHighlighted: isHighlighted,
-          )
-        : _MessageBubble(
-            messageId: message.id,
-            measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
-            backgroundColor: AppColors.blue500,
-            direction: _BubbleDirection.outgoing,
-            showTail: showTail,
-            isHighlighted: isHighlighted,
-            child: _ReplyMessageBody(
-              message: message,
-              isOutgoing: true,
-              onReplyQuoteTap: onReplyQuoteTap,
-              child: Text(
-                message.content,
-                softWrap: true,
-                strutStyle: _buildMessageStrutStyle(messageTextStyle),
-                textHeightBehavior: _messageTextHeightBehavior,
-                style: messageTextStyle,
-              ),
-            ),
-          );
+    final Widget content;
+
+    if (message.isPhotoMessage) {
+      content = _PhotoMessage(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        attachments: message.photoAttachments,
+        isHighlighted: isHighlighted,
+        pulseAlignment: Alignment.centerRight,
+      );
+    } else if (message.isCallMessage) {
+      content = _CallMessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        attachment: message.callAttachment!,
+        isHighlighted: isHighlighted,
+      );
+    } else if (message.isVoiceMemoMessage) {
+      content = _VoiceMemoMessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        attachment: message.voiceMemoAttachment!,
+        isHighlighted: isHighlighted,
+      );
+    } else if (message.isFileMessage) {
+      content = _MessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        backgroundColor: AppColors.blue500,
+        direction: _BubbleDirection.outgoing,
+        showTail: showTail,
+        isHighlighted: isHighlighted,
+        child: _FileMessageContent(
+          attachment: message.fileAttachment!,
+          isOutgoing: true,
+        ),
+      );
+    } else {
+      content = _MessageBubble(
+        messageId: message.id,
+        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        backgroundColor: AppColors.blue500,
+        direction: _BubbleDirection.outgoing,
+        showTail: showTail,
+        isHighlighted: isHighlighted,
+        child: _ReplyMessageBody(
+          message: message,
+          currentUserId: currentUserId,
+          otherParticipantName: otherParticipantName,
+          isOutgoing: true,
+          searchQuery: searchQuery,
+          onReplyQuoteTap: onReplyQuoteTap,
+          child: _SearchHighlightedText(
+            text: message.content,
+            query: searchQuery,
+            style: messageTextStyle,
+            key: ValueKey<String>('original-message-${message.id}'),
+          ),
+        ),
+      );
+    }
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
@@ -3222,6 +6810,11 @@ final class _OutgoingMessageRow extends StatelessWidget {
             key: bubbleInteractionKey,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
+              onTap: message.isFileMessage
+                  ? () {
+                      onFileMessageTap(message);
+                    }
+                  : null,
               onLongPress: () {
                 unawaited(onMessageLongPress(message, bubbleInteractionKey));
               },
@@ -3234,26 +6827,28 @@ final class _OutgoingMessageRow extends StatelessWidget {
   }
 }
 
-final class _OutgoingPhotoMessage extends StatefulWidget {
-  const _OutgoingPhotoMessage({
+final class _PhotoMessage extends StatefulWidget {
+  const _PhotoMessage({
     required this.messageId,
     required this.attachments,
     required this.isHighlighted,
     required this.measurementKey,
+    required this.pulseAlignment,
   });
 
   final int messageId;
   final List<ChatPhotoAttachment> attachments;
   final bool isHighlighted;
   final Key measurementKey;
+  final Alignment pulseAlignment;
 
   @override
-  State<_OutgoingPhotoMessage> createState() {
-    return _OutgoingPhotoMessageState();
+  State<_PhotoMessage> createState() {
+    return _PhotoMessageState();
   }
 }
 
-final class _OutgoingPhotoMessageState extends State<_OutgoingPhotoMessage>
+final class _PhotoMessageState extends State<_PhotoMessage>
     with SingleTickerProviderStateMixin {
   late final AnimationController _pulseController;
 
@@ -3319,7 +6914,7 @@ final class _OutgoingPhotoMessageState extends State<_OutgoingPhotoMessage>
   }
 
   @override
-  void didUpdateWidget(_OutgoingPhotoMessage oldWidget) {
+  void didUpdateWidget(_PhotoMessage oldWidget) {
     super.didUpdateWidget(oldWidget);
 
     if (widget.isHighlighted && !oldWidget.isHighlighted) {
@@ -3350,7 +6945,7 @@ final class _OutgoingPhotoMessageState extends State<_OutgoingPhotoMessage>
           child: Transform.scale(
             key: ValueKey<String>('message-pulse-${widget.messageId}'),
             scale: _scaleAnimation.value,
-            alignment: Alignment.centerRight,
+            alignment: widget.pulseAlignment,
             child: Stack(
               key: widget.measurementKey,
               children: [
@@ -3555,6 +7150,356 @@ final class _PhotoMessageImage extends StatelessWidget {
       fit: BoxFit.cover,
       gaplessPlayback: true,
       filterQuality: FilterQuality.medium,
+    );
+  }
+}
+
+String _formatFileSize(int bytes) {
+  if (bytes < 1024) {
+    return '$bytes B';
+  }
+
+  final double kb = bytes / 1024;
+
+  if (kb < 1024) {
+    return '${kb.toStringAsFixed(kb < 10 ? 1 : 0)} KB';
+  }
+
+  final double mb = kb / 1024;
+
+  if (mb < 1024) {
+    return '${mb.toStringAsFixed(mb < 10 ? 1 : 0)} MB';
+  }
+
+  final double gb = mb / 1024;
+
+  return '${gb.toStringAsFixed(1)} GB';
+}
+
+final class _CallMessagePresentation {
+  const _CallMessagePresentation({
+    required this.label,
+    required this.icon,
+    required this.iconColor,
+    required this.showsDuration,
+  });
+
+  final String label;
+  final IconData icon;
+  final Color iconColor;
+  final bool showsDuration;
+}
+
+_CallMessagePresentation _callMessagePresentation(
+  ChatCallAttachment attachment,
+) {
+  return switch (attachment.outcome) {
+    ChatCallOutcome.started => const _CallMessagePresentation(
+      label: 'Voice Call',
+      icon: Icons.call_rounded,
+      iconColor: AppColors.green500,
+      showsDuration: false,
+    ),
+    ChatCallOutcome.ended => const _CallMessagePresentation(
+      label: 'End voice call',
+      icon: Icons.call_rounded,
+      iconColor: AppColors.grey900,
+      showsDuration: true,
+    ),
+    ChatCallOutcome.cancelled => const _CallMessagePresentation(
+      label: 'Cancelled',
+      icon: Icons.phone_disabled_rounded,
+      iconColor: AppColors.grey500,
+      showsDuration: false,
+    ),
+    ChatCallOutcome.missed => const _CallMessagePresentation(
+      label: 'Missed Call',
+      icon: Icons.call_missed_rounded,
+      iconColor: AppColors.red500,
+      showsDuration: false,
+    ),
+    ChatCallOutcome.noAnswer => const _CallMessagePresentation(
+      label: 'No Answer',
+      icon: Icons.phone_disabled_rounded,
+      iconColor: AppColors.red500,
+      showsDuration: false,
+    ),
+  };
+}
+
+final class _CallMessageBubble extends StatelessWidget {
+  const _CallMessageBubble({
+    required this.messageId,
+    required this.measurementKey,
+    required this.attachment,
+    required this.isHighlighted,
+  });
+
+  final int messageId;
+  final Key measurementKey;
+  final ChatCallAttachment attachment;
+  final bool isHighlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final _CallMessagePresentation presentation = _callMessagePresentation(
+      attachment,
+    );
+    final String? durationText = presentation.showsDuration
+        ? _formatCallDuration(attachment.duration)
+        : null;
+    final double availableWidth = MediaQuery.sizeOf(context).width * 0.58;
+    final double preferredMinWidth = presentation.showsDuration ? 170 : 150;
+    final double preferredMaxWidth = presentation.showsDuration ? 214 : 182;
+    final double maxWidth = math.min(preferredMaxWidth, availableWidth);
+    final double minWidth = math.min(preferredMinWidth, maxWidth);
+
+    return Transform.scale(
+      key: ValueKey<String>('message-pulse-$messageId'),
+      scale: 1,
+      child: Stack(
+        key: measurementKey,
+        children: [
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: minWidth,
+              maxWidth: maxWidth,
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.white,
+                borderRadius: const BorderRadius.all(Radius.circular(17)),
+                border: Border.all(color: AppColors.grey100),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 11,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      presentation.icon,
+                      size: 28,
+                      color: presentation.iconColor,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: durationText == null
+                          ? Text(
+                              presentation.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.right,
+                              style: AppTypography.subTypography10.copyWith(
+                                color: AppColors.grey900,
+                                fontWeight: AppTypography.medium,
+                              ),
+                            )
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(
+                                  presentation.label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.right,
+                                  style: AppTypography.subTypography10
+                                      .copyWith(
+                                        color: AppColors.grey900,
+                                        fontWeight: AppTypography.medium,
+                                      ),
+                                ),
+                                const SizedBox(height: 1),
+                                Text(
+                                  durationText,
+                                  maxLines: 1,
+                                  textAlign: TextAlign.right,
+                                  style: AppTypography.typography5.copyWith(
+                                    color: AppColors.grey900,
+                                    fontWeight: AppTypography.medium,
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (isHighlighted)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: SizedBox.expand(
+                  key: ValueKey<String>('message-highlight-$messageId'),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+}
+
+final class _VoiceMemoMessageBubble extends StatelessWidget {
+  const _VoiceMemoMessageBubble({
+    required this.messageId,
+    required this.measurementKey,
+    required this.attachment,
+    required this.isHighlighted,
+  });
+
+  final int messageId;
+  final Key measurementKey;
+  final ChatVoiceMemoAttachment attachment;
+  final bool isHighlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final double maxWidth = MediaQuery.sizeOf(context).width * 0.72;
+    final double width = math.min(304, maxWidth);
+
+    return Transform.scale(
+      key: ValueKey<String>('message-pulse-$messageId'),
+      scale: 1,
+      child: Stack(
+        key: measurementKey,
+        children: [
+          SizedBox(
+            width: width,
+            height: 70,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.white,
+                borderRadius: const BorderRadius.all(Radius.circular(17)),
+                border: Border.all(color: AppColors.grey100),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 16, 10),
+                child: Row(
+                  children: [
+                    SizedBox.square(
+                      dimension: 48,
+                      child: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          color: AppColors.grey50,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.play_arrow_rounded,
+                          size: 36,
+                          color: AppColors.grey900,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: SizedBox(
+                        height: 30,
+                        child: _VoiceMemoWaveform(
+                          color: AppColors.grey300,
+                          emphasized: false,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Text(
+                      _formatVoiceMemoBubbleDuration(attachment.duration),
+                      style: AppTypography.typography5.copyWith(
+                        color: AppColors.grey900,
+                        fontWeight: AppTypography.medium,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (isHighlighted)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: SizedBox.expand(
+                  key: ValueKey<String>('message-highlight-$messageId'),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _FileMessageContent extends StatelessWidget {
+  const _FileMessageContent({
+    required this.attachment,
+    required this.isOutgoing,
+  });
+
+  final ChatFileAttachment attachment;
+  final bool isOutgoing;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color iconBackgroundColor = isOutgoing
+        ? AppColors.white.withAlpha(38)
+        : AppColors.blue50;
+    final Color iconColor = isOutgoing ? AppColors.white : AppColors.blue500;
+    final Color titleColor = isOutgoing ? AppColors.white : AppColors.grey900;
+    final Color metadataColor = isOutgoing
+        ? AppColors.white.withAlpha(200)
+        : AppColors.grey500;
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 224),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: iconBackgroundColor,
+              borderRadius: AppRadius.borderRadius8,
+            ),
+            child: Icon(
+              Icons.insert_drive_file_rounded,
+              size: 21,
+              color: iconColor,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  attachment.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTypography.typography6.copyWith(
+                    color: titleColor,
+                    fontWeight: AppTypography.medium,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  _formatFileSize(attachment.sizeBytes),
+                  style: AppTypography.subTypography12.copyWith(
+                    color: metadataColor,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3909,6 +7854,9 @@ final class _ComposerBottomSurface extends StatelessWidget {
     required this.photoLibrary,
     required this.onPhotoPressed,
     required this.onCameraPressed,
+    required this.onCallPressed,
+    required this.onFilePressed,
+    required this.onVoiceMemoPressed,
     required this.onClosePhotoPicker,
     required this.onSendPhotos,
     required this.onPhotoPickerDragStart,
@@ -3927,6 +7875,9 @@ final class _ComposerBottomSurface extends StatelessWidget {
 
   final VoidCallback onPhotoPressed;
   final VoidCallback onCameraPressed;
+  final VoidCallback onCallPressed;
+  final VoidCallback onFilePressed;
+  final VoidCallback onVoiceMemoPressed;
   final VoidCallback onClosePhotoPicker;
   final ChatPhotoSendCallback onSendPhotos;
 
@@ -3969,6 +7920,9 @@ final class _ComposerBottomSurface extends StatelessWidget {
       surface = _ChatAttachmentPanel(
         onPhotoPressed: onPhotoPressed,
         onCameraPressed: onCameraPressed,
+        onCallPressed: onCallPressed,
+        onFilePressed: onFilePressed,
+        onVoiceMemoPressed: onVoiceMemoPressed,
       );
     } else {
       surfaceKey = const ValueKey<String>(
@@ -4052,10 +8006,16 @@ final class _ChatAttachmentPanel extends StatelessWidget {
   const _ChatAttachmentPanel({
     required this.onPhotoPressed,
     required this.onCameraPressed,
+    required this.onCallPressed,
+    required this.onFilePressed,
+    required this.onVoiceMemoPressed,
   });
 
   final VoidCallback onPhotoPressed;
   final VoidCallback onCameraPressed;
+  final VoidCallback onCallPressed;
+  final VoidCallback onFilePressed;
+  final VoidCallback onVoiceMemoPressed;
 
   static const List<_AttachmentPanelActionData> _actions = [
     _AttachmentPanelActionData(
@@ -4080,7 +8040,7 @@ final class _ChatAttachmentPanel extends StatelessWidget {
       id: 'file',
       label: 'File',
       icon: Icons.insert_drive_file_rounded,
-      foregroundColor: AppColors.grey600,
+      foregroundColor: AppColors.grey700,
     ),
     _AttachmentPanelActionData(
       id: 'voice-memo',
@@ -4125,6 +8085,12 @@ final class _ChatAttachmentPanel extends StatelessWidget {
                 onPressed = onPhotoPressed;
               case 'camera':
                 onPressed = onCameraPressed;
+              case 'call':
+                onPressed = onCallPressed;
+              case 'file':
+                onPressed = onFilePressed;
+              case 'voice-memo':
+                onPressed = onVoiceMemoPressed;
               default:
                 onPressed = () {};
             }
@@ -4204,6 +8170,7 @@ final class _MessageComposer extends StatelessWidget {
     required this.onTextChanged,
     required this.onToggleAttachmentPanel,
     required this.onInputTap,
+    required this.onVoiceMemoPressed,
   });
 
   final TextEditingController controller;
@@ -4224,6 +8191,7 @@ final class _MessageComposer extends StatelessWidget {
   final ValueChanged<String> onTextChanged;
   final VoidCallback onToggleAttachmentPanel;
   final VoidCallback onInputTap;
+  final VoidCallback onVoiceMemoPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -4341,7 +8309,7 @@ final class _MessageComposer extends StatelessWidget {
                             iconSize: 25,
                             backgroundColor: AppColors.white,
                             foregroundColor: AppColors.grey700,
-                            onPressed: () {},
+                            onPressed: onVoiceMemoPressed,
                           ),
                   ),
                 ),

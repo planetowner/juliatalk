@@ -37,6 +37,8 @@ dependencies:
   http: 1.6.0
   photo_manager: 3.9.0
   image_picker: 1.1.2
+  file_picker: ^8.1.0
+  web_socket_channel: ^3.0.3
 
 dev_dependencies:
   flutter_test:

@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -58,25 +59,74 @@ class Base(DeclarativeBase):
     pass
 
 
-RESET_DATABASE_ENV_NAME = "RESET_DATABASE"
+SEED_USERS_ENV_NAME = "SEED_USERS"
 
 
-async def reset_database_if_requested(
+async def ensure_seed_users(
     connection: AsyncConnection,
 ) -> None:
-    token = os.getenv(RESET_DATABASE_ENV_NAME, "").strip()
+    raw = os.getenv(SEED_USERS_ENV_NAME, "").strip()
 
-    if not token:
+    if not raw:
         return
 
-    marker_path = DATABASE_PATH.parent / f".db_reset_{token}"
-
-    if marker_path.exists():
+    try:
+        users = json.loads(raw)
+    except json.JSONDecodeError:
         return
 
-    await connection.run_sync(Base.metadata.drop_all)
+    if not isinstance(users, list):
+        return
 
-    marker_path.write_text("done")
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+
+        username = user.get("username")
+        password_hash = user.get("password_hash")
+
+        if not username or not password_hash:
+            continue
+
+        existing = (
+            await connection.execute(
+                text(
+                    "SELECT id FROM users WHERE username = :username"
+                ),
+                {"username": username},
+            )
+        ).first()
+
+        if existing is not None:
+            continue
+
+        columns = {
+            "username": username,
+            "display_name": user.get("display_name", username),
+            "password_hash": password_hash,
+            "token_version": user.get("token_version", 0),
+            "preferred_language": user.get(
+                "preferred_language", "ko"
+            ),
+        }
+
+        user_id = user.get("id")
+
+        if isinstance(user_id, int):
+            columns["id"] = user_id
+
+        column_names = ", ".join(columns)
+        placeholders = ", ".join(
+            f":{name}" for name in columns
+        )
+
+        await connection.execute(
+            text(
+                f"INSERT INTO users ({column_names}) "
+                f"VALUES ({placeholders})"
+            ),
+            columns,
+        )
 
 
 async def ensure_database_schema(

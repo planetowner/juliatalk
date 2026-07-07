@@ -58,6 +58,27 @@ class Base(DeclarativeBase):
     pass
 
 
+RESET_DATABASE_ENV_NAME = "RESET_DATABASE"
+
+
+async def reset_database_if_requested(
+    connection: AsyncConnection,
+) -> None:
+    token = os.getenv(RESET_DATABASE_ENV_NAME, "").strip()
+
+    if not token:
+        return
+
+    marker_path = DATABASE_PATH.parent / f".db_reset_{token}"
+
+    if marker_path.exists():
+        return
+
+    await connection.run_sync(Base.metadata.drop_all)
+
+    marker_path.write_text("done")
+
+
 async def ensure_database_schema(
     connection: AsyncConnection,
 ) -> None:

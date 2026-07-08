@@ -430,9 +430,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
 
     if (message.senderId == widget.otherUser.id) {
       unawaited(
-        widget.chatApi.markConversationAsRead(
-          otherUserId: widget.otherUser.id,
-        ),
+        widget.chatApi.markConversationAsRead(otherUserId: widget.otherUser.id),
       );
     }
   }
@@ -587,9 +585,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   }
 
   int _compareMessages(ChatMessage first, ChatMessage second) {
-    final int createdAtComparison = first.createdAt.compareTo(
-      second.createdAt,
-    );
+    final int createdAtComparison = first.createdAt.compareTo(second.createdAt);
 
     if (createdAtComparison != 0) {
       return createdAtComparison;
@@ -714,9 +710,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     return message;
   }
 
-  Future<void> _deleteMessage({
-    required String messageId,
-  }) async {
+  Future<void> _deleteMessage({required String messageId}) async {
     await widget.chatApi.deleteMessage(messageId: messageId);
 
     if (mounted) {
@@ -759,6 +753,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
       child: ChatConversationView(
         initialMessages: _messages,
         currentUserId: widget.currentUser.id,
+        currentUserName: widget.currentUser.displayName,
         otherParticipantId: widget.otherUser.id,
         otherParticipantName: widget.otherUser.displayName,
         onSendTextMessage: _sendTextMessage,
@@ -785,20 +780,13 @@ final class _ChatUserAvatar extends StatelessWidget {
         color: AppColors.blue100,
         borderRadius: BorderRadius.circular(16),
       ),
-      child: const Icon(
-        Icons.person_rounded,
-        color: AppColors.white,
-        size: 30,
-      ),
+      child: const Icon(Icons.person_rounded, color: AppColors.white, size: 30),
     );
   }
 }
 
 final class _ChatLoadingError extends StatelessWidget {
-  const _ChatLoadingError({
-    required this.message,
-    required this.onRetry,
-  });
+  const _ChatLoadingError({required this.message, required this.onRetry});
 
   final String message;
   final VoidCallback onRetry;

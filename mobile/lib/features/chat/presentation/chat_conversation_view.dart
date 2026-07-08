@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:photo_manager/photo_manager.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
@@ -29,6 +30,8 @@ const double _attachmentPanelFallbackHeight = 302;
 
 const Duration _bottomSurfaceAnimationDuration = Duration(milliseconds: 180);
 
+const Duration _outgoingCallNoAnswerTimeout = Duration(seconds: 30);
+
 typedef _MessageLongPressCallback =
     Future<void> Function(ChatMessage message, GlobalKey bubbleKey);
 
@@ -44,6 +47,9 @@ typedef _ReplySelectedCallback =
     void Function(ChatMessage message, String displayedContent);
 
 typedef _EditSelectedCallback = void Function(ChatMessage message);
+
+typedef _PhotoMessageTapCallback =
+    void Function(ChatMessage message, int photoIndex);
 
 typedef ChatTextMessageSender =
     Future<ChatMessage> Function({
@@ -81,8 +87,7 @@ typedef ChatTextMessageEditor =
 
 typedef ChatMessageTranslator = Future<String?> Function(ChatMessage message);
 
-typedef ChatMessageDeleter =
-    Future<void> Function({required String messageId});
+typedef ChatMessageDeleter = Future<void> Function({required String messageId});
 
 enum _CallNowAction { voice, video }
 
@@ -185,6 +190,7 @@ final class ChatConversationView extends StatefulWidget {
     this.photoLibrary,
     this.initialMessages,
     this.currentUserId = _currentUserId,
+    this.currentUserName = _currentUserName,
     this.otherParticipantId = _otherParticipantId,
     this.otherParticipantName = _otherParticipantName,
     this.onSendTextMessage,
@@ -203,6 +209,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatPhotoLibrary? photoLibrary;
   final List<ChatMessage>? initialMessages;
   final String currentUserId;
+  final String currentUserName;
   final String otherParticipantId;
   final String otherParticipantName;
   final ChatTextMessageSender? onSendTextMessage;
@@ -218,6 +225,7 @@ final class ChatConversationView extends StatefulWidget {
   final int nextLocalMessageId;
 
   static const String _currentUserId = '1';
+  static const String _currentUserName = 'Me';
   static const String _otherParticipantId = '2';
   static const String _otherParticipantName = 'Lia';
   static const Color _chatBackgroundColor = AppColors.white;
@@ -248,6 +256,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   String? _editingOriginalContent;
 
   Timer? _keyboardTransitionTimer;
+  Timer? _keyboardDismissSettleTimer;
   Timer? _composerResizeTimer;
   Timer? _bottomSurfaceHoldTimer;
   Timer? _voiceCallConnectionTimer;
@@ -255,6 +264,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   bool _keyboardTransitionActive = false;
   bool _pinBottomDuringComposerResize = false;
+  bool _pinBottomAfterKeyboardDismiss = false;
+  bool _postSendBottomSettlePending = false;
 
   bool _attachmentPanelOpen = false;
   bool _photoPickerOpen = false;
@@ -266,6 +277,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   double? _photoPickerHeight;
 
   double _lastKeyboardHeight = _attachmentPanelFallbackHeight;
+  double _observedKeyboardHeight = 0;
 
   double? _heldBottomSurfaceHeight;
 
@@ -299,6 +311,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _messageFocusNode.removeListener(_handleMessageFocusChanged);
 
     _keyboardTransitionTimer?.cancel();
+    _keyboardDismissSettleTimer?.cancel();
     _composerResizeTimer?.cancel();
     _bottomSurfaceHoldTimer?.cancel();
     _voiceCallConnectionTimer?.cancel();
@@ -355,7 +368,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
       // 키보드가 나타나는 동안 작성창 높이가 먼저 내려가지 않도록
       // 기존 첨부 패널 높이를 잠시 유지한다.
-      _heldBottomSurfaceHeight = _lastKeyboardHeight;
+      _heldBottomSurfaceHeight = math.max(
+        _lastKeyboardHeight,
+        _attachmentPanelFallbackHeight,
+      );
     });
 
     _scheduleBottomSurfaceHoldRelease();
@@ -373,7 +389,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _bottomSurfaceHoldTimer?.cancel();
 
     setState(() {
-      if (keyboardHeight > 0.5) {
+      if (keyboardHeight > _attachmentPanelFallbackHeight * 0.5) {
         _lastKeyboardHeight = keyboardHeight;
       }
 
@@ -431,8 +447,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     final double attachmentPanelHeight = math.max(
-      _lastKeyboardHeight,
-      MediaQuery.viewPaddingOf(context).bottom,
+      _attachmentPanelFallbackHeight,
+      math.max(_lastKeyboardHeight, MediaQuery.viewPaddingOf(context).bottom),
     );
 
     // Photo 선택기의 최초 높이는 임의 비율이 아니라
@@ -671,6 +687,38 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     _dismissComposerAfterAttachmentSend();
+  }
+
+  void _openPhotoViewer(ChatMessage message, int initialIndex) {
+    final List<ChatPhotoAttachment> attachments = message.photoAttachments;
+
+    if (attachments.isEmpty) {
+      return;
+    }
+
+    _dismissComposerSurface();
+
+    final int resolvedInitialIndex = initialIndex.clamp(
+      0,
+      attachments.length - 1,
+    );
+
+    final String senderName = message.senderId == widget.currentUserId
+        ? widget.currentUserName
+        : widget.otherParticipantName;
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return _PhotoViewerScreen(
+            attachments: attachments,
+            initialIndex: resolvedInitialIndex,
+            senderName: senderName,
+            sentAt: message.createdAt,
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _openCamera() async {
@@ -926,10 +974,19 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     final double keyboardHeight = _currentKeyboardHeight();
+    final double previousKeyboardHeight = _observedKeyboardHeight;
 
-    // 첨부 패널을 띄운 채 키보드가 내려가는 중간 높이는
-    // 저장하지 않는다. 완전히 열린 키보드 높이만 사용한다.
-    if (keyboardHeight > 0.5 && !_attachmentPanelOpen) {
+    _observedKeyboardHeight = keyboardHeight;
+
+    // 키보드가 내려가는 중간 높이를 저장하면 첨부 패널이
+    // safe area 높이만큼만 열릴 수 있다. 올라가거나 열린 상태의
+    // 유효한 높이만 기억한다.
+    final bool keyboardIsOpeningOrStable =
+        keyboardHeight >= previousKeyboardHeight - 0.5;
+
+    if (keyboardHeight > 0.5 &&
+        !_attachmentPanelOpen &&
+        keyboardIsOpeningOrStable) {
       _lastKeyboardHeight = keyboardHeight;
     }
 
@@ -943,6 +1000,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         _heldBottomSurfaceHeight = null;
       });
     }
+
+    _handleKeyboardDismissViewportChange(
+      previousKeyboardHeight: previousKeyboardHeight,
+      keyboardHeight: keyboardHeight,
+    );
 
     if (!_keyboardTransitionActive) {
       return;
@@ -1009,6 +1071,101 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       }
 
       unawaited(messageListState.scrollToBottom(animate: animate));
+    });
+  }
+
+  void _markPostSendBottomSettlePending() {
+    _postSendBottomSettlePending = true;
+    _pinBottomAfterKeyboardDismiss = true;
+  }
+
+  void _handleKeyboardDismissViewportChange({
+    required double previousKeyboardHeight,
+    required double keyboardHeight,
+  }) {
+    final bool keyboardWasVisible = previousKeyboardHeight > 0.5;
+
+    final bool keyboardIsClosing =
+        keyboardWasVisible && keyboardHeight < previousKeyboardHeight - 0.5;
+
+    final bool keyboardIsClosedAfterSend =
+        _postSendBottomSettlePending && keyboardHeight <= 0.5;
+
+    if (!keyboardIsClosing && !keyboardIsClosedAfterSend) {
+      if (keyboardHeight > previousKeyboardHeight + 0.5) {
+        _pinBottomAfterKeyboardDismiss = false;
+        _keyboardDismissSettleTimer?.cancel();
+        _keyboardDismissSettleTimer = null;
+      }
+
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    final bool shouldKeepBottomPinned =
+        _postSendBottomSettlePending ||
+        _pinBottomAfterKeyboardDismiss ||
+        (messageListState?.isNearBottom ?? false);
+
+    if (!shouldKeepBottomPinned) {
+      return;
+    }
+
+    _pinBottomAfterKeyboardDismiss = true;
+    _scheduleKeyboardDismissBottomSettle();
+  }
+
+  void _scheduleKeyboardDismissBottomSettle() {
+    _keyboardDismissSettleTimer?.cancel();
+
+    final _MessageListState? currentMessageListState =
+        _messageListKey.currentState;
+
+    if (currentMessageListState != null) {
+      unawaited(currentMessageListState.scrollToBottom(animate: false));
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pinBottomAfterKeyboardDismiss) {
+        return;
+      }
+
+      final _MessageListState? messageListState = _messageListKey.currentState;
+
+      if (messageListState == null) {
+        return;
+      }
+
+      unawaited(messageListState.scrollToBottom(animate: false));
+    });
+
+    _keyboardDismissSettleTimer = Timer(const Duration(milliseconds: 180), () {
+      if (!mounted) {
+        return;
+      }
+
+      final _MessageListState? messageListState = _messageListKey.currentState;
+
+      if (messageListState != null) {
+        unawaited(messageListState.scrollToBottom(animate: false));
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+
+        final _MessageListState? settledMessageListState =
+            _messageListKey.currentState;
+
+        if (settledMessageListState != null) {
+          unawaited(settledMessageListState.scrollToBottom(animate: false));
+        }
+
+        _pinBottomAfterKeyboardDismiss = false;
+        _postSendBottomSettlePending = false;
+      });
     });
   }
 
@@ -1144,8 +1301,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     final _MessageListState? messageListState = _messageListKey.currentState;
     final List<String> resultMessageIds =
-        messageListState?.searchMessageIds(_searchQuery) ??
-        const <String>[];
+        messageListState?.searchMessageIds(_searchQuery) ?? const <String>[];
 
     final int? nextIndex = resultMessageIds.isEmpty ? null : 0;
 
@@ -1297,9 +1453,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     });
 
     if (_hasSearchQuery && _searchResultMessageIds.isNotEmpty) {
-      final int matchingIndex = _searchResultMessageIds.indexWhere((
-        String id,
-      ) {
+      final int matchingIndex = _searchResultMessageIds.indexWhere((String id) {
         final ChatMessage? message = messageListState.findMessage(id);
 
         return message != null &&
@@ -1564,6 +1718,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _stopKeyboardTransition();
     _stopComposerResizePin();
+    setState(_markPostSendBottomSettlePending);
 
     final ChatTextMessageSender? sender = widget.onSendTextMessage;
 
@@ -1582,6 +1737,13 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
         messageListState.addMessage(message);
       } catch (_) {
+        if (mounted) {
+          setState(() {
+            _pinBottomAfterKeyboardDismiss = false;
+            _postSendBottomSettlePending = false;
+          });
+        }
+
         _showChatOperationFailure('Message sending failed.');
         return;
       }
@@ -1669,23 +1831,36 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _audioOutputRoute = _AudioOutputRoute.speaker;
     });
 
-    _voiceCallConnectionTimer = Timer(const Duration(milliseconds: 1600), () {
-      if (!mounted || !_hasActiveVoiceCall || _voiceCallConnected) {
-        return;
-      }
+    _voiceCallConnectionTimer = Timer(
+      _outgoingCallNoAnswerTimeout,
+      _handleOutgoingCallNoAnswer,
+    );
+  }
 
-      setState(() {
-        _voiceCallConnectedAt = DateTime.now();
-      });
+  void _handleOutgoingCallNoAnswer() {
+    if (!mounted || !_hasActiveVoiceCall || _voiceCallConnected) {
+      return;
+    }
+
+    _voiceCallConnectionTimer?.cancel();
+    _voiceCallConnectionTimer = null;
+    _voiceCallTicker?.cancel();
+
+    setState(() {
+      _voiceCallStartedAt = null;
+      _voiceCallConnectedAt = null;
+      _voiceCallScreenVisible = false;
+      _voiceCallMuted = false;
+      _audioOutputRoute = _AudioOutputRoute.speaker;
     });
 
-    _voiceCallTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || !_hasActiveVoiceCall) {
-        return;
-      }
-
-      setState(() {});
-    });
+    unawaited(
+      _addCallMessage(
+        outcome: ChatCallOutcome.noAnswer,
+        duration: Duration.zero,
+        advanceClock: true,
+      ),
+    );
   }
 
   Future<void> _addCallMessage({
@@ -1810,7 +1985,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
             ? ChatCallOutcome.ended
             : ChatCallOutcome.cancelled,
         duration: duration,
-        advanceClock: false,
+        advanceClock: true,
       ),
     );
   }
@@ -1856,13 +2031,14 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     final double systemBottomPadding = mediaQuery.viewPadding.bottom;
 
-    final double passiveBottomHeight = keyboardHeight > 0.5
-        ? keyboardHeight
-        : systemBottomPadding;
+    final double passiveBottomHeight = math.max(
+      keyboardHeight,
+      systemBottomPadding,
+    );
 
     final double attachmentPanelHeight = math.max(
-      _lastKeyboardHeight,
-      systemBottomPadding,
+      _attachmentPanelFallbackHeight,
+      math.max(_lastKeyboardHeight, systemBottomPadding),
     );
 
     final double resolvedPhotoPickerHeight =
@@ -1918,6 +2094,13 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     final double messageListTopPadding = messageListHeaderInset + 8;
 
+    final bool pinMessageListToBottom =
+        !_searchModeActive &&
+        (_keyboardTransitionActive ||
+            _pinBottomDuringComposerResize ||
+            _pinBottomAfterKeyboardDismiss ||
+            _postSendBottomSettlePending);
+
     final bool animateBottomSurfaceHeight =
         !_photoPickerDragging &&
         (_photoPickerOpen ||
@@ -1948,6 +2131,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       otherParticipantName: widget.otherParticipantName,
                       onTranslateMessage: widget.onTranslateMessage,
                       onDeleteMessage: widget.onDeleteMessage,
+                      onPhotoMessageTap: _openPhotoViewer,
                       translationDelay: widget.translationDelay,
                       initialClock: widget.initialClock,
                       nextLocalMessageId: widget.nextLocalMessageId,
@@ -1961,6 +2145,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       activeSearchMessageId: _currentSearchMessageId,
                       topPadding: messageListTopPadding,
                       bottomPadding: messageListBottomPadding,
+                      pinToBottom: pinMessageListToBottom,
                     ),
                   ),
                   if (!_searchModeActive)
@@ -4313,6 +4498,7 @@ final class _MessageList extends StatefulWidget {
     required this.otherParticipantName,
     required this.onTranslateMessage,
     required this.onDeleteMessage,
+    required this.onPhotoMessageTap,
     required this.translationDelay,
     required this.initialClock,
     required this.nextLocalMessageId,
@@ -4324,6 +4510,7 @@ final class _MessageList extends StatefulWidget {
     required this.activeSearchMessageId,
     required this.topPadding,
     required this.bottomPadding,
+    required this.pinToBottom,
     super.key,
   });
 
@@ -4333,6 +4520,7 @@ final class _MessageList extends StatefulWidget {
   final String otherParticipantName;
   final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageDeleter? onDeleteMessage;
+  final _PhotoMessageTapCallback onPhotoMessageTap;
   final Duration translationDelay;
   final DateTime? initialClock;
   final int nextLocalMessageId;
@@ -4344,6 +4532,7 @@ final class _MessageList extends StatefulWidget {
   final String? activeSearchMessageId;
   final double topPadding;
   final double bottomPadding;
+  final bool pinToBottom;
 
   @override
   State<_MessageList> createState() {
@@ -4447,6 +4636,14 @@ final class _MessageListState extends State<_MessageList> {
   void didUpdateWidget(covariant _MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    if (widget.pinToBottom && !oldWidget.pinToBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(scrollToBottom(animate: false));
+        }
+      });
+    }
+
     if (identical(widget.initialMessages, oldWidget.initialMessages)) {
       return;
     }
@@ -4454,7 +4651,6 @@ final class _MessageListState extends State<_MessageList> {
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
-
   }
 
   void addMessage(ChatMessage message) {
@@ -4489,7 +4685,6 @@ final class _MessageListState extends State<_MessageList> {
         } else {
           _messages[existingIndex] = message;
         }
-
       }
 
       _messages.sort(_compareMessages);
@@ -4541,7 +4736,6 @@ final class _MessageListState extends State<_MessageList> {
           replyTo: replyTo,
         ),
       );
-
     });
   }
 
@@ -4608,7 +4802,6 @@ final class _MessageListState extends State<_MessageList> {
           fileAttachment: ChatFileAttachment(name: name, sizeBytes: sizeBytes),
         ),
       );
-
     });
   }
 
@@ -4627,7 +4820,6 @@ final class _MessageListState extends State<_MessageList> {
           voiceMemoAttachment: ChatVoiceMemoAttachment(duration: duration),
         ),
       );
-
     });
   }
 
@@ -4654,7 +4846,6 @@ final class _MessageListState extends State<_MessageList> {
           ),
         ),
       );
-
     });
   }
 
@@ -4776,6 +4967,28 @@ final class _MessageListState extends State<_MessageList> {
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
     );
+  }
+
+  bool _handleScrollMetricsChanged(ScrollMetricsNotification notification) {
+    if (!widget.pinToBottom || !_scrollController.hasClients) {
+      return false;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+
+    if (!position.hasContentDimensions) {
+      return false;
+    }
+
+    final double targetOffset = position.maxScrollExtent;
+
+    if ((position.pixels - targetOffset).abs() < 0.5) {
+      return false;
+    }
+
+    _scrollController.jumpTo(targetOffset);
+
+    return false;
   }
 
   RenderObject? _messageRenderObject(String messageId) {
@@ -5409,19 +5622,22 @@ final class _MessageListState extends State<_MessageList> {
           key: const ValueKey<String>('message-list-tap-area'),
           behavior: HitTestBehavior.translucent,
           onTap: widget.onBackgroundTap,
-          child: ListView(
-            key: const ValueKey<String>('message-list'),
-            controller: _scrollController,
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            padding: EdgeInsets.fromLTRB(
-              8,
-              widget.topPadding,
-              8,
-              widget.bottomPadding,
-            ),
-            children: _buildTimeline(
-              groups: groups,
-              latestReadMessageId: latestReadMessageId,
+          child: NotificationListener<ScrollMetricsNotification>(
+            onNotification: _handleScrollMetricsChanged,
+            child: ListView(
+              key: const ValueKey<String>('message-list'),
+              controller: _scrollController,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: EdgeInsets.fromLTRB(
+                8,
+                widget.topPadding,
+                8,
+                widget.bottomPadding,
+              ),
+              children: _buildTimeline(
+                groups: groups,
+                latestReadMessageId: latestReadMessageId,
+              ),
             ),
           ),
         ),
@@ -5482,6 +5698,7 @@ final class _MessageListState extends State<_MessageList> {
           canRequestTranslation: widget.onTranslateMessage != null,
           onIncomingMessageTap: _handleIncomingMessageTap,
           onFileMessageTap: _handleFileMessageTap,
+          onPhotoMessageTap: widget.onPhotoMessageTap,
           onRetryTranslation: _retryTranslation,
           onMessageLongPress: _handleMessageLongPress,
           onReplyQuoteTap: _handleReplyQuoteTap,
@@ -5916,6 +6133,7 @@ final class _MessageGroup extends StatelessWidget {
     required this.canRequestTranslation,
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
+    required this.onPhotoMessageTap,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -5933,6 +6151,7 @@ final class _MessageGroup extends StatelessWidget {
   final bool canRequestTranslation;
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
+  final _PhotoMessageTapCallback onPhotoMessageTap;
   final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -5950,6 +6169,7 @@ final class _MessageGroup extends StatelessWidget {
         highlightedMessageId: highlightedMessageId,
         searchQuery: searchQuery,
         onFileMessageTap: onFileMessageTap,
+        onPhotoMessageTap: onPhotoMessageTap,
         onMessageLongPress: onMessageLongPress,
         onReplyQuoteTap: onReplyQuoteTap,
         messageBubbleKeyFor: messageBubbleKeyFor,
@@ -5966,6 +6186,7 @@ final class _MessageGroup extends StatelessWidget {
       canRequestTranslation: canRequestTranslation,
       onIncomingMessageTap: onIncomingMessageTap,
       onFileMessageTap: onFileMessageTap,
+      onPhotoMessageTap: onPhotoMessageTap,
       onRetryTranslation: onRetryTranslation,
       onMessageLongPress: onMessageLongPress,
       onReplyQuoteTap: onReplyQuoteTap,
@@ -5985,6 +6206,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.canRequestTranslation,
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
+    required this.onPhotoMessageTap,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -6000,6 +6222,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
   final bool canRequestTranslation;
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
+  final _PhotoMessageTapCallback onPhotoMessageTap;
   final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -6036,6 +6259,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
                     onIncomingMessageTap(messages[index].id);
                   },
                   onFileMessageTap: onFileMessageTap,
+                  onPhotoMessageTap: onPhotoMessageTap,
                   onRetryTranslation: () {
                     onRetryTranslation(messages[index].id);
                   },
@@ -6066,6 +6290,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.canRequestTranslation,
     required this.onMessageTap,
     required this.onFileMessageTap,
+    required this.onPhotoMessageTap,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -6083,6 +6308,7 @@ final class _IncomingMessageRow extends StatelessWidget {
   final bool canRequestTranslation;
   final VoidCallback onMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
+  final _PhotoMessageTapCallback onPhotoMessageTap;
   final VoidCallback onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -6112,6 +6338,9 @@ final class _IncomingMessageRow extends StatelessWidget {
         attachments: message.photoAttachments,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerLeft,
+        onPhotoTap: (int photoIndex) {
+          onPhotoMessageTap(message, photoIndex);
+        },
       );
     } else if (isCallMessage) {
       content = _CallMessageBubble(
@@ -6492,6 +6721,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
     required this.highlightedMessageId,
     required this.searchQuery,
     required this.onFileMessageTap,
+    required this.onPhotoMessageTap,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.messageBubbleKeyFor,
@@ -6505,6 +6735,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
   final String? highlightedMessageId;
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
+  final _PhotoMessageTapCallback onPhotoMessageTap;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final _MessageBubbleKeyFor messageBubbleKeyFor;
@@ -6524,6 +6755,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
             isHighlighted: messages[index].id == highlightedMessageId,
             searchQuery: searchQuery,
             onFileMessageTap: onFileMessageTap,
+            onPhotoMessageTap: onPhotoMessageTap,
             onMessageLongPress: onMessageLongPress,
             onReplyQuoteTap: onReplyQuoteTap,
             bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
@@ -6559,6 +6791,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
     required this.isHighlighted,
     required this.searchQuery,
     required this.onFileMessageTap,
+    required this.onPhotoMessageTap,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.bubbleInteractionKey,
@@ -6572,6 +6805,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
   final bool isHighlighted;
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
+  final _PhotoMessageTapCallback onPhotoMessageTap;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final GlobalKey bubbleInteractionKey;
@@ -6592,6 +6826,9 @@ final class _OutgoingMessageRow extends StatelessWidget {
         attachments: message.photoAttachments,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerRight,
+        onPhotoTap: (int photoIndex) {
+          onPhotoMessageTap(message, photoIndex);
+        },
       );
     } else if (message.isCallMessage) {
       content = _CallMessageBubble(
@@ -6686,6 +6923,7 @@ final class _PhotoMessage extends StatefulWidget {
     required this.isHighlighted,
     required this.measurementKey,
     required this.pulseAlignment,
+    required this.onPhotoTap,
   });
 
   final String messageId;
@@ -6693,6 +6931,7 @@ final class _PhotoMessage extends StatefulWidget {
   final bool isHighlighted;
   final Key measurementKey;
   final Alignment pulseAlignment;
+  final ValueChanged<int> onPhotoTap;
 
   @override
   State<_PhotoMessage> createState() {
@@ -6784,7 +7023,10 @@ final class _PhotoMessageState extends State<_PhotoMessage>
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _pulseController,
-      child: _PhotoMessageCollage(attachments: widget.attachments),
+      child: _PhotoMessageCollage(
+        attachments: widget.attachments,
+        onPhotoTap: widget.onPhotoTap,
+      ),
       builder: (BuildContext context, Widget? child) {
         final double progress = _pulseController.value;
 
@@ -6838,13 +7080,25 @@ final class _PhotoMessageState extends State<_PhotoMessage>
 }
 
 final class _PhotoMessageCollage extends StatelessWidget {
-  const _PhotoMessageCollage({required this.attachments});
+  const _PhotoMessageCollage({
+    required this.attachments,
+    required this.onPhotoTap,
+  });
 
   final List<ChatPhotoAttachment> attachments;
+  final ValueChanged<int> onPhotoTap;
+
+  static const double _spacing = 2;
+
+  static const List<int> _tenPhotoRows = <int>[3, 3, 2, 2];
 
   @override
   Widget build(BuildContext context) {
     final double width = math.min(260, MediaQuery.sizeOf(context).width * 0.68);
+
+    if (attachments.isEmpty) {
+      return const SizedBox.shrink();
+    }
 
     if (attachments.length == 1) {
       final ChatPhotoAttachment attachment = attachments.first;
@@ -6862,123 +7116,193 @@ final class _PhotoMessageCollage extends StatelessWidget {
         child: SizedBox(
           width: width,
           height: height,
-          child: _PhotoMessageImage(attachment: attachment, itemIndex: 0),
-        ),
-      );
-    }
-
-    if (attachments.length == 2) {
-      return ClipRRect(
-        borderRadius: const BorderRadius.all(Radius.circular(14)),
-        child: SizedBox(
-          width: width,
-          height: width * 0.66,
-          child: Row(
-            children: [
-              Expanded(
-                child: _PhotoMessageImage(
-                  attachment: attachments[0],
-                  itemIndex: 0,
-                ),
-              ),
-              const SizedBox(width: 2),
-              Expanded(
-                child: _PhotoMessageImage(
-                  attachment: attachments[1],
-                  itemIndex: 1,
-                ),
-              ),
-            ],
+          child: _buildPhotoTile(
+            attachment: attachment,
+            itemIndex: 0,
+            hiddenCount: 0,
+            onTap: () {
+              onPhotoTap(0);
+            },
           ),
         ),
       );
     }
 
     if (attachments.length == 3) {
-      return ClipRRect(
-        borderRadius: const BorderRadius.all(Radius.circular(14)),
-        child: SizedBox(
-          width: width,
-          height: width * 0.78,
-          child: Row(
-            children: [
-              Expanded(
-                flex: 3,
-                child: _PhotoMessageImage(
-                  attachment: attachments[0],
-                  itemIndex: 0,
-                ),
-              ),
-              const SizedBox(width: 2),
-              Expanded(
-                flex: 2,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: _PhotoMessageImage(
-                        attachment: attachments[1],
-                        itemIndex: 1,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Expanded(
-                      child: _PhotoMessageImage(
-                        attachment: attachments[2],
-                        itemIndex: 2,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+      return _buildThreePhotoCollage(width);
     }
 
-    final List<ChatPhotoAttachment> visible = attachments.take(4).toList();
+    final List<ChatPhotoAttachment> visible = attachments.take(10).toList();
 
+    return _buildRowCollage(
+      width: width,
+      rowPattern: _rowPatternForCount(visible.length),
+      visible: visible,
+      hiddenCount: attachments.length - visible.length,
+    );
+  }
+
+  Widget _buildThreePhotoCollage(double width) {
     return ClipRRect(
       borderRadius: const BorderRadius.all(Radius.circular(14)),
       child: SizedBox(
         width: width,
         height: width,
-        child: GridView.builder(
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.zero,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            mainAxisSpacing: 2,
-            crossAxisSpacing: 2,
-          ),
-          itemCount: visible.length,
-          itemBuilder: (BuildContext context, int index) {
-            final int hiddenCount = index == 3 ? attachments.length - 4 : 0;
-
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                _PhotoMessageImage(
-                  attachment: visible[index],
-                  itemIndex: index,
-                ),
-                if (hiddenCount > 0)
-                  ColoredBox(
-                    color: AppColors.black.withAlpha(112),
-                    child: Center(
-                      child: Text(
-                        '+$hiddenCount',
-                        style: AppTypography.typography4.copyWith(
-                          color: AppColors.white,
-                          fontWeight: AppTypography.bold,
-                        ),
-                      ),
+        child: Row(
+          children: [
+            Expanded(
+              child: _buildPhotoTile(
+                attachment: attachments[0],
+                itemIndex: 0,
+                hiddenCount: 0,
+                onTap: () {
+                  onPhotoTap(0);
+                },
+              ),
+            ),
+            const SizedBox(width: _spacing),
+            Expanded(
+              child: Column(
+                children: [
+                  Expanded(
+                    child: _buildPhotoTile(
+                      attachment: attachments[1],
+                      itemIndex: 1,
+                      hiddenCount: 0,
+                      onTap: () {
+                        onPhotoTap(1);
+                      },
                     ),
                   ),
-              ],
-            );
-          },
+                  const SizedBox(height: _spacing),
+                  Expanded(
+                    child: _buildPhotoTile(
+                      attachment: attachments[2],
+                      itemIndex: 2,
+                      hiddenCount: 0,
+                      onTap: () {
+                        onPhotoTap(2);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
+      ),
+    );
+  }
+
+  static List<int> _rowPatternForCount(int count) {
+    return switch (count) {
+      2 => const <int>[2],
+      4 => const <int>[2, 2],
+      5 => const <int>[3, 2],
+      6 => const <int>[3, 3],
+      7 => const <int>[3, 2, 2],
+      8 => const <int>[3, 3, 2],
+      9 => const <int>[3, 3, 3],
+      10 => _tenPhotoRows,
+      _ => _tenPhotoRows,
+    };
+  }
+
+  Widget _buildRowCollage({
+    required double width,
+    required List<int> rowPattern,
+    required List<ChatPhotoAttachment> visible,
+    int hiddenCount = 0,
+  }) {
+    final int maximumColumns = rowPattern.reduce(math.max);
+    final double rowHeight =
+        (width - (_spacing * (maximumColumns - 1))) / maximumColumns;
+    final double height =
+        (rowHeight * rowPattern.length) + (_spacing * (rowPattern.length - 1));
+
+    final List<Widget> rows = <Widget>[];
+    int attachmentIndex = 0;
+
+    for (int rowIndex = 0; rowIndex < rowPattern.length; rowIndex++) {
+      final int columns = rowPattern[rowIndex];
+      final List<Widget> rowChildren = <Widget>[];
+
+      for (
+        int columnIndex = 0;
+        columnIndex < columns && attachmentIndex < visible.length;
+        columnIndex++
+      ) {
+        final int itemIndex = attachmentIndex;
+
+        rowChildren.add(
+          Expanded(
+            child: _buildPhotoTile(
+              attachment: visible[itemIndex],
+              itemIndex: itemIndex,
+              hiddenCount: itemIndex == visible.length - 1 ? hiddenCount : 0,
+              onTap: () {
+                onPhotoTap(itemIndex);
+              },
+            ),
+          ),
+        );
+
+        attachmentIndex++;
+
+        if (columnIndex < columns - 1 && attachmentIndex < visible.length) {
+          rowChildren.add(const SizedBox(width: _spacing));
+        }
+      }
+
+      rows.add(
+        SizedBox(
+          height: rowHeight,
+          child: Row(children: rowChildren),
+        ),
+      );
+
+      if (rowIndex < rowPattern.length - 1) {
+        rows.add(const SizedBox(height: _spacing));
+      }
+    }
+
+    return ClipRRect(
+      borderRadius: const BorderRadius.all(Radius.circular(14)),
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: Column(children: rows),
+      ),
+    );
+  }
+
+  static Widget _buildPhotoTile({
+    required ChatPhotoAttachment attachment,
+    required int itemIndex,
+    required int hiddenCount,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          _PhotoMessageImage(attachment: attachment, itemIndex: itemIndex),
+          if (hiddenCount > 0)
+            ColoredBox(
+              color: AppColors.black.withAlpha(112),
+              child: Center(
+                child: Text(
+                  '+$hiddenCount',
+                  style: AppTypography.typography4.copyWith(
+                    color: AppColors.white,
+                    fontWeight: AppTypography.bold,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -7004,6 +7328,609 @@ final class _PhotoMessageImage extends StatelessWidget {
       filterQuality: FilterQuality.medium,
     );
   }
+}
+
+final class _PhotoViewerScreen extends StatefulWidget {
+  const _PhotoViewerScreen({
+    required this.attachments,
+    required this.initialIndex,
+    required this.senderName,
+    required this.sentAt,
+  });
+
+  final List<ChatPhotoAttachment> attachments;
+  final int initialIndex;
+  final String senderName;
+  final DateTime sentAt;
+
+  @override
+  State<_PhotoViewerScreen> createState() {
+    return _PhotoViewerScreenState();
+  }
+}
+
+final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
+  static const Duration _controlsAnimationDuration = Duration(
+    milliseconds: 190,
+  );
+
+  static const Color _chromeBarColor = AppColors.black;
+
+  static const Color _filmstripOverlayColor = Color(0x94000000);
+
+  static const Color _thumbnailBorderColor = AppColors.blue500;
+
+  static const double _topBarContentHeight = 72;
+
+  static const double _actionBarContentHeight = 62;
+
+  late final PageController _pageController;
+
+  late final List<GlobalKey> _thumbnailKeys;
+
+  late int _currentIndex;
+
+  bool _controlsVisible = true;
+
+  double _verticalDragDistance = 0;
+
+  bool get _hasMultiplePhotos {
+    return widget.attachments.length > 1;
+  }
+
+  ChatPhotoAttachment get _currentAttachment {
+    return widget.attachments[_currentIndex];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    _currentIndex = widget.initialIndex.clamp(0, widget.attachments.length - 1);
+    _pageController = PageController(initialPage: _currentIndex);
+    _thumbnailKeys = List<GlobalKey>.generate(
+      widget.attachments.length,
+      (int index) => GlobalKey(),
+    );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollCurrentThumbnailIntoView();
+    });
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+
+    super.dispose();
+  }
+
+  void _close() {
+    Navigator.of(context).maybePop();
+  }
+
+  void _toggleControls() {
+    setState(() {
+      _controlsVisible = !_controlsVisible;
+    });
+  }
+
+  void _handlePageChanged(int index) {
+    setState(() {
+      _currentIndex = index;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollCurrentThumbnailIntoView();
+    });
+  }
+
+  void _scrollCurrentThumbnailIntoView() {
+    if (!_hasMultiplePhotos) {
+      return;
+    }
+
+    final BuildContext? thumbnailContext =
+        _thumbnailKeys[_currentIndex].currentContext;
+
+    if (thumbnailContext == null) {
+      return;
+    }
+
+    Scrollable.ensureVisible(
+      thumbnailContext,
+      duration: const Duration(milliseconds: 160),
+      curve: Curves.easeOutCubic,
+      alignment: 0.5,
+    );
+  }
+
+  void _handleVerticalDragStart(DragStartDetails details) {
+    _verticalDragDistance = 0;
+  }
+
+  void _handleVerticalDragUpdate(DragUpdateDetails details) {
+    _verticalDragDistance += details.delta.dy;
+  }
+
+  void _handleVerticalDragEnd(DragEndDetails details) {
+    final double velocity = details.primaryVelocity ?? 0;
+
+    if (_verticalDragDistance.abs() > 82 || velocity.abs() > 650) {
+      _close();
+    }
+
+    _verticalDragDistance = 0;
+  }
+
+  Future<void> _downloadCurrentPhoto() async {
+    final ChatPhotoAttachment attachment = _currentAttachment;
+    final int timestamp = DateTime.now().millisecondsSinceEpoch;
+
+    try {
+      await PhotoManager.editor.saveImage(
+        attachment.previewBytes,
+        filename: 'juliatalk-$timestamp.jpg',
+        title: 'JuliaTalk Photo',
+        creationDate: DateTime.now(),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('Photo saved.')));
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Photo could not be saved.')),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.light
+        .copyWith(
+          statusBarColor: Colors.transparent,
+          systemNavigationBarColor: AppColors.black,
+          systemNavigationBarIconBrightness: Brightness.light,
+        );
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: overlayStyle,
+      child: Scaffold(
+        backgroundColor: AppColors.black,
+        body: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _toggleControls,
+          onVerticalDragStart: _handleVerticalDragStart,
+          onVerticalDragUpdate: _handleVerticalDragUpdate,
+          onVerticalDragEnd: _handleVerticalDragEnd,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              PageView.builder(
+                key: const ValueKey<String>('photo-viewer-page-view'),
+                controller: _pageController,
+                itemCount: widget.attachments.length,
+                onPageChanged: _handlePageChanged,
+                itemBuilder: (BuildContext context, int index) {
+                  return _PhotoViewerPage(
+                    attachment: widget.attachments[index],
+                  );
+                },
+              ),
+              _PhotoViewerTopBar(
+                visible: _controlsVisible,
+                senderName: widget.senderName,
+                sentAt: widget.sentAt,
+                onBackPressed: _close,
+              ),
+              _PhotoViewerBottomOverlay(
+                visible: _controlsVisible,
+                attachments: widget.attachments,
+                currentIndex: _currentIndex,
+                thumbnailKeys: _thumbnailKeys,
+                onThumbnailPressed: (int index) {
+                  _pageController.animateToPage(
+                    index,
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOutCubic,
+                  );
+                },
+                onDownloadPressed: () {
+                  unawaited(_downloadCurrentPhoto());
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerPage extends StatelessWidget {
+  const _PhotoViewerPage({required this.attachment});
+
+  final ChatPhotoAttachment attachment;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        return Center(
+          child: Image.memory(
+            attachment.previewBytes,
+            key: ValueKey<String>('photo-viewer-image-${attachment.assetId}'),
+            width: constraints.maxWidth,
+            height: constraints.maxHeight,
+            fit: _photoViewerFit(
+              attachment: attachment,
+              viewport: Size(constraints.maxWidth, constraints.maxHeight),
+            ),
+            gaplessPlayback: true,
+            filterQuality: FilterQuality.high,
+          ),
+        );
+      },
+    );
+  }
+}
+
+final class _PhotoViewerTopBar extends StatelessWidget {
+  const _PhotoViewerTopBar({
+    required this.visible,
+    required this.senderName,
+    required this.sentAt,
+    required this.onBackPressed,
+  });
+
+  final bool visible;
+  final String senderName;
+  final DateTime sentAt;
+  final VoidCallback onBackPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final EdgeInsets padding = MediaQuery.paddingOf(context);
+
+    return Positioned(
+      left: 0,
+      top: 0,
+      right: 0,
+      child: AnimatedSlide(
+        key: const ValueKey<String>('photo-viewer-top-bar'),
+        duration: _PhotoViewerScreenState._controlsAnimationDuration,
+        curve: Curves.easeOutCubic,
+        offset: visible ? Offset.zero : const Offset(0, -1),
+        child: IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            duration: _PhotoViewerScreenState._controlsAnimationDuration,
+            opacity: visible ? 1 : 0,
+            child: Container(
+              height:
+                  padding.top + _PhotoViewerScreenState._topBarContentHeight,
+              padding: EdgeInsets.only(top: padding.top),
+              color: _PhotoViewerScreenState._chromeBarColor,
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 54,
+                    height: 54,
+                    child: IconButton(
+                      key: const ValueKey<String>('photo-viewer-back'),
+                      onPressed: onBackPressed,
+                      icon: const Icon(
+                        Icons.chevron_left_rounded,
+                        color: AppColors.white,
+                        size: 34,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          senderName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.subTypography10.copyWith(
+                            color: AppColors.white,
+                            fontWeight: AppTypography.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 0),
+                        Text(
+                          _formatPhotoViewerTimestamp(sentAt),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.subTypography11.copyWith(
+                            color: AppColors.grey200,
+                            fontWeight: AppTypography.regular,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 54, height: 54),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerBottomOverlay extends StatelessWidget {
+  const _PhotoViewerBottomOverlay({
+    required this.visible,
+    required this.attachments,
+    required this.currentIndex,
+    required this.thumbnailKeys,
+    required this.onThumbnailPressed,
+    required this.onDownloadPressed,
+  });
+
+  final bool visible;
+  final List<ChatPhotoAttachment> attachments;
+  final int currentIndex;
+  final List<GlobalKey> thumbnailKeys;
+  final ValueChanged<int> onThumbnailPressed;
+  final VoidCallback onDownloadPressed;
+
+  bool get _hasMultiplePhotos {
+    return attachments.length > 1;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final EdgeInsets padding = MediaQuery.paddingOf(context);
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: AnimatedSlide(
+        key: const ValueKey<String>('photo-viewer-bottom-overlay'),
+        duration: _PhotoViewerScreenState._controlsAnimationDuration,
+        curve: Curves.easeOutCubic,
+        offset: visible ? Offset.zero : const Offset(0, 1),
+        child: IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            duration: _PhotoViewerScreenState._controlsAnimationDuration,
+            opacity: visible ? 1 : 0,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_hasMultiplePhotos)
+                  SizedBox(
+                    width: double.infinity,
+                    child: ColoredBox(
+                      color: _PhotoViewerScreenState._filmstripOverlayColor,
+                      child: _PhotoViewerThumbnailBar(
+                        attachments: attachments,
+                        currentIndex: currentIndex,
+                        thumbnailKeys: thumbnailKeys,
+                        onThumbnailPressed: onThumbnailPressed,
+                      ),
+                    ),
+                  ),
+                Container(
+                  height:
+                      _PhotoViewerScreenState._actionBarContentHeight +
+                      padding.bottom,
+                  padding: EdgeInsets.only(bottom: padding.bottom),
+                  color: _PhotoViewerScreenState._chromeBarColor,
+                  child: Center(
+                    child: IconButton(
+                      key: const ValueKey<String>('photo-viewer-download'),
+                      onPressed: onDownloadPressed,
+                      icon: const Icon(
+                        Icons.file_download_outlined,
+                        color: AppColors.white,
+                        size: 31,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerThumbnailBar extends StatelessWidget {
+  const _PhotoViewerThumbnailBar({
+    required this.attachments,
+    required this.currentIndex,
+    required this.thumbnailKeys,
+    required this.onThumbnailPressed,
+  });
+
+  final List<ChatPhotoAttachment> attachments;
+  final int currentIndex;
+  final List<GlobalKey> thumbnailKeys;
+  final ValueChanged<int> onThumbnailPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: 56,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (int index = 0; index < attachments.length; index++) ...[
+                    _PhotoViewerThumbnail(
+                      key: thumbnailKeys[index],
+                      attachment: attachments[index],
+                      selected: index == currentIndex,
+                      onPressed: () {
+                        onThumbnailPressed(index);
+                      },
+                    ),
+                    if (index != attachments.length - 1)
+                      const SizedBox(width: 7),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 7),
+          Row(
+            key: const ValueKey<String>('photo-viewer-counter'),
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.image_outlined,
+                color: AppColors.white,
+                size: 18,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                'Number ${currentIndex + 1} out of ${attachments.length}',
+                style: AppTypography.subTypography10.copyWith(
+                  color: AppColors.white,
+                  fontWeight: AppTypography.medium,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerThumbnail extends StatelessWidget {
+  const _PhotoViewerThumbnail({
+    required this.attachment,
+    required this.selected,
+    required this.onPressed,
+    super.key,
+  });
+
+  final ChatPhotoAttachment attachment;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onPressed,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        curve: Curves.easeOutCubic,
+        width: 54,
+        height: 54,
+        padding: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          borderRadius: const BorderRadius.all(Radius.circular(7)),
+          border: Border.all(
+            color: selected
+                ? _PhotoViewerScreenState._thumbnailBorderColor
+                : Colors.transparent,
+            width: selected ? 3 : 0,
+          ),
+        ),
+        child: ClipRRect(
+          borderRadius: const BorderRadius.all(Radius.circular(4)),
+          child: Image.memory(
+            attachment.previewBytes,
+            key: ValueKey<String>(
+              'photo-viewer-thumbnail-${attachment.assetId}',
+            ),
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            filterQuality: FilterQuality.medium,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+BoxFit _photoViewerFit({
+  required ChatPhotoAttachment attachment,
+  required Size viewport,
+}) {
+  if (attachment.width <= 0 ||
+      attachment.height <= 0 ||
+      viewport.width <= 0 ||
+      viewport.height <= 0) {
+    return BoxFit.contain;
+  }
+
+  final double photoRatio = attachment.width / attachment.height;
+  final double viewportRatio = viewport.width / viewport.height;
+  final bool sameOrientation =
+      (photoRatio >= 1 && viewportRatio >= 1) ||
+      (photoRatio < 1 && viewportRatio < 1);
+  final double ratioDelta = (math.log(photoRatio / viewportRatio)).abs();
+
+  if (sameOrientation && ratioDelta < 0.45) {
+    return BoxFit.cover;
+  }
+
+  return BoxFit.contain;
+}
+
+String _formatPhotoViewerTimestamp(DateTime date) {
+  final DateTime local = date.toLocal();
+  final int hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+  final String minute = local.minute.toString().padLeft(2, '0');
+  final String period = local.hour < 12 ? 'AM' : 'PM';
+
+  return '${_shortMonthName(local.month)} '
+      '${local.day}, '
+      '${local.year} at '
+      '$hour:$minute $period';
+}
+
+String _shortMonthName(int month) {
+  return switch (month) {
+    DateTime.january => 'Jan',
+    DateTime.february => 'Feb',
+    DateTime.march => 'Mar',
+    DateTime.april => 'Apr',
+    DateTime.may => 'May',
+    DateTime.june => 'Jun',
+    DateTime.july => 'Jul',
+    DateTime.august => 'Aug',
+    DateTime.september => 'Sep',
+    DateTime.october => 'Oct',
+    DateTime.november => 'Nov',
+    DateTime.december => 'Dec',
+    _ => throw ArgumentError.value(
+      month,
+      'month',
+      'Month must be between 1 and 12.',
+    ),
+  };
 }
 
 String _formatFileSize(int bytes) {
@@ -7059,7 +7986,7 @@ _CallMessagePresentation _callMessagePresentation(
       showsDuration: true,
     ),
     ChatCallOutcome.cancelled => const _CallMessagePresentation(
-      label: 'Cancelled',
+      label: 'Canceled',
       icon: Icons.phone_disabled_rounded,
       iconColor: AppColors.grey500,
       showsDuration: false,

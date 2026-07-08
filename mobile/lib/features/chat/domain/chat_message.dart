@@ -33,10 +33,7 @@ final class ChatPhotoAttachment {
 }
 
 final class ChatFileAttachment {
-  const ChatFileAttachment({
-    required this.name,
-    required this.sizeBytes,
-  });
+  const ChatFileAttachment({required this.name, required this.sizeBytes});
 
   final String name;
   final int sizeBytes;
@@ -55,9 +52,7 @@ final class ChatCallAttachment {
 }
 
 final class ChatVoiceMemoAttachment {
-  const ChatVoiceMemoAttachment({
-    required this.duration,
-  });
+  const ChatVoiceMemoAttachment({required this.duration});
 
   final Duration duration;
 }
@@ -123,7 +118,7 @@ final class ChatMessage {
       return switch (callAttachment!.outcome) {
         ChatCallOutcome.started => 'Voice Call',
         ChatCallOutcome.ended => 'End voice call',
-        ChatCallOutcome.cancelled => 'Cancelled',
+        ChatCallOutcome.cancelled => 'Canceled',
         ChatCallOutcome.missed => 'Missed Call',
         ChatCallOutcome.noAnswer => 'No Answer',
       };

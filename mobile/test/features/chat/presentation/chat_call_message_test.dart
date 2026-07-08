@@ -68,11 +68,11 @@ void main() {
   ) async {
     const Map<ChatCallOutcome, String> expectedLabels =
         <ChatCallOutcome, String>{
-      ChatCallOutcome.started: 'Voice Call',
-      ChatCallOutcome.cancelled: 'Cancelled',
-      ChatCallOutcome.missed: 'Missed Call',
-      ChatCallOutcome.noAnswer: 'No Answer',
-    };
+          ChatCallOutcome.started: 'Voice Call',
+          ChatCallOutcome.cancelled: 'Canceled',
+          ChatCallOutcome.missed: 'Missed Call',
+          ChatCallOutcome.noAnswer: 'No Answer',
+        };
 
     for (final MapEntry<ChatCallOutcome, String> entry
         in expectedLabels.entries) {

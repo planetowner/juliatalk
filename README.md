@@ -41,7 +41,7 @@ DeepSeek.
 - PyJWT
 - pwdlib with Argon2
 - python-dotenv
-- Docker Compose for local PostgreSQL
+- Railway deployment configuration
 - Flutter / Dart
 
 ## Project Structure
@@ -69,172 +69,77 @@ mobile/
   lib/
   test/
   pubspec.yaml
-.env.example
-docker-compose.yml
+railway.toml
 requirements.txt
 ```
 
-## Local Setup
+## Deployment
 
-### 1. Clone the project
+The GitHub repository is the source of truth. Push changes to the branch
+connected to the hosted backend, then let the deployment platform build and
+restart the service.
 
-```bash
-git clone https://github.com/planetowner/juliatalk.git
-cd juliatalk
-```
-
-### 2. Create a Python virtual environment
-
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### 3. Install backend dependencies
-
-macOS / Linux:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Windows PowerShell:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### 4. Create the environment file
-
-macOS / Linux:
-
-```bash
-cp .env.example .env
-```
-
-Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Open `.env` and add a valid DeepSeek API key.
-
-Example:
-
-```env
-DEEPSEEK_API_KEY=your_api_key_here
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/juliatalk
-```
-
-`DATABASE_URL` is required and must point to a PostgreSQL database.
-`postgresql://` and `postgres://` URLs are accepted and normalized to
-SQLAlchemy's asyncpg driver URL automatically.
-
-### 5. Start local PostgreSQL
-
-The repository includes a Docker Compose service for local PostgreSQL:
-
-```bash
-docker compose up -d postgres
-```
-
-It starts PostgreSQL 16 with this database URL:
-
-```env
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/juliatalk
-```
-
-If you prefer a PostgreSQL installation outside Docker, create a database named
-`juliatalk` and update `DATABASE_URL` in `.env` to match your local credentials.
-
-### 6. Generate a JWT signing secret
-
-The backend can read `JWT_SECRET` from the environment, but local development
-usually uses a `.jwt_secret` file:
-
-```bash
-python -c "from pathlib import Path; import secrets; Path('.jwt_secret').write_text(secrets.token_urlsafe(48), encoding='utf-8')"
-```
-
-### 7. Run the backend
-
-```bash
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-On first startup, the server creates the database extensions and tables
-automatically.
-
-The API documentation is available at:
+The backend is configured for Railway in `railway.toml`:
 
 ```text
-http://127.0.0.1:8000/docs
+python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-### 8. Create local users
+Railway uses `/health` as the health check endpoint.
 
-After the backend has started once, create local login users from a second
-terminal:
+On startup, the backend creates the required PostgreSQL extensions and tables
+if they do not already exist.
+
+## Required Environment Variables
+
+Configure these in the hosted backend environment:
+
+- `DATABASE_URL`: PostgreSQL connection URL
+- `JWT_SECRET`: long random signing secret for access tokens
+- `DEEPSEEK_API_KEY`: DeepSeek API key
+- `DEEPSEEK_BASE_URL`: DeepSeek-compatible API base URL
+- `DEEPSEEK_MODEL`: DeepSeek model name
+
+`DATABASE_URL` must point to PostgreSQL. `postgresql://` and `postgres://`
+URLs are accepted and normalized to SQLAlchemy's asyncpg driver URL
+automatically.
+
+## User Administration
+
+Initial users are not committed to the repository. Create or update users only
+from a trusted admin environment that has the hosted backend environment
+variables loaded and can reach the production database.
 
 ```bash
 python -m scripts.create_user julia password123 --display-name "Julia" --language ko
 python -m scripts.create_user friend password123 --display-name "Friend" --language zh-CN
 ```
 
-To change a local user's password later:
+To change a user's password:
 
 ```bash
 python -m scripts.set_user_password USERNAME NEW_PASSWORD
 ```
 
-### 9. Run the Flutter client
+## Flutter Client Configuration
 
-Install Flutter dependencies from the mobile app directory:
+The Flutter app talks to the deployed backend. Pass the hosted API origin
+through `API_BASE_URL`:
 
 ```bash
 cd mobile
 flutter pub get
+flutter run --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
 ```
 
-iOS simulator or Chrome on the same machine:
+Use the same `API_BASE_URL` when building release artifacts:
 
 ```bash
-flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000
+flutter build apk --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
+flutter build ios --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
 ```
 
-Android emulator:
-
-```bash
-flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
-```
-
-Physical phone on the same Wi-Fi:
-
-Run the backend from the repository root:
-
-```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Then run Flutter from `mobile/`:
-
-```bash
-flutter run --dart-define=API_BASE_URL=http://YOUR_COMPUTER_LAN_IP:8000
-```
-
-Make sure your computer firewall allows the phone to reach port `8000`.
+`API_BASE_URL` must be an absolute `http` or `https` URL.
 
 ## Tests and Checks
 
@@ -252,7 +157,7 @@ flutter analyze
 flutter test
 ```
 
-## Local-Only Files
+## Files Excluded From Git
 
 The following files are intentionally excluded from Git:
 
@@ -356,13 +261,12 @@ If translation fails, the original message remains stored and available.
 
 The repository does not include database dumps or production user accounts.
 
-On a fresh installation, the database extensions and tables are created
-automatically when the backend starts with `DATABASE_URL` configured, but
-initial users must still be created separately before login and messaging can
-be used.
+The database schema is created automatically when the hosted backend starts
+with `DATABASE_URL` configured, but initial users must still be created
+separately before login and messaging can be used.
 
 ## Project Status
 
 The backend authentication, messaging, read receipts, WebSocket delivery,
 bidirectional Korean-Chinese text translation, and Flutter client login/chat
-flows are implemented for local development.
+flows are implemented.

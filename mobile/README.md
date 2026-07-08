@@ -2,13 +2,7 @@
 
 Flutter client for JuliaTalk.
 
-## Run Against Local Backend
-
-Start the FastAPI backend first from the repository root:
-
-```bash
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+## Run Against Deployed Backend
 
 Install Flutter dependencies from this directory:
 
@@ -16,35 +10,20 @@ Install Flutter dependencies from this directory:
 flutter pub get
 ```
 
-Then run Flutter with `API_BASE_URL`.
-
-iOS simulator or Chrome on the same machine:
+Run the app with the deployed backend URL:
 
 ```bash
-flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000
+flutter run --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
 ```
 
-Android emulator:
+Use the same value for release builds:
 
 ```bash
-flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
+flutter build apk --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
+flutter build ios --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
 ```
 
-Physical phone on the same Wi-Fi:
-
-Start the backend on all interfaces:
-
-```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Then run Flutter from this directory:
-
-```bash
-flutter run --dart-define=API_BASE_URL=http://YOUR_COMPUTER_LAN_IP:8000
-```
-
-Make sure your computer firewall allows the phone to reach port `8000`.
+`API_BASE_URL` must be an absolute `http` or `https` URL.
 
 ## Test
 

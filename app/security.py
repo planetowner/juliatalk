@@ -1,10 +1,10 @@
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import UUID
 
 import jwt
 from jwt.exceptions import InvalidTokenError
-from pwdlib import PasswordHash
 
 
 JWT_SECRET_PATH = (
@@ -13,8 +13,6 @@ JWT_SECRET_PATH = (
 
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
-
-password_hash = PasswordHash.recommended()
 
 
 def load_jwt_secret() -> str:
@@ -52,22 +50,8 @@ def load_jwt_secret() -> str:
 JWT_SECRET = load_jwt_secret()
 
 
-def hash_password(password: str) -> str:
-    return password_hash.hash(password)
-
-
-def verify_password(
-    password: str,
-    stored_password_hash: str,
-) -> bool:
-    return password_hash.verify(
-        password,
-        stored_password_hash,
-    )
-
-
 def create_access_token(
-    user_id: int,
+    user_id: UUID,
     token_version: int,
 ) -> str:
     now = datetime.now(timezone.utc)
@@ -90,7 +74,7 @@ def create_access_token(
 
 def decode_access_token(
     token: str,
-) -> tuple[int, int]:
+) -> tuple[UUID, int]:
     try:
         payload = jwt.decode(
             token,
@@ -111,16 +95,11 @@ def decode_access_token(
         )
 
     try:
-        user_id = int(subject)
+        user_id = UUID(subject)
     except ValueError as error:
         raise ValueError(
             "Access token contains an invalid user ID."
         ) from error
-
-    if user_id <= 0:
-        raise ValueError(
-            "Access token contains an invalid user ID."
-        )
 
     if not isinstance(token_version, int):
         raise ValueError(

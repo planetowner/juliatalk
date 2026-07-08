@@ -9,6 +9,7 @@ import 'package:juliatalk/features/auth/data/auth_login_exception.dart';
 void main() {
   const String username = 'test-user';
   const String password = 'test-password';
+  const String userId = '11111111-1111-4111-8111-111111111111';
 
   test('login sends the expected request and parses the session', () async {
     final MockClient client = MockClient((http.Request request) async {
@@ -26,7 +27,7 @@ void main() {
           'access_token': 'test-token',
           'token_type': 'bearer',
           'user': {
-            'id': 1,
+            'id': userId,
             'username': username,
             'display_name': 'June',
             'preferred_language': 'ko',
@@ -46,7 +47,7 @@ void main() {
 
     expect(session.accessToken, 'test-token');
     expect(session.tokenType, 'bearer');
-    expect(session.user.id, 1);
+    expect(session.user.id, userId);
     expect(session.user.username, username);
     expect(session.user.displayName, 'June');
     expect(session.user.preferredLanguage, 'ko');

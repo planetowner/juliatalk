@@ -27,10 +27,7 @@ final class ChatApi {
   }
 
   Map<String, String> get _jsonHeaders {
-    return <String, String>{
-      ..._headers,
-      'Content-Type': 'application/json',
-    };
+    return <String, String>{..._headers, 'Content-Type': 'application/json'};
   }
 
   Future<List<AppUser>> listUsers() async {
@@ -70,7 +67,7 @@ final class ChatApi {
   }
 
   Future<List<ChatMessage>> listConversation({
-    required int otherUserId,
+    required String otherUserId,
     int limit = 100,
   }) async {
     final Uri requestUri = _baseUri
@@ -115,7 +112,7 @@ final class ChatApi {
   }
 
   Future<List<ChatMessage>> searchConversation({
-    required int otherUserId,
+    required String otherUserId,
     required String query,
     int limit = 100,
   }) async {
@@ -166,9 +163,9 @@ final class ChatApi {
   }
 
   Future<ChatMessage> sendTextMessage({
-    required int recipientId,
+    required String recipientId,
     required String content,
-    int? replyToMessageId,
+    String? replyToMessageId,
   }) {
     return _createMessage(
       recipientId: recipientId,
@@ -179,31 +176,33 @@ final class ChatApi {
   }
 
   Future<ChatMessage> sendPhotoMessage({
-    required int recipientId,
+    required String recipientId,
     required List<ChatPhotoAttachment> photos,
-    int? replyToMessageId,
+    String? replyToMessageId,
   }) {
     return _createMessage(
       recipientId: recipientId,
       messageType: 'photo',
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{
-        'photos': photos.map((ChatPhotoAttachment photo) {
-          return <String, Object?>{
-            'asset_id': photo.assetId,
-            'preview_base64': base64Encode(photo.previewBytes),
-            'width': photo.width,
-            'height': photo.height,
-          };
-        }).toList(growable: false),
+        'photos': photos
+            .map((ChatPhotoAttachment photo) {
+              return <String, Object?>{
+                'asset_id': photo.assetId,
+                'preview_base64': base64Encode(photo.previewBytes),
+                'width': photo.width,
+                'height': photo.height,
+              };
+            })
+            .toList(growable: false),
       },
     );
   }
 
   Future<ChatMessage> sendFileMessage({
-    required int recipientId,
+    required String recipientId,
     required ChatFileAttachment file,
-    int? replyToMessageId,
+    String? replyToMessageId,
   }) {
     return _createMessage(
       recipientId: recipientId,
@@ -219,24 +218,22 @@ final class ChatApi {
   }
 
   Future<ChatMessage> sendVoiceMemoMessage({
-    required int recipientId,
+    required String recipientId,
     required Duration duration,
-    int? replyToMessageId,
+    String? replyToMessageId,
   }) {
     return _createMessage(
       recipientId: recipientId,
       messageType: 'voice_memo',
       replyToMessageId: replyToMessageId,
-      metadata: <String, Object?>{
-        'duration_ms': duration.inMilliseconds,
-      },
+      metadata: <String, Object?>{'duration_ms': duration.inMilliseconds},
     );
   }
 
   Future<ChatMessage> sendCallMessage({
-    required int recipientId,
+    required String recipientId,
     required ChatCallAttachment call,
-    int? replyToMessageId,
+    String? replyToMessageId,
   }) {
     return _createMessage(
       recipientId: recipientId,
@@ -251,15 +248,13 @@ final class ChatApi {
   }
 
   Future<ChatMessage> editTextMessage({
-    required int messageId,
+    required String messageId,
     required String content,
   }) async {
     final http.Response response = await _client.patch(
       _baseUri.resolve('/messages/$messageId'),
       headers: _jsonHeaders,
-      body: jsonEncode(<String, Object?>{
-        'content': content,
-      }),
+      body: jsonEncode(<String, Object?>{'content': content}),
     );
 
     if (response.statusCode != 200) {
@@ -276,17 +271,13 @@ final class ChatApi {
     final Object? decodedBody = jsonDecode(response.body);
 
     if (decodedBody is! Map<String, dynamic>) {
-      throw const ChatApiException(
-        'The server returned an invalid message.',
-      );
+      throw const ChatApiException('The server returned an invalid message.');
     }
 
     return messageFromJson(decodedBody);
   }
 
-  Future<void> deleteMessage({
-    required int messageId,
-  }) async {
+  Future<void> deleteMessage({required String messageId}) async {
     final http.Response response = await _client.delete(
       _baseUri.resolve('/messages/$messageId'),
       headers: _headers,
@@ -304,9 +295,7 @@ final class ChatApi {
     }
   }
 
-  Future<void> markConversationAsRead({
-    required int otherUserId,
-  }) async {
+  Future<void> markConversationAsRead({required String otherUserId}) async {
     final http.Response response = await _client.patch(
       _baseUri.resolve('/messages/conversation/$otherUserId/read'),
       headers: _headers,
@@ -325,16 +314,17 @@ final class ChatApi {
   }
 
   Future<ChatMessage> _createMessage({
-    required int recipientId,
+    required String recipientId,
     required String messageType,
     String content = '',
     Map<String, Object?>? metadata,
-    int? replyToMessageId,
+    String? replyToMessageId,
   }) async {
     final Map<String, Object?> body = <String, Object?>{
       'recipient_id': recipientId,
       'content': content,
       'message_type': messageType,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
       'metadata': ?metadata,
       'reply_to_message_id': ?replyToMessageId,
     };
@@ -359,9 +349,7 @@ final class ChatApi {
     final Object? decodedBody = jsonDecode(response.body);
 
     if (decodedBody is! Map<String, dynamic>) {
-      throw const ChatApiException(
-        'The server returned an invalid message.',
-      );
+      throw const ChatApiException('The server returned an invalid message.');
     }
 
     return messageFromJson(decodedBody);
@@ -374,14 +362,16 @@ final class ChatApi {
     final bool translates = messageType == 'text';
 
     return ChatMessage(
-      id: json['id'] as int,
-      senderId: json['sender_id'] as int,
-      recipientId: json['recipient_id'] as int,
+      id: _requiredString(json['id'], 'id'),
+      senderId: _requiredString(json['sender_id'], 'sender_id'),
+      recipientId: _requiredString(json['recipient_id'], 'recipient_id'),
       content: json['content'] as String,
-      createdAt: DateTime.parse(json['created_at'] as String),
+      createdAt: _dateTimeFromApi(json['created_at']),
       editedAt: _optionalDateTime(json['edited_at']),
       readAt: _optionalDateTime(json['read_at']),
-      translatedContent: translates ? json['translated_content'] as String? : null,
+      translatedContent: translates
+          ? json['translated_content'] as String?
+          : null,
       translationStatus: translates
           ? _translationStatusFromApi(translationStatus)
           : ChatTranslationStatus.none,
@@ -416,15 +406,13 @@ final class ChatApi {
     }
 
     return ChatReplyReference(
-      messageId: value['message_id'] as int,
-      senderId: value['sender_id'] as int,
+      messageId: _requiredString(value['message_id'], 'message_id'),
+      senderId: _requiredString(value['sender_id'], 'sender_id'),
       content: value['content'] as String,
     );
   }
 
-  List<ChatPhotoAttachment> _photosFromMetadata(
-    Map<String, dynamic> metadata,
-  ) {
+  List<ChatPhotoAttachment> _photosFromMetadata(Map<String, dynamic> metadata) {
     final Object? photos = metadata['photos'];
 
     if (photos is! List<dynamic>) {
@@ -433,28 +421,30 @@ final class ChatApi {
       );
     }
 
-    return photos.map((dynamic item) {
-      if (item is! Map<String, dynamic>) {
-        throw const ChatApiException(
-          'The server returned an invalid photo attachment.',
-        );
-      }
+    return photos
+        .map((dynamic item) {
+          if (item is! Map<String, dynamic>) {
+            throw const ChatApiException(
+              'The server returned an invalid photo attachment.',
+            );
+          }
 
-      final Object? previewBase64 = item['preview_base64'];
+          final Object? previewBase64 = item['preview_base64'];
 
-      if (previewBase64 is! String) {
-        throw const ChatApiException(
-          'The server returned a photo without a preview.',
-        );
-      }
+          if (previewBase64 is! String) {
+            throw const ChatApiException(
+              'The server returned a photo without a preview.',
+            );
+          }
 
-      return ChatPhotoAttachment(
-        assetId: item['asset_id'] as String,
-        previewBytes: base64Decode(previewBase64),
-        width: item['width'] as int,
-        height: item['height'] as int,
-      );
-    }).toList(growable: false);
+          return ChatPhotoAttachment(
+            assetId: item['asset_id'] as String,
+            previewBytes: base64Decode(previewBase64),
+            width: item['width'] as int,
+            height: item['height'] as int,
+          );
+        })
+        .toList(growable: false);
   }
 
   ChatFileAttachment _fileFromMetadata(Map<String, dynamic> metadata) {
@@ -558,6 +548,37 @@ final class ChatApi {
     return value;
   }
 
+  String _requiredString(Object? value, String fieldName) {
+    if (value is String && value.isNotEmpty) {
+      return value;
+    }
+
+    throw ChatApiException('The server returned an invalid $fieldName.');
+  }
+
+  DateTime _dateTimeFromApi(Object? value) {
+    if (value is String) {
+      final DateTime parsed = DateTime.parse(value);
+
+      if (parsed.isUtc) {
+        return parsed;
+      }
+
+      return DateTime.utc(
+        parsed.year,
+        parsed.month,
+        parsed.day,
+        parsed.hour,
+        parsed.minute,
+        parsed.second,
+        parsed.millisecond,
+        parsed.microsecond,
+      );
+    }
+
+    throw const ChatApiException('The server returned an invalid date.');
+  }
+
   DateTime? _optionalDateTime(Object? value) {
     if (value == null) {
       return null;
@@ -567,7 +588,7 @@ final class ChatApi {
       throw const ChatApiException('The server returned an invalid date.');
     }
 
-    return DateTime.parse(value);
+    return _dateTimeFromApi(value);
   }
 
   String _readErrorMessage(http.Response response, {required String fallback}) {

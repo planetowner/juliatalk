@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:juliatalk/main.dart';
+
+import '../../../support/juliatalk_preview_app.dart';
 
 Future<void> _scrollConversationToStart(WidgetTester tester) async {
   final Finder messageListFinder = find.byKey(

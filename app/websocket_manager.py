@@ -1,15 +1,16 @@
 from typing import Any
+from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 
 class ConnectionManager:
     def __init__(self) -> None:
-        self._connections: dict[int, set[WebSocket]] = {}
+        self._connections: dict[UUID, set[WebSocket]] = {}
 
     async def connect(
         self,
-        user_id: int,
+        user_id: UUID,
         websocket: WebSocket,
     ) -> None:
         await websocket.accept()
@@ -21,7 +22,7 @@ class ConnectionManager:
 
     def disconnect(
         self,
-        user_id: int,
+        user_id: UUID,
         websocket: WebSocket,
     ) -> None:
         user_connections = self._connections.get(user_id)
@@ -36,7 +37,7 @@ class ConnectionManager:
 
     async def send_to_user(
         self,
-        user_id: int,
+        user_id: UUID,
         data: dict[str, Any],
     ) -> None:
         user_connections = list(
@@ -56,7 +57,7 @@ class ConnectionManager:
 
     def connection_count(
         self,
-        user_id: int,
+        user_id: UUID,
     ) -> int:
         return len(
             self._connections.get(user_id, set())

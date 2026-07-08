@@ -6,7 +6,7 @@ final class ChatMessageGroup {
     required List<ChatMessage> messages,
   }) : messages = List<ChatMessage>.unmodifiable(messages);
 
-  final int senderId;
+  final String senderId;
   final List<ChatMessage> messages;
 
   DateTime get createdAt {

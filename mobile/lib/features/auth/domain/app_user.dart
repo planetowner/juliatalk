@@ -8,14 +8,14 @@ final class AppUser {
 
   factory AppUser.fromJson(Map<String, dynamic> json) {
     return AppUser(
-      id: json['id'] as int,
+      id: json['id'] as String,
       username: json['username'] as String,
       displayName: json['display_name'] as String,
       preferredLanguage: json['preferred_language'] as String,
     );
   }
 
-  final int id;
+  final String id;
   final String username;
   final String displayName;
   final String preferredLanguage;

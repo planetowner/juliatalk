@@ -3,20 +3,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/design_system/app_colors.dart';
 import 'package:juliatalk/design_system/app_typography.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
-import 'package:juliatalk/features/chat/presentation/chat_style_preview_screen.dart';
+import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
 Widget _buildFileMessageScreen(ChatMessage message) {
   return MaterialApp(
-    home: ChatStylePreviewScreen(initialMessages: <ChatMessage>[message]),
+    home: ChatConversationView(initialMessages: <ChatMessage>[message]),
   );
 }
 
 ChatMessage _fileMessage({
-  required int senderId,
-  required int recipientId,
+  required String senderId,
+  required String recipientId,
 }) {
   return ChatMessage(
-    id: 1,
+    id: '1',
     senderId: senderId,
     recipientId: recipientId,
     content: '',
@@ -33,7 +33,7 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(
-      _buildFileMessageScreen(_fileMessage(senderId: 1, recipientId: 2)),
+      _buildFileMessageScreen(_fileMessage(senderId: '1', recipientId: '2')),
     );
     await tester.pumpAndSettle();
 
@@ -76,7 +76,7 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(
-      _buildFileMessageScreen(_fileMessage(senderId: 2, recipientId: 1)),
+      _buildFileMessageScreen(_fileMessage(senderId: '2', recipientId: '1')),
     );
     await tester.pumpAndSettle();
 

@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
-import 'package:juliatalk/features/chat/presentation/chat_style_preview_screen.dart';
+import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
 Widget _buildCallMessageScreen(ChatMessage message) {
   final ChatCallAttachment attachment = message.callAttachment!;
 
   return MaterialApp(
-    home: ChatStylePreviewScreen(
+    home: ChatConversationView(
       key: ValueKey<String>(
         'call-${attachment.outcome.name}-${attachment.duration.inSeconds}',
       ),
@@ -21,9 +21,9 @@ ChatMessage _callMessage({
   Duration duration = Duration.zero,
 }) {
   return ChatMessage(
-    id: 1,
-    senderId: 1,
-    recipientId: 2,
+    id: '1',
+    senderId: '1',
+    recipientId: '2',
     content: '',
     createdAt: DateTime(2026, 7, 4, 17, 16),
     callAttachment: ChatCallAttachment(

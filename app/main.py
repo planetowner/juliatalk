@@ -7,8 +7,7 @@ import app.models
 from app.database import (
     Base,
     engine,
-    ensure_database_schema,
-    ensure_seed_users,
+    ensure_database_extensions,
 )
 from app.routes.auth import router as auth_router
 from app.routes.messages import router as messages_router
@@ -19,9 +18,8 @@ from app.routes.websocket import router as websocket_router
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with engine.begin() as connection:
+        await ensure_database_extensions(connection)
         await connection.run_sync(Base.metadata.create_all)
-        await ensure_database_schema(connection)
-        await ensure_seed_users(connection)
 
     yield
 

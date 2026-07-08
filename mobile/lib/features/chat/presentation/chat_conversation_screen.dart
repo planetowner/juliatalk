@@ -12,7 +12,7 @@ import '../../auth/domain/app_user.dart';
 import '../../auth/domain/auth_session.dart';
 import '../data/chat_api.dart';
 import '../domain/chat_message.dart';
-import 'chat_style_preview_screen.dart';
+import 'chat_conversation_view.dart';
 
 final class ChatConversationHomeScreen extends StatefulWidget {
   const ChatConversationHomeScreen({
@@ -72,7 +72,7 @@ final class _ChatConversationHomeScreenState
 
     if (selectedUser != null) {
       return ChatConversationScreen(
-        key: ValueKey<int>(selectedUser.id),
+        key: ValueKey<String>(selectedUser.id),
         chatApi: _chatApi,
         baseUri: widget.baseUri,
         accessToken: widget.session.accessToken,
@@ -440,7 +440,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   void _handleMessageDeletedEvent(Map<String, dynamic> event) {
     final Object? messageId = event['message_id'];
 
-    if (messageId is int) {
+    if (messageId is String) {
       _removeMessage(messageId);
     }
   }
@@ -467,7 +467,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     }
 
     _markMessagesRead(
-      messageIds.whereType<int>().toList(growable: false),
+      messageIds.whereType<String>().toList(growable: false),
       readAt,
     );
   }
@@ -558,7 +558,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     });
   }
 
-  void _removeMessage(int messageId) {
+  void _removeMessage(String messageId) {
     setState(() {
       _messages = List<ChatMessage>.unmodifiable(
         _messages.where((ChatMessage message) => message.id != messageId),
@@ -566,12 +566,12 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     });
   }
 
-  void _markMessagesRead(List<int> messageIds, DateTime readAt) {
+  void _markMessagesRead(List<String> messageIds, DateTime readAt) {
     if (messageIds.isEmpty) {
       return;
     }
 
-    final Set<int> messageIdSet = messageIds.toSet();
+    final Set<String> messageIdSet = messageIds.toSet();
 
     setState(() {
       _messages = List<ChatMessage>.unmodifiable(
@@ -699,7 +699,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   }
 
   Future<ChatMessage> _editTextMessage({
-    required int messageId,
+    required String messageId,
     required String content,
   }) async {
     final ChatMessage message = await widget.chatApi.editTextMessage(
@@ -715,7 +715,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   }
 
   Future<void> _deleteMessage({
-    required int messageId,
+    required String messageId,
   }) async {
     await widget.chatApi.deleteMessage(messageId: messageId);
 
@@ -756,7 +756,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
           widget.onBack();
         }
       },
-      child: ChatStylePreviewScreen(
+      child: ChatConversationView(
         initialMessages: _messages,
         currentUserId: widget.currentUser.id,
         otherParticipantId: widget.otherUser.id,

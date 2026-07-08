@@ -32,12 +32,12 @@ const Duration _bottomSurfaceAnimationDuration = Duration(milliseconds: 180);
 typedef _MessageLongPressCallback =
     Future<void> Function(ChatMessage message, GlobalKey bubbleKey);
 
-typedef _MessageBubbleKeyFor = GlobalKey Function(int messageId);
+typedef _MessageBubbleKeyFor = GlobalKey Function(String messageId);
 
 typedef _ReplyQuoteTapCallback =
     Future<void> Function({
-      required int replyMessageId,
-      required int originalMessageId,
+      required String replyMessageId,
+      required String originalMessageId,
     });
 
 typedef _ReplySelectedCallback =
@@ -71,20 +71,18 @@ typedef ChatVoiceMemoMessageSender =
     });
 
 typedef ChatCallMessageSender =
-    Future<ChatMessage> Function({
-      required ChatCallAttachment call,
-    });
+    Future<ChatMessage> Function({required ChatCallAttachment call});
 
 typedef ChatTextMessageEditor =
     Future<ChatMessage> Function({
-      required int messageId,
+      required String messageId,
       required String content,
     });
 
+typedef ChatMessageTranslator = Future<String?> Function(ChatMessage message);
+
 typedef ChatMessageDeleter =
-    Future<void> Function({
-      required int messageId,
-    });
+    Future<void> Function({required String messageId});
 
 enum _CallNowAction { voice, video }
 
@@ -181,8 +179,8 @@ StrutStyle _buildMessageStrutStyle(TextStyle style) {
   );
 }
 
-final class ChatStylePreviewScreen extends StatefulWidget {
-  const ChatStylePreviewScreen({
+final class ChatConversationView extends StatefulWidget {
+  const ChatConversationView({
     super.key,
     this.photoLibrary,
     this.initialMessages,
@@ -195,13 +193,17 @@ final class ChatStylePreviewScreen extends StatefulWidget {
     this.onSendVoiceMemoMessage,
     this.onSendCallMessage,
     this.onEditTextMessage,
+    this.onTranslateMessage,
     this.onDeleteMessage,
+    this.translationDelay = Duration.zero,
+    this.initialClock,
+    this.nextLocalMessageId = 1,
   });
 
   final ChatPhotoLibrary? photoLibrary;
   final List<ChatMessage>? initialMessages;
-  final int currentUserId;
-  final int otherParticipantId;
+  final String currentUserId;
+  final String otherParticipantId;
   final String otherParticipantName;
   final ChatTextMessageSender? onSendTextMessage;
   final ChatPhotoMessageSender? onSendPhotoMessages;
@@ -209,20 +211,24 @@ final class ChatStylePreviewScreen extends StatefulWidget {
   final ChatVoiceMemoMessageSender? onSendVoiceMemoMessage;
   final ChatCallMessageSender? onSendCallMessage;
   final ChatTextMessageEditor? onEditTextMessage;
+  final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageDeleter? onDeleteMessage;
+  final Duration translationDelay;
+  final DateTime? initialClock;
+  final int nextLocalMessageId;
 
-  static const int _currentUserId = 1;
-  static const int _otherParticipantId = 2;
+  static const String _currentUserId = '1';
+  static const String _otherParticipantId = '2';
   static const String _otherParticipantName = 'Lia';
   static const Color _chatBackgroundColor = AppColors.white;
 
   @override
-  State<ChatStylePreviewScreen> createState() {
-    return _ChatStylePreviewScreenState();
+  State<ChatConversationView> createState() {
+    return _ChatConversationViewState();
   }
 }
 
-final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
+final class _ChatConversationViewState extends State<ChatConversationView>
     with WidgetsBindingObserver {
   final GlobalKey<_MessageListState> _messageListKey =
       GlobalKey<_MessageListState>();
@@ -272,7 +278,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
   bool _searchModeActive = false;
   bool _searchDateSheetOpen = false;
   String _searchQuery = '';
-  List<int> _searchResultMessageIds = const <int>[];
+  List<String> _searchResultMessageIds = const <String>[];
   int? _searchResultIndex;
   DateTime? _selectedSearchDate;
 
@@ -280,7 +286,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
   void initState() {
     super.initState();
 
-    _photoLibrary = widget.photoLibrary ?? MockChatPhotoLibrary();
+    _photoLibrary = widget.photoLibrary ?? PhotoManagerChatPhotoLibrary();
 
     WidgetsBinding.instance.addObserver(this);
     _messageFocusNode.addListener(_handleMessageFocusChanged);
@@ -404,36 +410,30 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
   }
 
   void _openPhotoPicker() {
-    if (!_attachmentPanelOpen ||
-        _photoPickerOpen) {
+    if (!_attachmentPanelOpen || _photoPickerOpen) {
       return;
     }
 
-    final BuildContext? composerContext =
-        _composerMeasureKey.currentContext;
+    final BuildContext? composerContext = _composerMeasureKey.currentContext;
 
-    final RenderObject? renderObject =
-        composerContext?.findRenderObject();
+    final RenderObject? renderObject = composerContext?.findRenderObject();
 
     if (renderObject is! RenderBox ||
         !renderObject.attached ||
         !renderObject.hasSize) {
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) {
-          if (mounted) {
-            _openPhotoPicker();
-          }
-        },
-      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _openPhotoPicker();
+        }
+      });
 
       return;
     }
 
-    final double attachmentPanelHeight =
-        math.max(
-          _lastKeyboardHeight,
-          MediaQuery.viewPaddingOf(context).bottom,
-        );
+    final double attachmentPanelHeight = math.max(
+      _lastKeyboardHeight,
+      MediaQuery.viewPaddingOf(context).bottom,
+    );
 
     // Photo 선택기의 최초 높이는 임의 비율이 아니라
     // 현재 작성창 + 현재 첨부 패널의 실제 합산 높이다.
@@ -441,8 +441,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     // 따라서 Photo로 전환해도 패널의 위쪽 경계가
     // 기존 입력창 위쪽 경계와 정확히 같은 위치에 남는다.
     final double collapsedHeight =
-        renderObject.size.height +
-        attachmentPanelHeight;
+        renderObject.size.height + attachmentPanelHeight;
 
     _startBottomSurfacePinIfNeeded();
 
@@ -453,8 +452,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       _photoPickerExpanded = false;
       _photoPickerDragging = false;
 
-      _photoPickerCollapsedHeight =
-          collapsedHeight;
+      _photoPickerCollapsedHeight = collapsedHeight;
 
       _photoPickerHeight = collapsedHeight;
 
@@ -481,9 +479,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     });
   }
 
-  void _handlePhotoPickerDragStart(
-    DragStartDetails details,
-  ) {
+  void _handlePhotoPickerDragStart(DragStartDetails details) {
     if (!_photoPickerOpen) {
       return;
     }
@@ -497,32 +493,22 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     DragUpdateDetails details, {
     required double maximumHeight,
   }) {
-    final double? currentHeight =
-        _photoPickerHeight;
+    final double? currentHeight = _photoPickerHeight;
 
-    final double? collapsedHeight =
-        _photoPickerCollapsedHeight;
+    final double? collapsedHeight = _photoPickerCollapsedHeight;
 
-    if (!_photoPickerOpen ||
-        currentHeight == null ||
-        collapsedHeight == null) {
+    if (!_photoPickerOpen || currentHeight == null || collapsedHeight == null) {
       return;
     }
 
-    final double nextHeight =
-        (currentHeight - details.delta.dy)
-            .clamp(
-              collapsedHeight,
-              maximumHeight,
-            )
-            .toDouble();
+    final double nextHeight = (currentHeight - details.delta.dy)
+        .clamp(collapsedHeight, maximumHeight)
+        .toDouble();
 
     setState(() {
       _photoPickerHeight = nextHeight;
 
-      _photoPickerExpanded =
-          nextHeight >
-          collapsedHeight + 32;
+      _photoPickerExpanded = nextHeight > collapsedHeight + 32;
     });
   }
 
@@ -530,25 +516,18 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     DragEndDetails details, {
     required double maximumHeight,
   }) {
-    final double? currentHeight =
-        _photoPickerHeight;
+    final double? currentHeight = _photoPickerHeight;
 
-    final double? collapsedHeight =
-        _photoPickerCollapsedHeight;
+    final double? collapsedHeight = _photoPickerCollapsedHeight;
 
-    if (!_photoPickerOpen ||
-        currentHeight == null ||
-        collapsedHeight == null) {
+    if (!_photoPickerOpen || currentHeight == null || collapsedHeight == null) {
       return;
     }
 
-    final double velocity =
-        details.primaryVelocity ?? 0;
+    final double velocity = details.primaryVelocity ?? 0;
 
     final double expansionThreshold =
-        collapsedHeight +
-        ((maximumHeight - collapsedHeight) *
-            0.34);
+        collapsedHeight + ((maximumHeight - collapsedHeight) * 0.34);
 
     final bool shouldExpand;
 
@@ -557,17 +536,14 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     } else if (velocity >= 300) {
       shouldExpand = false;
     } else {
-      shouldExpand =
-          currentHeight >= expansionThreshold;
+      shouldExpand = currentHeight >= expansionThreshold;
     }
 
     setState(() {
       _photoPickerDragging = false;
       _photoPickerExpanded = shouldExpand;
 
-      _photoPickerHeight = shouldExpand
-          ? maximumHeight
-          : collapsedHeight;
+      _photoPickerHeight = shouldExpand ? maximumHeight : collapsedHeight;
     });
   }
 
@@ -719,9 +695,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(
-            content: Text('The camera is not available.'),
-          ),
+          const SnackBar(content: Text('The camera is not available.')),
         );
 
       return;
@@ -815,9 +789,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(
-            content: Text('The file picker is not available.'),
-          ),
+          const SnackBar(content: Text('The file picker is not available.')),
         );
 
       return;
@@ -1088,7 +1060,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     _closeAttachmentPanelToDefault();
   }
 
-  int? get _currentSearchMessageId {
+  String? get _currentSearchMessageId {
     final int? resultIndex = _searchResultIndex;
 
     if (resultIndex == null ||
@@ -1129,7 +1101,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     setState(() {
       _searchModeActive = true;
       _searchQuery = _searchController.text;
-      _searchResultMessageIds = const <int>[];
+      _searchResultMessageIds = const <String>[];
       _searchResultIndex = null;
     });
 
@@ -1159,7 +1131,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     setState(() {
       _searchModeActive = false;
       _searchQuery = '';
-      _searchResultMessageIds = const <int>[];
+      _searchResultMessageIds = const <String>[];
       _searchResultIndex = null;
       _selectedSearchDate = null;
     });
@@ -1171,8 +1143,9 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     }
 
     final _MessageListState? messageListState = _messageListKey.currentState;
-    final List<int> resultMessageIds =
-        messageListState?.searchMessageIds(_searchQuery) ?? const <int>[];
+    final List<String> resultMessageIds =
+        messageListState?.searchMessageIds(_searchQuery) ??
+        const <String>[];
 
     final int? nextIndex = resultMessageIds.isEmpty ? null : 0;
 
@@ -1209,7 +1182,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
   }
 
   void _scrollToCurrentSearchResult() {
-    final int? messageId = _currentSearchMessageId;
+    final String? messageId = _currentSearchMessageId;
 
     if (messageId == null) {
       return;
@@ -1255,7 +1228,8 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       return;
     }
 
-    final Set<DateTime> searchableDates = messageListState.searchableMessageDates();
+    final Set<DateTime> searchableDates = messageListState
+        .searchableMessageDates();
 
     if (searchableDates.isEmpty) {
       return;
@@ -1323,10 +1297,13 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     });
 
     if (_hasSearchQuery && _searchResultMessageIds.isNotEmpty) {
-      final int matchingIndex = _searchResultMessageIds.indexWhere((int id) {
+      final int matchingIndex = _searchResultMessageIds.indexWhere((
+        String id,
+      ) {
         final ChatMessage? message = messageListState.findMessage(id);
 
-        return message != null && _dateOnly(message.createdAt) == normalizedDate;
+        return message != null &&
+            _dateOnly(message.createdAt) == normalizedDate;
       });
 
       if (matchingIndex != -1) {
@@ -1864,10 +1841,10 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
             .copyWith(
               statusBarColor: showingVoiceCallScreen
                   ? AppColors.black
-                  : ChatStylePreviewScreen._chatBackgroundColor,
+                  : Colors.transparent,
               systemNavigationBarColor: showingVoiceCallScreen
                   ? AppColors.black
-                  : ChatStylePreviewScreen._chatBackgroundColor,
+                  : ChatConversationView._chatBackgroundColor,
               systemNavigationBarIconBrightness: showingVoiceCallScreen
                   ? Brightness.light
                   : Brightness.dark,
@@ -1901,27 +1878,22 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
     // 상태 표시줄뿐 아니라 상단 바 높이도 함께 빼야
     // 카메라 컷아웃 등으로 상태 표시줄이 큰 기기에서
     // 메시지 리스트가 음수로 눌려 하단이 넘치지 않는다.
-    final double photoPickerMaximumHeight =
-        math.max(
-          resolvedPhotoPickerHeight,
-          math.min(
-            mediaQuery.size.height * 0.89,
-            mediaQuery.size.height -
-                mediaQuery.padding.top -
-                _ChatTopBar.height -
-                12,
-          ),
-        );
+    final double photoPickerMaximumHeight = math.max(
+      resolvedPhotoPickerHeight,
+      math.min(
+        mediaQuery.size.height * 0.89,
+        mediaQuery.size.height -
+            mediaQuery.padding.top -
+            _ChatTopBar.height -
+            12,
+      ),
+    );
 
-    final double bottomSurfaceHeight =
-        _photoPickerOpen
+    final double bottomSurfaceHeight = _photoPickerOpen
         ? resolvedPhotoPickerHeight
         : _attachmentPanelOpen
         ? attachmentPanelHeight
-        : math.max(
-            passiveBottomHeight,
-            _heldBottomSurfaceHeight ?? 0,
-          );
+        : math.max(passiveBottomHeight, _heldBottomSurfaceHeight ?? 0);
 
     final double searchToolbarBottom = keyboardHeight > 0.5
         ? keyboardHeight + 10
@@ -1934,7 +1906,17 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
         ? searchToolbarBottom + 70
         : _messageToComposerGap;
 
-    final double messageListTopPadding = 8;
+    final double messageListHeaderInset = showingVoiceCallScreen
+        ? 0
+        : mediaQuery.padding.top +
+              (_searchModeActive
+                  ? _ChatSearchTopBar.height
+                  : _ChatTopBar.height) +
+              (showActiveVoiceCallBanner
+                  ? _ActiveVoiceCallBanner.occupiedHeight
+                  : 0);
+
+    final double messageListTopPadding = messageListHeaderInset + 8;
 
     final bool animateBottomSurfaceHeight =
         !_photoPickerDragging &&
@@ -1948,7 +1930,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
       child: Scaffold(
         backgroundColor: showingVoiceCallScreen
             ? AppColors.black
-            : ChatStylePreviewScreen._chatBackgroundColor,
+            : ChatConversationView._chatBackgroundColor,
         resizeToAvoidBottomInset: false,
         body: SafeArea(
           top: false,
@@ -1964,7 +1946,11 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
                       currentUserId: widget.currentUserId,
                       otherParticipantId: widget.otherParticipantId,
                       otherParticipantName: widget.otherParticipantName,
+                      onTranslateMessage: widget.onTranslateMessage,
                       onDeleteMessage: widget.onDeleteMessage,
+                      translationDelay: widget.translationDelay,
+                      initialClock: widget.initialClock,
+                      nextLocalMessageId: widget.nextLocalMessageId,
                       onReplySelected: _beginReply,
                       onEditSelected: _beginEdit,
                       onBackgroundTap: _searchModeActive
@@ -2038,18 +2024,17 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
                                       maximumHeight: photoPickerMaximumHeight,
                                     );
                                   },
-                              onPhotoPickerDragEnd:
-                                  (DragEndDetails details) {
-                                    _handlePhotoPickerDragEnd(
-                                      details,
-                                      maximumHeight: photoPickerMaximumHeight,
-                                    );
-                                  },
+                              onPhotoPickerDragEnd: (DragEndDetails details) {
+                                _handlePhotoPickerDragEnd(
+                                  details,
+                                  maximumHeight: photoPickerMaximumHeight,
+                                );
+                              },
                             ),
                           ],
                         ),
                       ),
-                  ),
+                    ),
                 ],
               ),
 
@@ -2094,9 +2079,7 @@ final class _ChatStylePreviewScreenState extends State<ChatStylePreviewScreen>
                   right: 0,
                   bottom: resolvedPhotoPickerHeight,
                   child: const AbsorbPointer(
-                    child: ColoredBox(
-                      color: Color(0x52000000),
-                    ),
+                    child: ColoredBox(color: Color(0x52000000)),
                   ),
                 ),
               if (showingVoiceCallScreen)
@@ -2216,8 +2199,6 @@ final class _TranslucentTopBarSurface extends StatelessWidget {
     super.key,
   });
 
-  static const double _blurFadeOverflow = 104;
-
   final double height;
   final Widget child;
 
@@ -2232,7 +2213,7 @@ final class _TranslucentTopBarSurface extends StatelessWidget {
             left: 0,
             top: 0,
             right: 0,
-            height: height + _blurFadeOverflow,
+            height: height,
             child: const IgnorePointer(child: _TopBarGradientBlur()),
           ),
           Positioned.fill(child: child),
@@ -2251,14 +2232,16 @@ final class _TopBarGradientBlur extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         const _TopBarBlurFade(
-          sigma: 42,
-          alphas: [255, 255, 232, 92, 0],
-          stops: [0, 0.32, 0.58, 0.9, 1],
+          sigma: 64,
+          tintAlpha: 38,
+          alphas: [255, 255, 255, 220, 96, 0],
+          stops: [0, 0.28, 0.46, 0.66, 0.86, 1],
         ),
         const _TopBarBlurFade(
-          sigma: 24,
-          alphas: [255, 242, 172, 64, 0],
-          stops: [0, 0.48, 0.72, 0.92, 1],
+          sigma: 34,
+          tintAlpha: 24,
+          alphas: [255, 255, 232, 150, 54, 0],
+          stops: [0, 0.4, 0.62, 0.82, 0.94, 1],
         ),
         DecoratedBox(
           decoration: BoxDecoration(
@@ -2266,12 +2249,13 @@ final class _TopBarGradientBlur extends StatelessWidget {
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [
-                AppColors.surface.withAlpha(214),
-                AppColors.surface.withAlpha(150),
-                AppColors.surface.withAlpha(64),
+                AppColors.surface.withAlpha(238),
+                AppColors.surface.withAlpha(226),
+                AppColors.surface.withAlpha(176),
+                AppColors.surface.withAlpha(76),
                 AppColors.surface.withAlpha(0),
               ],
-              stops: [0, 0.36, 0.74, 1],
+              stops: [0, 0.3, 0.54, 0.8, 1],
             ),
           ),
         ),
@@ -2283,11 +2267,13 @@ final class _TopBarGradientBlur extends StatelessWidget {
 final class _TopBarBlurFade extends StatelessWidget {
   const _TopBarBlurFade({
     required this.sigma,
+    required this.tintAlpha,
     required this.alphas,
     required this.stops,
   });
 
   final double sigma;
+  final int tintAlpha;
   final List<int> alphas;
   final List<double> stops;
 
@@ -2308,7 +2294,10 @@ final class _TopBarBlurFade extends StatelessWidget {
       child: ClipRect(
         child: BackdropFilter(
           filter: ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
-          child: const SizedBox.expand(),
+          child: ColoredBox(
+            color: AppColors.surface.withAlpha(tintAlpha),
+            child: const SizedBox.expand(),
+          ),
         ),
       ),
     );
@@ -2587,19 +2576,11 @@ final class _CalendarSearchIcon extends StatelessWidget {
     return Stack(
       alignment: Alignment.center,
       children: const [
-        Icon(
-          Icons.calendar_today_rounded,
-          color: AppColors.grey900,
-          size: 26,
-        ),
+        Icon(Icons.calendar_today_rounded, color: AppColors.grey900, size: 26),
         Positioned(
           right: 4,
           bottom: 4,
-          child: Icon(
-            Icons.search_rounded,
-            color: AppColors.grey900,
-            size: 13,
-          ),
+          child: Icon(Icons.search_rounded, color: AppColors.grey900, size: 13),
         ),
       ],
     );
@@ -2648,9 +2629,8 @@ final class _SearchDateSheetState extends State<_SearchDateSheet> {
     super.initState();
 
     _enabledDates = widget.enabledDates.map(_dateOnly).toSet();
-    _enabledMonths =
-        _enabledDates.map(_monthOnly).toSet().toList()
-          ..sort((DateTime a, DateTime b) => a.compareTo(b));
+    _enabledMonths = _enabledDates.map(_monthOnly).toSet().toList()
+      ..sort((DateTime a, DateTime b) => a.compareTo(b));
     _selectedDate = _dateOnly(widget.initialDate);
     _visibleMonth = _monthOnly(widget.initialDate);
   }
@@ -2663,7 +2643,9 @@ final class _SearchDateSheetState extends State<_SearchDateSheet> {
   }
 
   bool get _canMoveToPreviousMonth {
-    return _enabledMonths.any((DateTime month) => month.isBefore(_visibleMonth));
+    return _enabledMonths.any(
+      (DateTime month) => month.isBefore(_visibleMonth),
+    );
   }
 
   bool get _canMoveToNextMonth {
@@ -2818,10 +2800,7 @@ final class _SearchDateSheetState extends State<_SearchDateSheet> {
   Widget _buildCalendar(BuildContext context) {
     final int leadingBlankCount =
         DateTime(_visibleMonth.year, _visibleMonth.month).weekday % 7;
-    final int dayCount = _daysInMonth(
-      _visibleMonth.year,
-      _visibleMonth.month,
-    );
+    final int dayCount = _daysInMonth(_visibleMonth.year, _visibleMonth.month);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2857,7 +2836,8 @@ final class _SearchDateSheetState extends State<_SearchDateSheet> {
             for (int day = 1; day <= dayCount; day++)
               _SearchDateCell(
                 date: DateTime(_visibleMonth.year, _visibleMonth.month, day),
-                selected: _selectedDate ==
+                selected:
+                    _selectedDate ==
                     DateTime(_visibleMonth.year, _visibleMonth.month, day),
                 enabled: _enabledDates.contains(
                   DateTime(_visibleMonth.year, _visibleMonth.month, day),
@@ -3083,10 +3063,7 @@ final class _SearchDateCell extends StatelessWidget {
 }
 
 final class _SearchDateSheetButton extends StatelessWidget {
-  const _SearchDateSheetButton({
-    required this.label,
-    required this.onPressed,
-  });
+  const _SearchDateSheetButton({required this.label, required this.onPressed});
 
   final String label;
   final VoidCallback? onPressed;
@@ -3469,7 +3446,9 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
     final Color backgroundColor = isActive
         ? AppColors.primary
         : AppColors.grey100;
-    final Color foregroundColor = isActive ? AppColors.white : AppColors.grey500;
+    final Color foregroundColor = isActive
+        ? AppColors.white
+        : AppColors.grey500;
     final Duration displayDuration = elapsed;
     final double progress = elapsed.inMilliseconds == 0
         ? 0
@@ -3499,7 +3478,8 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
                     ? _VoiceMemoWaveform(
                         color: foregroundColor,
                         progress: progress.clamp(0, 1).toDouble(),
-                        emphasized: mode == _VoiceMemoSheetMode.recording ||
+                        emphasized:
+                            mode == _VoiceMemoSheetMode.recording ||
                             mode == _VoiceMemoSheetMode.playing,
                       )
                     : const SizedBox.shrink(),
@@ -3755,6 +3735,10 @@ final class _ActiveVoiceCallBanner extends StatelessWidget {
     required this.onPressed,
   });
 
+  static const double _verticalPadding = 8;
+  static const double _buttonHeight = 52;
+  static const double occupiedHeight = _buttonHeight + (_verticalPadding * 2);
+
   final bool connected;
   final Duration elapsed;
   final VoidCallback onPressed;
@@ -3768,7 +3752,12 @@ final class _ActiveVoiceCallBanner extends StatelessWidget {
     return Align(
       alignment: Alignment.centerLeft,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
+        padding: const EdgeInsets.fromLTRB(
+          10,
+          _verticalPadding,
+          0,
+          _verticalPadding,
+        ),
         child: Semantics(
           button: true,
           label: semanticLabel,
@@ -3781,7 +3770,7 @@ final class _ActiveVoiceCallBanner extends StatelessWidget {
               onTap: onPressed,
               child: SizedBox(
                 width: connected ? 126 : 122,
-                height: 52,
+                height: _buttonHeight,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -3944,9 +3933,7 @@ final class _VoiceCallScreen extends StatelessWidget {
                           alignment: Alignment.center,
                           decoration: const BoxDecoration(
                             color: AppColors.blue100,
-                            borderRadius: BorderRadius.all(
-                              Radius.circular(32),
-                            ),
+                            borderRadius: BorderRadius.all(Radius.circular(32)),
                           ),
                           child: const Icon(
                             Icons.person_rounded,
@@ -4277,10 +4264,7 @@ List<String> _searchableTextSegmentsFor(ChatMessage message) {
   return segments;
 }
 
-bool _messageMatchesSearchQuery(
-  ChatMessage message,
-  String normalizedQuery,
-) {
+bool _messageMatchesSearchQuery(ChatMessage message, String normalizedQuery) {
   if (normalizedQuery.isEmpty) {
     return false;
   }
@@ -4327,7 +4311,11 @@ final class _MessageList extends StatefulWidget {
     required this.currentUserId,
     required this.otherParticipantId,
     required this.otherParticipantName,
+    required this.onTranslateMessage,
     required this.onDeleteMessage,
+    required this.translationDelay,
+    required this.initialClock,
+    required this.nextLocalMessageId,
     required this.onReplySelected,
     required this.onEditSelected,
     required this.onBackgroundTap,
@@ -4340,16 +4328,20 @@ final class _MessageList extends StatefulWidget {
   });
 
   final List<ChatMessage>? initialMessages;
-  final int currentUserId;
-  final int otherParticipantId;
+  final String currentUserId;
+  final String otherParticipantId;
   final String otherParticipantName;
+  final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageDeleter? onDeleteMessage;
+  final Duration translationDelay;
+  final DateTime? initialClock;
+  final int nextLocalMessageId;
   final _ReplySelectedCallback onReplySelected;
   final _EditSelectedCallback onEditSelected;
   final VoidCallback onBackgroundTap;
   final Future<void> Function() onPrepareMessageActions;
   final String searchQuery;
-  final int? activeSearchMessageId;
+  final String? activeSearchMessageId;
   final double topPadding;
   final double bottomPadding;
 
@@ -4360,179 +4352,42 @@ final class _MessageList extends StatefulWidget {
 }
 
 final class _MessageListState extends State<_MessageList> {
-  static const Duration _previewTranslationDelay = Duration(seconds: 5);
-
   static const double _replyOriginalAlignment = 0.28;
 
-  static const Map<int, String> _previewTranslations = {
-    1: '오빠, 나 곧 탑승해.',
-    2: '네가 계속 말해주길 기다리고 있어.',
-    5: '미안해, 오빠.',
-    6: '다음에는 제대로 말할게.',
-    101: '그럼 만약 어느 날 내가 벌레가 되면 오빠는 어떻게 할 거야?',
-    102: '🥺',
-    105: '알을 낳는다고🥚??',
-    106: 'ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ',
-    107:
-        '그럼 풀어놓고 키워도 돼? 나는 새장에 갇히고 싶지 않고, '
-        '오빠랑 꼭 안고 자고 뽀뽀도 하고 싶어.',
-  };
-
-  final Set<int> _showTranslatedMessageIds = <int>{};
-  final Map<int, GlobalKey> _messageBubbleKeys = <int, GlobalKey>{};
+  final Set<String> _showTranslatedMessageIds = <String>{};
+  final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
   final ScrollController _scrollController = ScrollController();
   bool _didResolveInitialScrollPosition = false;
 
   Timer? _messageHighlightTimer;
 
-  int? _highlightedMessageId;
-  int? _returnToReplyMessageId;
+  String? _highlightedMessageId;
+  String? _returnToReplyMessageId;
   double? _returnToReplyScrollOffset;
 
   bool _replyNavigationInProgress = false;
 
-  late DateTime _previewNow;
+  late DateTime _messageClock;
   late List<ChatMessage> _messages;
-  int _nextMessageId = 9;
+  late int _nextMessageId;
 
   @override
   void initState() {
     super.initState();
 
-    _previewNow = DateTime(2026, 7, 1, 12, 51);
-
-    _messages = widget.initialMessages != null
-        ? List<ChatMessage>.of(widget.initialMessages!)
-        : [
-      ChatMessage(
-        id: 1,
-        senderId: 2,
-        recipientId: 1,
-        content: '欧巴我快要登机了',
-        translationStatus: ChatTranslationStatus.none,
-        createdAt: DateTime(2026, 6, 30, 20, 30, 5),
-      ),
-      ChatMessage(
-        id: 2,
-        senderId: 2,
-        recipientId: 1,
-        content: '我等你继续说呢',
-        translatedContent: '네가 계속 말해주길 기다리고 있어.',
-        translationStatus: ChatTranslationStatus.translated,
-        createdAt: DateTime(2026, 6, 30, 20, 30, 45),
-      ),
-      ChatMessage(
-        id: 3,
-        senderId: 1,
-        recipientId: 2,
-        content: '알아 장난이야',
-        createdAt: DateTime(2026, 6, 30, 20, 31, 10),
-        readAt: DateTime(2026, 6, 30, 20, 33, 50),
-      ),
-      ChatMessage(
-        id: 4,
-        senderId: 1,
-        recipientId: 2,
-        content: '타이밍이 웃겨서',
-        createdAt: DateTime(2026, 6, 30, 20, 31, 40),
-        readAt: DateTime(2026, 6, 30, 20, 34, 10),
-      ),
-      ChatMessage(
-        id: 5,
-        senderId: 2,
-        recipientId: 1,
-        content: '抱歉啦欧巴',
-        translatedContent: '미안해, 오빠.',
-        translationStatus: ChatTranslationStatus.translated,
-        createdAt: DateTime(2026, 6, 30, 20, 32, 5),
-      ),
-      ChatMessage(
-        id: 6,
-        senderId: 2,
-        recipientId: 1,
-        content: '我下次会好好说的',
-        translationStatus: ChatTranslationStatus.failed,
-        translationFailureReason: 'Network error',
-        createdAt: DateTime(2026, 6, 30, 20, 32, 40),
-      ),
-      ChatMessage(
-        id: 7,
-        senderId: 1,
-        recipientId: 2,
-        content: '나 곧 탑승하는데',
-        createdAt: DateTime(2026, 6, 30, 20, 34, 5),
-      ),
-      ChatMessage(
-        id: 8,
-        senderId: 1,
-        recipientId: 2,
-        content: '너는 계속 얘기해도 돼',
-        createdAt: DateTime(2026, 6, 30, 20, 34, 45),
-      ),
-      ChatMessage(
-        id: 101,
-        senderId: 2,
-        recipientId: 1,
-        content: '那如果有一天我变成虫子了 欧巴怎么办',
-        createdAt: DateTime(2026, 7, 1, 12, 45, 5),
-      ),
-      ChatMessage(
-        id: 102,
-        senderId: 2,
-        recipientId: 1,
-        content: '🥺',
-        createdAt: DateTime(2026, 7, 1, 12, 45, 35),
-      ),
-      ChatMessage(
-        id: 103,
-        senderId: 1,
-        recipientId: 2,
-        content: '알 낳을거야?',
-        createdAt: DateTime(2026, 7, 1, 12, 47, 5),
-        readAt: DateTime(2026, 7, 1, 12, 50, 30),
-      ),
-      ChatMessage(
-        id: 104,
-        senderId: 1,
-        recipientId: 2,
-        content: '더 번식 안 하고 너만 있는거면 내가 잘 키워줄게',
-        createdAt: DateTime(2026, 7, 1, 12, 47, 35),
-        readAt: DateTime(2026, 7, 1, 12, 50, 30),
-      ),
-      ChatMessage(
-        id: 105,
-        senderId: 2,
-        recipientId: 1,
-        content: '下蛋🥚？？',
-        createdAt: DateTime(2026, 7, 1, 12, 50, 5),
-      ),
-      ChatMessage(
-        id: 106,
-        senderId: 2,
-        recipientId: 1,
-        content: '哈哈哈哈哈哈哈哈哈哈哈哈哈',
-        createdAt: DateTime(2026, 7, 1, 12, 50, 25),
-      ),
-      ChatMessage(
-        id: 107,
-        senderId: 2,
-        recipientId: 1,
-        content:
-            '那可以放养吗 我不想被关进笼子里 '
-            '还想和你抱抱睡觉觉 然后亲亲',
-        createdAt: DateTime(2026, 7, 1, 12, 50, 45),
-      ),
-          ];
-
-    if (widget.initialMessages != null && _messages.isNotEmpty) {
-      _nextMessageId =
-          _messages.map((ChatMessage message) => message.id).reduce(math.max) +
-          1;
-    }
+    _messageClock = widget.initialClock ?? DateTime.now();
+    _messages = List<ChatMessage>.of(
+      widget.initialMessages ?? const <ChatMessage>[],
+    );
+    _nextMessageId = widget.nextLocalMessageId;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _resolveInitialScrollPosition();
     });
+  }
+
+  String _nextLocalMessageId() {
+    return '${_nextMessageId++}';
   }
 
   void _resolveInitialScrollPosition() {
@@ -4592,18 +4447,14 @@ final class _MessageListState extends State<_MessageList> {
   void didUpdateWidget(covariant _MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (widget.initialMessages == null ||
-        identical(widget.initialMessages, oldWidget.initialMessages)) {
+    if (identical(widget.initialMessages, oldWidget.initialMessages)) {
       return;
     }
 
-    _messages = List<ChatMessage>.of(widget.initialMessages!);
+    _messages = List<ChatMessage>.of(
+      widget.initialMessages ?? const <ChatMessage>[],
+    );
 
-    if (_messages.isNotEmpty) {
-      _nextMessageId =
-          _messages.map((ChatMessage message) => message.id).reduce(math.max) +
-          1;
-    }
   }
 
   void addMessage(ChatMessage message) {
@@ -4619,7 +4470,6 @@ final class _MessageListState extends State<_MessageList> {
       }
 
       _messages.sort(_compareMessages);
-      _nextMessageId = math.max(_nextMessageId, message.id + 1);
     });
   }
 
@@ -4640,7 +4490,6 @@ final class _MessageListState extends State<_MessageList> {
           _messages[existingIndex] = message;
         }
 
-        _nextMessageId = math.max(_nextMessageId, message.id + 1);
       }
 
       _messages.sort(_compareMessages);
@@ -4665,9 +4514,7 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   int _compareMessages(ChatMessage first, ChatMessage second) {
-    final int createdAtComparison = first.createdAt.compareTo(
-      second.createdAt,
-    );
+    final int createdAtComparison = first.createdAt.compareTo(second.createdAt);
 
     if (createdAtComparison != 0) {
       return createdAtComparison;
@@ -4681,20 +4528,20 @@ final class _MessageListState extends State<_MessageList> {
     ChatReplyReference? replyTo,
   }) {
     setState(() {
-      _previewNow = _previewNow.add(const Duration(minutes: 1));
+      final DateTime createdAt = DateTime.now();
+      _messageClock = createdAt;
 
       _messages.add(
         ChatMessage(
-          id: _nextMessageId,
+          id: _nextLocalMessageId(),
           senderId: widget.currentUserId,
           recipientId: widget.otherParticipantId,
           content: content,
-          createdAt: _previewNow,
+          createdAt: createdAt,
           replyTo: replyTo,
         ),
       );
 
-      _nextMessageId++;
     });
   }
 
@@ -4707,14 +4554,12 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     setState(() {
-      final DateTime baseCreatedAt = _previewNow.add(
-        const Duration(minutes: 1),
-      );
+      final DateTime baseCreatedAt = DateTime.now();
 
       if (collage) {
         _messages.add(
           ChatMessage(
-            id: _nextMessageId,
+            id: _nextLocalMessageId(),
             senderId: widget.currentUserId,
             recipientId: widget.otherParticipantId,
             content: '',
@@ -4725,8 +4570,7 @@ final class _MessageListState extends State<_MessageList> {
           ),
         );
 
-        _nextMessageId++;
-        _previewNow = baseCreatedAt;
+        _messageClock = baseCreatedAt;
         return;
       }
 
@@ -4735,7 +4579,7 @@ final class _MessageListState extends State<_MessageList> {
 
         _messages.add(
           ChatMessage(
-            id: _nextMessageId,
+            id: _nextLocalMessageId(),
             senderId: widget.currentUserId,
             recipientId: widget.otherParticipantId,
             content: '',
@@ -4744,55 +4588,46 @@ final class _MessageListState extends State<_MessageList> {
           ),
         );
 
-        _nextMessageId++;
-        _previewNow = createdAt;
+        _messageClock = createdAt;
       }
     });
   }
 
-  void addOutgoingFileMessage({
-    required String name,
-    required int sizeBytes,
-  }) {
+  void addOutgoingFileMessage({required String name, required int sizeBytes}) {
     setState(() {
-      _previewNow = _previewNow.add(const Duration(minutes: 1));
+      final DateTime createdAt = DateTime.now();
+      _messageClock = createdAt;
 
       _messages.add(
         ChatMessage(
-          id: _nextMessageId,
+          id: _nextLocalMessageId(),
           senderId: widget.currentUserId,
           recipientId: widget.otherParticipantId,
           content: '',
-          createdAt: _previewNow,
-          fileAttachment: ChatFileAttachment(
-            name: name,
-            sizeBytes: sizeBytes,
-          ),
+          createdAt: createdAt,
+          fileAttachment: ChatFileAttachment(name: name, sizeBytes: sizeBytes),
         ),
       );
 
-      _nextMessageId++;
     });
   }
 
   void addOutgoingVoiceMemoMessage({required Duration duration}) {
     setState(() {
-      _previewNow = _previewNow.add(const Duration(minutes: 1));
+      final DateTime createdAt = DateTime.now();
+      _messageClock = createdAt;
 
       _messages.add(
         ChatMessage(
-          id: _nextMessageId,
+          id: _nextLocalMessageId(),
           senderId: widget.currentUserId,
           recipientId: widget.otherParticipantId,
           content: '',
-          createdAt: _previewNow,
-          voiceMemoAttachment: ChatVoiceMemoAttachment(
-            duration: duration,
-          ),
+          createdAt: createdAt,
+          voiceMemoAttachment: ChatVoiceMemoAttachment(duration: duration),
         ),
       );
 
-      _nextMessageId++;
     });
   }
 
@@ -4802,20 +4637,12 @@ final class _MessageListState extends State<_MessageList> {
     bool advanceClock = true,
   }) {
     setState(() {
-      final DateTime createdAt;
-
-      if (advanceClock) {
-        createdAt = _previewNow.add(const Duration(minutes: 1));
-      } else {
-        final int seconds = math.max(1, duration.inSeconds);
-        createdAt = _previewNow.add(Duration(seconds: seconds));
-      }
-
-      _previewNow = createdAt;
+      final DateTime createdAt = DateTime.now();
+      _messageClock = createdAt;
 
       _messages.add(
         ChatMessage(
-          id: _nextMessageId,
+          id: _nextLocalMessageId(),
           senderId: widget.currentUserId,
           recipientId: widget.otherParticipantId,
           content: '',
@@ -4828,11 +4655,13 @@ final class _MessageListState extends State<_MessageList> {
         ),
       );
 
-      _nextMessageId++;
     });
   }
 
-  bool updateMessageContent({required int messageId, required String content}) {
+  bool updateMessageContent({
+    required String messageId,
+    required String content,
+  }) {
     final int messageIndex = _messages.indexWhere(
       (ChatMessage message) => message.id == messageId,
     );
@@ -4843,38 +4672,38 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     setState(() {
+      _messageClock = DateTime.now();
+
       _messages[messageIndex] = _messages[messageIndex].copyWith(
         content: content,
-        editedAt: _previewNow,
+        editedAt: _messageClock,
       );
     });
 
     return true;
   }
 
-  List<int> searchMessageIds(String query) {
+  List<String> searchMessageIds(String query) {
     final String normalizedQuery = _normalizeSearchQuery(query);
 
     if (normalizedQuery.isEmpty) {
-      return const <int>[];
+      return const <String>[];
     }
 
     final List<ChatMessage> sortedMessages = List<ChatMessage>.of(_messages)
-      ..sort(
-        (ChatMessage first, ChatMessage second) {
-          final int createdAtComparison = first.createdAt.compareTo(
-            second.createdAt,
-          );
+      ..sort((ChatMessage first, ChatMessage second) {
+        final int createdAtComparison = first.createdAt.compareTo(
+          second.createdAt,
+        );
 
-          if (createdAtComparison != 0) {
-            return createdAtComparison;
-          }
+        if (createdAtComparison != 0) {
+          return createdAtComparison;
+        }
 
-          return first.id.compareTo(second.id);
-        },
-      );
+        return first.id.compareTo(second.id);
+      });
 
-    return <int>[
+    return <String>[
       for (final ChatMessage message in sortedMessages)
         if (_messageMatchesSearchQuery(message, normalizedQuery)) message.id,
     ];
@@ -4888,23 +4717,21 @@ final class _MessageListState extends State<_MessageList> {
     };
   }
 
-  int? firstSearchableMessageIdOnDate(DateTime date) {
+  String? firstSearchableMessageIdOnDate(DateTime date) {
     final DateTime targetDate = _dateOnly(date);
 
     final List<ChatMessage> sortedMessages = List<ChatMessage>.of(_messages)
-      ..sort(
-        (ChatMessage first, ChatMessage second) {
-          final int createdAtComparison = first.createdAt.compareTo(
-            second.createdAt,
-          );
+      ..sort((ChatMessage first, ChatMessage second) {
+        final int createdAtComparison = first.createdAt.compareTo(
+          second.createdAt,
+        );
 
-          if (createdAtComparison != 0) {
-            return createdAtComparison;
-          }
+        if (createdAtComparison != 0) {
+          return createdAtComparison;
+        }
 
-          return first.id.compareTo(second.id);
-        },
-      );
+        return first.id.compareTo(second.id);
+      });
 
     for (final ChatMessage message in sortedMessages) {
       if (_dateOnly(message.createdAt) == targetDate &&
@@ -4951,7 +4778,7 @@ final class _MessageListState extends State<_MessageList> {
     );
   }
 
-  RenderObject? _messageRenderObject(int messageId) {
+  RenderObject? _messageRenderObject(String messageId) {
     final GlobalKey? messageKey = _messageBubbleKeys[messageId];
 
     final BuildContext? messageContext = messageKey?.currentContext;
@@ -4970,7 +4797,7 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   Future<bool> _scrollToMessage(
-    int messageId, {
+    String messageId, {
     required double alignment,
   }) async {
     final int targetIndex = _messages.indexWhere(
@@ -5102,12 +4929,12 @@ final class _MessageListState extends State<_MessageList> {
     return false;
   }
 
-  Future<bool> scrollToSearchMessage(int messageId) {
+  Future<bool> scrollToSearchMessage(String messageId) {
     return _scrollToMessage(messageId, alignment: 0.24);
   }
 
   Future<bool> scrollToSearchDate(DateTime date) async {
-    final int? messageId = firstSearchableMessageIdOnDate(date);
+    final String? messageId = firstSearchableMessageIdOnDate(date);
 
     if (messageId == null) {
       return false;
@@ -5116,7 +4943,7 @@ final class _MessageListState extends State<_MessageList> {
     return _scrollToMessage(messageId, alignment: 0.24);
   }
 
-  void _flashMessage(int messageId) {
+  void _flashMessage(String messageId) {
     if (!mounted || _findMessage(messageId) == null) {
       return;
     }
@@ -5144,7 +4971,7 @@ final class _MessageListState extends State<_MessageList> {
     _activateMessageHighlight(messageId);
   }
 
-  void _activateMessageHighlight(int messageId) {
+  void _activateMessageHighlight(String messageId) {
     if (!mounted || _findMessage(messageId) == null) {
       return;
     }
@@ -5165,8 +4992,8 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   Future<void> _handleReplyQuoteTap({
-    required int replyMessageId,
-    required int originalMessageId,
+    required String replyMessageId,
+    required String originalMessageId,
   }) async {
     if (_replyNavigationInProgress ||
         _findMessage(replyMessageId) == null ||
@@ -5204,7 +5031,7 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   Future<void> _handleBackToReplyMessage() async {
-    final int? replyMessageId = _returnToReplyMessageId;
+    final String? replyMessageId = _returnToReplyMessageId;
 
     final double? returnScrollOffset = _returnToReplyScrollOffset;
 
@@ -5258,7 +5085,7 @@ final class _MessageListState extends State<_MessageList> {
     }
   }
 
-  void _handleIncomingMessageTap(int messageId) {
+  void _handleIncomingMessageTap(String messageId) {
     final ChatMessage? message = _findMessage(messageId);
 
     if (message == null) {
@@ -5300,12 +5127,14 @@ final class _MessageListState extends State<_MessageList> {
       );
   }
 
-  void _retryTranslation(int messageId) {
+  void _retryTranslation(String messageId) {
     unawaited(_startTranslation(messageId));
   }
 
   String _displayedContentFor(ChatMessage message) {
-    if (message.isPhotoMessage || message.isFileMessage || message.isCallMessage) {
+    if (message.isPhotoMessage ||
+        message.isFileMessage ||
+        message.isCallMessage) {
       return message.replyPreviewContent;
     }
 
@@ -5352,8 +5181,11 @@ final class _MessageListState extends State<_MessageList> {
     final List<ChatMessageAction> actions = availableChatMessageActions(
       isOutgoing: message.senderId == widget.currentUserId,
       createdAt: message.createdAt,
-      now: _previewNow,
-      isMedia: message.isPhotoMessage || message.isFileMessage || message.isCallMessage,
+      now: _messageClock,
+      isMedia:
+          message.isPhotoMessage ||
+          message.isFileMessage ||
+          message.isCallMessage,
     );
 
     ChatMessageAction? selectedAction;
@@ -5436,7 +5268,7 @@ final class _MessageListState extends State<_MessageList> {
     }
   }
 
-  Future<void> _unsendMessage(int messageId) async {
+  Future<void> _unsendMessage(String messageId) async {
     final ChatMessageDeleter? deleter = widget.onDeleteMessage;
 
     if (deleter != null) {
@@ -5472,7 +5304,13 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
-  Future<void> _startTranslation(int messageId) async {
+  Future<void> _startTranslation(String messageId) async {
+    final ChatMessageTranslator? translateMessage = widget.onTranslateMessage;
+
+    if (translateMessage == null) {
+      return;
+    }
+
     final int messageIndex = _messages.indexWhere(
       (ChatMessage message) => message.id == messageId,
     );
@@ -5496,7 +5334,7 @@ final class _MessageListState extends State<_MessageList> {
       );
     });
 
-    await Future<void>.delayed(_previewTranslationDelay);
+    await Future<void>.delayed(widget.translationDelay);
 
     if (!mounted) {
       return;
@@ -5510,7 +5348,9 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
-    final String? translatedContent = _previewTranslations[messageId];
+    final String? translatedContent = await translateMessage(
+      _messages[refreshedIndex],
+    );
 
     if (translatedContent == null) {
       setState(() {
@@ -5534,11 +5374,11 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
-  GlobalKey _messageBubbleKeyFor(int messageId) {
+  GlobalKey _messageBubbleKeyFor(String messageId) {
     return _messageBubbleKeys.putIfAbsent(messageId, () => GlobalKey());
   }
 
-  ChatMessage? _findMessage(int messageId) {
+  ChatMessage? _findMessage(String messageId) {
     for (final ChatMessage message in _messages) {
       if (message.id == messageId) {
         return message;
@@ -5548,7 +5388,7 @@ final class _MessageListState extends State<_MessageList> {
     return null;
   }
 
-  ChatMessage? findMessage(int messageId) {
+  ChatMessage? findMessage(String messageId) {
     return _findMessage(messageId);
   }
 
@@ -5556,7 +5396,7 @@ final class _MessageListState extends State<_MessageList> {
   Widget build(BuildContext context) {
     final List<ChatMessageGroup> groups = groupChatMessages(_messages);
 
-    final int? latestReadMessageId = findLatestReadOutgoingMessageId(
+    final String? latestReadMessageId = findLatestReadOutgoingMessageId(
       messages: _messages,
       currentUserId: widget.currentUserId,
     );
@@ -5611,7 +5451,7 @@ final class _MessageListState extends State<_MessageList> {
 
   List<Widget> _buildTimeline({
     required List<ChatMessageGroup> groups,
-    required int? latestReadMessageId,
+    required String? latestReadMessageId,
   }) {
     final List<Widget> timeline = [];
 
@@ -5634,11 +5474,12 @@ final class _MessageListState extends State<_MessageList> {
           currentUserId: widget.currentUserId,
           otherParticipantName: widget.otherParticipantName,
           latestReadMessageId: latestReadMessageId,
-          now: _previewNow,
+          now: _messageClock,
           shownTranslatedMessageIds: _showTranslatedMessageIds,
           highlightedMessageId:
               _highlightedMessageId ?? widget.activeSearchMessageId,
           searchQuery: widget.searchQuery,
+          canRequestTranslation: widget.onTranslateMessage != null,
           onIncomingMessageTap: _handleIncomingMessageTap,
           onFileMessageTap: _handleFileMessageTap,
           onRetryTranslation: _retryTranslation,
@@ -5888,7 +5729,7 @@ final class _ReplyMessageBody extends StatelessWidget {
   });
 
   final ChatMessage message;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
   final bool isOutgoing;
   final String searchQuery;
@@ -5904,8 +5745,7 @@ final class _ReplyMessageBody extends StatelessWidget {
     if (replyTo == null) {
       messageBody = child;
     } else {
-      final String authorLabel =
-          replyTo.senderId == currentUserId
+      final String authorLabel = replyTo.senderId == currentUserId
           ? 'Me'
           : otherParticipantName;
 
@@ -6073,6 +5913,7 @@ final class _MessageGroup extends StatelessWidget {
     required this.shownTranslatedMessageIds,
     required this.highlightedMessageId,
     required this.searchQuery,
+    required this.canRequestTranslation,
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onRetryTranslation,
@@ -6082,16 +5923,17 @@ final class _MessageGroup extends StatelessWidget {
   });
 
   final ChatMessageGroup group;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
-  final int? latestReadMessageId;
+  final String? latestReadMessageId;
   final DateTime now;
-  final Set<int> shownTranslatedMessageIds;
-  final int? highlightedMessageId;
+  final Set<String> shownTranslatedMessageIds;
+  final String? highlightedMessageId;
   final String searchQuery;
-  final ValueChanged<int> onIncomingMessageTap;
+  final bool canRequestTranslation;
+  final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
-  final ValueChanged<int> onRetryTranslation;
+  final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final _MessageBubbleKeyFor messageBubbleKeyFor;
@@ -6121,6 +5963,7 @@ final class _MessageGroup extends StatelessWidget {
       shownTranslatedMessageIds: shownTranslatedMessageIds,
       highlightedMessageId: highlightedMessageId,
       searchQuery: searchQuery,
+      canRequestTranslation: canRequestTranslation,
       onIncomingMessageTap: onIncomingMessageTap,
       onFileMessageTap: onFileMessageTap,
       onRetryTranslation: onRetryTranslation,
@@ -6139,6 +5982,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.shownTranslatedMessageIds,
     required this.highlightedMessageId,
     required this.searchQuery,
+    required this.canRequestTranslation,
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onRetryTranslation,
@@ -6148,14 +5992,15 @@ final class _IncomingMessageGroup extends StatelessWidget {
   });
 
   final List<ChatMessage> messages;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
-  final Set<int> shownTranslatedMessageIds;
-  final int? highlightedMessageId;
+  final Set<String> shownTranslatedMessageIds;
+  final String? highlightedMessageId;
   final String searchQuery;
-  final ValueChanged<int> onIncomingMessageTap;
+  final bool canRequestTranslation;
+  final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
-  final ValueChanged<int> onRetryTranslation;
+  final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final _MessageBubbleKeyFor messageBubbleKeyFor;
@@ -6186,6 +6031,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   ),
                   isHighlighted: messages[index].id == highlightedMessageId,
                   searchQuery: searchQuery,
+                  canRequestTranslation: canRequestTranslation,
                   onMessageTap: () {
                     onIncomingMessageTap(messages[index].id);
                   },
@@ -6217,6 +6063,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.showTranslation,
     required this.isHighlighted,
     required this.searchQuery,
+    required this.canRequestTranslation,
     required this.onMessageTap,
     required this.onFileMessageTap,
     required this.onRetryTranslation,
@@ -6226,13 +6073,14 @@ final class _IncomingMessageRow extends StatelessWidget {
   });
 
   final ChatMessage message;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
   final bool showTail;
   final bool showTime;
   final bool showTranslation;
   final bool isHighlighted;
   final String searchQuery;
+  final bool canRequestTranslation;
   final VoidCallback onMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final VoidCallback onRetryTranslation;
@@ -6251,8 +6099,9 @@ final class _IncomingMessageRow extends StatelessWidget {
         (!isPhotoMessage &&
             !isCallMessage &&
             !isVoiceMemoMessage &&
-            (message.translationStatus == ChatTranslationStatus.none ||
-                message.translationStatus == ChatTranslationStatus.translated));
+            (message.translationStatus == ChatTranslationStatus.translated ||
+                (canRequestTranslation &&
+                    message.translationStatus == ChatTranslationStatus.none)));
 
     final Widget content;
 
@@ -6286,19 +6135,20 @@ final class _IncomingMessageRow extends StatelessWidget {
         direction: _BubbleDirection.incoming,
         showTail: showTail,
         isHighlighted: isHighlighted,
-            child: isFileMessage
-                ? _FileMessageContent(
-                    attachment: message.fileAttachment!,
-                    isOutgoing: false,
-                  )
-                : _IncomingMessageContent(
-                    message: message,
-                    currentUserId: currentUserId,
-                    otherParticipantName: otherParticipantName,
-                    showTranslation: showTranslation,
-                    searchQuery: searchQuery,
-                    onRetryTranslation: onRetryTranslation,
-                    onReplyQuoteTap: onReplyQuoteTap,
+        child: isFileMessage
+            ? _FileMessageContent(
+                attachment: message.fileAttachment!,
+                isOutgoing: false,
+              )
+            : _IncomingMessageContent(
+                message: message,
+                currentUserId: currentUserId,
+                otherParticipantName: otherParticipantName,
+                showTranslation: showTranslation,
+                searchQuery: searchQuery,
+                canRequestTranslation: canRequestTranslation,
+                onRetryTranslation: onRetryTranslation,
+                onReplyQuoteTap: onReplyQuoteTap,
               ),
       );
     }
@@ -6344,15 +6194,17 @@ final class _IncomingMessageContent extends StatelessWidget {
     required this.otherParticipantName,
     required this.showTranslation,
     required this.searchQuery,
+    required this.canRequestTranslation,
     required this.onRetryTranslation,
     required this.onReplyQuoteTap,
   });
 
   final ChatMessage message;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
   final bool showTranslation;
   final String searchQuery;
+  final bool canRequestTranslation;
   final VoidCallback onRetryTranslation;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
 
@@ -6476,24 +6328,26 @@ final class _IncomingMessageContent extends StatelessWidget {
                   fontWeight: AppTypography.regular,
                 ),
               ),
-              const SizedBox(height: 2),
-              TextButton(
-                onPressed: onRetryTranslation,
-                style: TextButton.styleFrom(
-                  foregroundColor: AppColors.blue500,
-                  minimumSize: Size.zero,
-                  padding: EdgeInsets.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  visualDensity: VisualDensity.compact,
-                ),
-                child: Text(
-                  'Retry',
-                  style: AppTypography.subTypography12.copyWith(
-                    color: AppColors.blue500,
-                    fontWeight: AppTypography.medium,
+              if (canRequestTranslation) ...[
+                const SizedBox(height: 2),
+                TextButton(
+                  onPressed: onRetryTranslation,
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.blue500,
+                    minimumSize: Size.zero,
+                    padding: EdgeInsets.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: Text(
+                    'Retry',
+                    style: AppTypography.subTypography12.copyWith(
+                      color: AppColors.blue500,
+                      fontWeight: AppTypography.medium,
+                    ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
         );
@@ -6517,7 +6371,7 @@ final class _AnimatedTranslationText extends StatelessWidget {
     required this.style,
   });
 
-  final int messageId;
+  final String messageId;
   final String originalContent;
   final String translatedContent;
   final bool showTranslation;
@@ -6605,9 +6459,7 @@ final class _SearchHighlightedText extends StatelessWidget {
 
     for (final _SearchMatch match in matches) {
       if (match.start > cursor) {
-        children.add(
-          TextSpan(text: text.substring(cursor, match.start)),
-        );
+        children.add(TextSpan(text: text.substring(cursor, match.start)));
       }
 
       children.add(
@@ -6646,11 +6498,11 @@ final class _OutgoingMessageGroup extends StatelessWidget {
   });
 
   final List<ChatMessage> messages;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
-  final int? latestReadMessageId;
+  final String? latestReadMessageId;
   final DateTime now;
-  final int? highlightedMessageId;
+  final String? highlightedMessageId;
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _MessageLongPressCallback onMessageLongPress;
@@ -6713,7 +6565,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
   });
 
   final ChatMessage message;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
   final bool showTail;
   final bool showTime;
@@ -6836,7 +6688,7 @@ final class _PhotoMessage extends StatefulWidget {
     required this.pulseAlignment,
   });
 
-  final int messageId;
+  final String messageId;
   final List<ChatPhotoAttachment> attachments;
   final bool isHighlighted;
   final Key measurementKey;
@@ -7235,7 +7087,7 @@ final class _CallMessageBubble extends StatelessWidget {
     required this.isHighlighted,
   });
 
-  final int messageId;
+  final String messageId;
   final Key measurementKey;
   final ChatCallAttachment attachment;
   final bool isHighlighted;
@@ -7261,10 +7113,7 @@ final class _CallMessageBubble extends StatelessWidget {
         key: measurementKey,
         children: [
           ConstrainedBox(
-            constraints: BoxConstraints(
-              minWidth: minWidth,
-              maxWidth: maxWidth,
-            ),
+            constraints: BoxConstraints(minWidth: minWidth, maxWidth: maxWidth),
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: AppColors.white,
@@ -7306,11 +7155,10 @@ final class _CallMessageBubble extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   textAlign: TextAlign.right,
-                                  style: AppTypography.subTypography10
-                                      .copyWith(
-                                        color: AppColors.grey900,
-                                        fontWeight: AppTypography.medium,
-                                      ),
+                                  style: AppTypography.subTypography10.copyWith(
+                                    color: AppColors.grey900,
+                                    fontWeight: AppTypography.medium,
+                                  ),
                                 ),
                                 const SizedBox(height: 1),
                                 Text(
@@ -7342,7 +7190,6 @@ final class _CallMessageBubble extends StatelessWidget {
       ),
     );
   }
-
 }
 
 final class _VoiceMemoMessageBubble extends StatelessWidget {
@@ -7353,7 +7200,7 @@ final class _VoiceMemoMessageBubble extends StatelessWidget {
     required this.isHighlighted,
   });
 
-  final int messageId;
+  final String messageId;
   final Key measurementKey;
   final ChatVoiceMemoAttachment attachment;
   final bool isHighlighted;
@@ -7517,7 +7364,7 @@ final class _MessageBubble extends StatefulWidget {
     this.measurementKey,
   });
 
-  final int messageId;
+  final String messageId;
   final Color backgroundColor;
   final _BubbleDirection direction;
   final bool showTail;
@@ -7881,14 +7728,11 @@ final class _ComposerBottomSurface extends StatelessWidget {
   final VoidCallback onClosePhotoPicker;
   final ChatPhotoSendCallback onSendPhotos;
 
-  final GestureDragStartCallback
-      onPhotoPickerDragStart;
+  final GestureDragStartCallback onPhotoPickerDragStart;
 
-  final GestureDragUpdateCallback
-      onPhotoPickerDragUpdate;
+  final GestureDragUpdateCallback onPhotoPickerDragUpdate;
 
-  final GestureDragEndCallback
-      onPhotoPickerDragEnd;
+  final GestureDragEndCallback onPhotoPickerDragEnd;
 
   @override
   Widget build(BuildContext context) {
@@ -7896,26 +7740,19 @@ final class _ComposerBottomSurface extends StatelessWidget {
     late final Widget surface;
 
     if (showPhotoPicker) {
-      surfaceKey = const ValueKey<String>(
-        'photo-picker-visible',
-      );
+      surfaceKey = const ValueKey<String>('photo-picker-visible');
 
       surface = ChatPhotoPicker(
         photoLibrary: photoLibrary,
         expanded: photoPickerExpanded,
         onClose: onClosePhotoPicker,
         onSend: onSendPhotos,
-        onHandleDragStart:
-            onPhotoPickerDragStart,
-        onHandleDragUpdate:
-            onPhotoPickerDragUpdate,
-        onHandleDragEnd:
-            onPhotoPickerDragEnd,
+        onHandleDragStart: onPhotoPickerDragStart,
+        onHandleDragUpdate: onPhotoPickerDragUpdate,
+        onHandleDragEnd: onPhotoPickerDragEnd,
       );
     } else if (showAttachmentPanel) {
-      surfaceKey = const ValueKey<String>(
-        'attachment-panel-visible',
-      );
+      surfaceKey = const ValueKey<String>('attachment-panel-visible');
 
       surface = _ChatAttachmentPanel(
         onPhotoPressed: onPhotoPressed,
@@ -7925,78 +7762,50 @@ final class _ComposerBottomSurface extends StatelessWidget {
         onVoiceMemoPressed: onVoiceMemoPressed,
       );
     } else {
-      surfaceKey = const ValueKey<String>(
-        'attachment-panel-hidden',
-      );
+      surfaceKey = const ValueKey<String>('attachment-panel-hidden');
 
       surface = const SizedBox.shrink();
     }
 
     return AnimatedContainer(
-      key: const ValueKey<String>(
-        'composer-bottom-surface',
-      ),
+      key: const ValueKey<String>('composer-bottom-surface'),
       width: double.infinity,
       height: height,
-      duration: animateHeight
-          ? _bottomSurfaceAnimationDuration
-          : Duration.zero,
+      duration: animateHeight ? _bottomSurfaceAnimationDuration : Duration.zero,
       curve: Curves.easeOutCubic,
       clipBehavior: Clip.hardEdge,
-      decoration: const BoxDecoration(
-        color: AppColors.white,
-      ),
+      decoration: const BoxDecoration(color: AppColors.white),
       child: AnimatedSwitcher(
-        duration: const Duration(
-          milliseconds: 140,
-        ),
+        duration: const Duration(milliseconds: 140),
         switchInCurve: Curves.easeOutCubic,
         switchOutCurve: Curves.easeInCubic,
 
         // AnimatedSwitcher의 기본 Stack은 자식에게
         // 느슨한 가로 제약을 줄 수 있다.
         // 모든 하단 패널을 부모 너비와 높이에 강제로 맞춘다.
-        layoutBuilder: (
-          Widget? currentChild,
-          List<Widget> previousChildren,
-        ) {
+        layoutBuilder: (Widget? currentChild, List<Widget> previousChildren) {
           return Stack(
             fit: StackFit.expand,
-            children: <Widget>[
-              ...previousChildren,
-              ?currentChild,
-            ],
+            children: <Widget>[...previousChildren, ?currentChild],
           );
         },
 
-        transitionBuilder: (
-          Widget child,
-          Animation<double> animation,
-        ) {
+        transitionBuilder: (Widget child, Animation<double> animation) {
           final Animation<Offset> position =
               Tween<Offset>(
                 begin: const Offset(0, 0.04),
                 end: Offset.zero,
               ).animate(
-                CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeOutCubic,
-                ),
+                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
               );
 
           return FadeTransition(
             opacity: animation,
-            child: SlideTransition(
-              position: position,
-              child: child,
-            ),
+            child: SlideTransition(position: position, child: child),
           );
         },
 
-        child: SizedBox.expand(
-          key: surfaceKey,
-          child: surface,
-        ),
+        child: SizedBox.expand(key: surfaceKey, child: surface),
       ),
     );
   }
@@ -8095,10 +7904,7 @@ final class _ChatAttachmentPanel extends StatelessWidget {
                 onPressed = () {};
             }
 
-            return _AttachmentPanelAction(
-              action: action,
-              onPressed: onPressed,
-            );
+            return _AttachmentPanelAction(action: action, onPressed: onPressed);
           },
         ),
       ),
@@ -8180,7 +7986,7 @@ final class _MessageComposer extends StatelessWidget {
   final String? replyingToContent;
   final ChatMessage? editingMessage;
   final String? editingOriginalContent;
-  final int currentUserId;
+  final String currentUserId;
   final String otherParticipantName;
   final bool attachmentPanelOpen;
 

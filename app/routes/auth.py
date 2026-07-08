@@ -11,10 +11,8 @@ from app.schemas import (
     TokenResponse,
     UserRead,
 )
-from app.security import (
-    create_access_token,
-    verify_password,
-)
+from app.passwords import verify_password
+from app.security import create_access_token
 
 
 router = APIRouter(

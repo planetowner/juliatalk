@@ -5,10 +5,9 @@
 __pycache__/
 *.py[cod]
 
-# Local database
-chat.db
-chat.db-shm
-chat.db-wal
+# Database dumps
+*.dump
+*.sql.gz
 
 # Secrets
 .jwt_secret

@@ -1,17 +1,44 @@
-# juliatalk
+# JuliaTalk Mobile
 
-A new Flutter project.
+Flutter client for JuliaTalk.
 
-## Getting Started
+## Run Against Local Backend
 
-This project is a starting point for a Flutter application.
+Start the FastAPI backend first from the repository root:
 
-A few resources to get you started if this is your first Flutter project:
+```powershell
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+Then run Flutter with `API_BASE_URL`.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Android emulator:
+
+```powershell
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
+```
+
+iOS simulator, Windows desktop, or Chrome on the same machine:
+
+```powershell
+flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000
+```
+
+Physical phone on the same Wi-Fi:
+
+```powershell
+flutter run --dart-define=API_BASE_URL=http://YOUR_COMPUTER_LAN_IP:8000
+```
+
+If using a physical phone, start the backend on all interfaces:
+
+```powershell
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+## Test
+
+```powershell
+flutter analyze
+flutter test
+```

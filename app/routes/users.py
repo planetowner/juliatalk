@@ -12,7 +12,7 @@ from app.schemas import (
     PasswordChangeRequest,
     UserRead,
 )
-from app.security import hash_password, verify_password
+from app.passwords import hash_password, verify_password
 
 
 router = APIRouter(

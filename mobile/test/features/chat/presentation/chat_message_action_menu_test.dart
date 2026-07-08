@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:juliatalk/main.dart';
+
+import '../../../support/juliatalk_preview_app.dart';
 
 double _expectedLastLineCenterY(WidgetTester tester) {
   final Finder inputFinder = find.byKey(
@@ -86,7 +87,7 @@ Future<void> _pumpUntilFound(
   throw TestFailure('Could not find the requested widget.');
 }
 
-double _messagePulseScaleX(WidgetTester tester, int messageId) {
+double _messagePulseScaleX(WidgetTester tester, String messageId) {
   final Transform pulseTransform = tester.widget<Transform>(
     find.byKey(ValueKey<String>('message-pulse-$messageId')),
   );
@@ -1706,11 +1707,11 @@ void main() {
 
       // _pumpUntilFound에서 이미 약 한 프레임이 진행됐으므로
       // 이 시점은 확대 펄스의 정점 부근이다.
-      expect(_messagePulseScaleX(tester, 5), greaterThan(1.005));
+      expect(_messagePulseScaleX(tester, '5'), greaterThan(1.005));
 
       await tester.pump(const Duration(milliseconds: 420));
 
-      expect(_messagePulseScaleX(tester, 5), closeTo(1, 0.001));
+      expect(_messagePulseScaleX(tester, '5'), closeTo(1, 0.001));
 
       expect(
         find.byKey(const ValueKey<String>('message-highlight-5')),
@@ -1732,11 +1733,11 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 45));
 
-      expect(_messagePulseScaleX(tester, 9), greaterThan(1.005));
+      expect(_messagePulseScaleX(tester, '9'), greaterThan(1.005));
 
       await tester.pump(const Duration(milliseconds: 420));
 
-      expect(_messagePulseScaleX(tester, 9), closeTo(1, 0.001));
+      expect(_messagePulseScaleX(tester, '9'), closeTo(1, 0.001));
 
       expect(returnedHighlightFinder, findsNothing);
 

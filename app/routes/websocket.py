@@ -71,7 +71,7 @@ async def websocket_endpoint(
             {
                 "type": "connected",
                 "user": {
-                    "id": user.id,
+                    "id": str(user.id),
                     "username": user.username,
                     "display_name": user.display_name,
                 },

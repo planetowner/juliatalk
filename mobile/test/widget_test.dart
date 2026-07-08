@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:juliatalk/main.dart';
+
+import 'support/juliatalk_preview_app.dart';
 
 Future<void> _scrollConversationToStart(WidgetTester tester) async {
   final Finder messageListFinder = find.byKey(
@@ -98,13 +99,21 @@ void main() {
 
     final Rect listRect = tester.getRect(listFinder);
 
+    final Finder topBarFinder = find.byKey(
+      const ValueKey<String>('chat-top-bar'),
+    );
+
+    final Rect topBarRect = tester.getRect(topBarFinder);
+
+    expect(listRect.top, closeTo(0, 0.01));
+
     final Finder firstDateFinder = find.byKey(
       const ValueKey<String>('chat-date-separator-2026-06-30'),
     );
 
     final Rect firstDateRect = tester.getRect(firstDateFinder);
 
-    expect(firstDateRect.top - listRect.top, closeTo(8, 0.01));
+    expect(firstDateRect.top - topBarRect.bottom, closeTo(8, 0.01));
   });
 
   testWidgets('message text and seen receipt remain aligned', (

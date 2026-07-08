@@ -13,8 +13,8 @@ final class ChatReplyReference {
     required this.content,
   });
 
-  final int messageId;
-  final int senderId;
+  final String messageId;
+  final String senderId;
   final String content;
 }
 
@@ -81,9 +81,9 @@ final class ChatMessage {
     this.voiceMemoAttachment,
   });
 
-  final int id;
-  final int senderId;
-  final int recipientId;
+  final String id;
+  final String senderId;
+  final String recipientId;
   final String content;
   final DateTime createdAt;
   final DateTime? readAt;

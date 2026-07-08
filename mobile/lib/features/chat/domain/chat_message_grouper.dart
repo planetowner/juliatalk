@@ -11,7 +11,7 @@ List<ChatMessageGroup> groupChatMessages(List<ChatMessage> messages) {
 
   final List<ChatMessageGroup> groups = [];
 
-  int currentSenderId = sortedMessages.first.senderId;
+  String currentSenderId = sortedMessages.first.senderId;
   List<ChatMessage> currentMessages = [sortedMessages.first];
 
   for (final ChatMessage message in sortedMessages.skip(1)) {
@@ -41,9 +41,9 @@ List<ChatMessageGroup> groupChatMessages(List<ChatMessage> messages) {
   return List<ChatMessageGroup>.unmodifiable(groups);
 }
 
-int? findLatestReadOutgoingMessageId({
+String? findLatestReadOutgoingMessageId({
   required List<ChatMessage> messages,
-  required int currentUserId,
+  required String currentUserId,
 }) {
   ChatMessage? latestReadMessage;
 

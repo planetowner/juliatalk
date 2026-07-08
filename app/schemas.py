@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,7 +30,7 @@ class UserRead(BaseModel):
         from_attributes=True,
     )
 
-    id: int
+    id: UUID
     username: str
     display_name: str
     preferred_language: LanguageCode
@@ -71,9 +72,7 @@ class TokenResponse(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    recipient_id: int = Field(
-        greater_than=0,
-    )
+    recipient_id: UUID
 
     content: str = Field(
         default="",
@@ -84,9 +83,10 @@ class MessageCreate(BaseModel):
 
     metadata: dict[str, Any] | None = None
 
-    reply_to_message_id: int | None = Field(
+    created_at: datetime | None = None
+
+    reply_to_message_id: UUID | None = Field(
         default=None,
-        greater_than=0,
     )
 
 
@@ -98,8 +98,8 @@ class MessageUpdate(BaseModel):
 
 
 class MessageReplyReferenceRead(BaseModel):
-    message_id: int
-    sender_id: int
+    message_id: UUID
+    sender_id: UUID
     content: str
 
 
@@ -108,14 +108,14 @@ class MessageRead(BaseModel):
         from_attributes=True,
     )
 
-    id: int
-    sender_id: int
-    recipient_id: int
+    id: UUID
+    sender_id: UUID
+    recipient_id: UUID
 
     content: str
     message_type: MessageType
     metadata: dict[str, Any] | None
-    reply_to_message_id: int | None
+    reply_to_message_id: UUID | None
     reply_to: MessageReplyReferenceRead | None
     created_at: datetime
     edited_at: datetime | None

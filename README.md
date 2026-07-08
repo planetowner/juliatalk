@@ -25,8 +25,8 @@ It supports real-time messaging between Korean- and Simplified Chinese-speaking 
 - Python 3.11
 - FastAPI
 - SQLAlchemy 2
-- SQLite
-- aiosqlite
+- PostgreSQL
+- asyncpg
 - WebSockets
 - DeepSeek API
 - PyJWT
@@ -81,18 +81,72 @@ Example:
 DEEPSEEK_API_KEY=your_api_key_here
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-pro
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/juliatalk
 ```
 
-### 4. Generate a JWT signing secret
+`DATABASE_URL` is required and must point to a PostgreSQL database. `postgresql://` and `postgres://` URLs are accepted and normalized to SQLAlchemy's asyncpg driver URL automatically.
+
+### 4. Start local PostgreSQL
+
+If PostgreSQL is not installed locally, start the bundled Docker service:
+
+```powershell
+docker compose up -d postgres
+```
+
+If Docker is not installed either, install PostgreSQL directly:
+
+```powershell
+winget source update
+winget install -e --id PostgreSQL.PostgreSQL.17
+```
+
+After installing PostgreSQL, open a new PowerShell window and create the local
+database:
+
+```powershell
+createdb -U postgres juliatalk
+```
+
+If the PostgreSQL tools are not on `PATH`, use the full Windows path:
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\createdb.exe" -U postgres juliatalk
+```
+
+The default local database URL from `.env.example` matches this service:
+
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/juliatalk
+```
+
+### 5. Generate a JWT signing secret
 
 ```powershell
 python -c "from pathlib import Path; import secrets; Path('.jwt_secret').write_text(secrets.token_urlsafe(48), encoding='utf-8')"
 ```
 
-### 5. Run the server
+### 6. Run the server
 
 ```powershell
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+On first startup, the server creates the database tables automatically.
+
+### 7. Create local users
+
+After the server has started once, create local login users from a second
+terminal:
+
+```powershell
+python -m scripts.create_user USERNAME PASSWORD --display-name "Display Name" --language ko
+```
+
+To change a local user's password later:
+
+```powershell
+python -m scripts.set_user_password USERNAME NEW_PASSWORD
 ```
 
 The API documentation is available at:
@@ -108,13 +162,10 @@ The following files are intentionally excluded from Git:
 - `.env`
 - `.env.*`
 - `.jwt_secret`
-- `chat.db`
-- `chat.db-shm`
-- `chat.db-wal`
 - `.venv/`
 - Python cache files
 
-The SQLite database may contain user accounts, password hashes, and private message history, so it must not be uploaded to GitHub.
+Production database credentials and dumps may contain user accounts, password hashes, and private message history, so they must not be uploaded to GitHub.
 
 ## Message Translation Flow
 
@@ -134,7 +185,7 @@ If translation fails, the original message remains stored and available.
 {
   "type": "connected",
   "user": {
-    "id": 1,
+    "id": "11111111-1111-4111-8111-111111111111",
     "username": "example",
     "display_name": "Example"
   }
@@ -147,7 +198,7 @@ If translation fails, the original message remains stored and available.
 {
   "type": "message.created",
   "message": {
-    "id": 1,
+    "id": "33333333-3333-4333-8333-333333333333",
     "translation_status": "pending"
   }
 }
@@ -159,7 +210,7 @@ If translation fails, the original message remains stored and available.
 {
   "type": "message.translation.updated",
   "message": {
-    "id": 1,
+    "id": "33333333-3333-4333-8333-333333333333",
     "translated_content": "Translated message",
     "translation_status": "completed",
     "translation_provider": "deepseek"
@@ -172,18 +223,18 @@ If translation fails, the original message remains stored and available.
 ```json
 {
   "type": "messages.read",
-  "reader_id": 1,
-  "sender_id": 2,
-  "message_ids": [1],
+  "reader_id": "11111111-1111-4111-8111-111111111111",
+  "sender_id": "22222222-2222-4222-8222-222222222222",
+  "message_ids": ["33333333-3333-4333-8333-333333333333"],
   "read_at": "2026-06-29T12:00:00+00:00"
 }
 ```
 
 ## Important Development Note
 
-The repository does not include the local SQLite database or production user accounts.
+The repository does not include database dumps or production user accounts.
 
-On a fresh installation, the database tables are created automatically when the server starts, but initial users must still be created separately before login and messaging can be used.
+On a fresh installation, the database tables are created automatically when the server starts with `DATABASE_URL` configured, but initial users must still be created separately before login and messaging can be used.
 
 ## Project Status
 

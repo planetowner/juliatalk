@@ -1,6 +1,10 @@
+import base64
+import binascii
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -11,12 +15,31 @@ from fastapi import (
     Response,
     status,
 )
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal, get_session
 from app.dependencies import get_current_user
-from app.models import Message, User
+from app.models import (
+    CallKind,
+    CallOutcome,
+    Conversation,
+    ConversationKind,
+    ConversationMember,
+    DirectConversation,
+    MediaAsset,
+    MediaKind,
+    Message,
+    MessageAttachment,
+    MessageCallEvent,
+    MessageDeletion,
+    MessageEdit,
+    MessageKind,
+    MessageReadReceipt,
+    MessageTranslation,
+    TranslationStatus,
+    User,
+)
 from app.schemas import (
     MessageCreate,
     MessageReplyReferenceRead,
@@ -66,18 +89,105 @@ CALL_KINDS = {
 UNSEND_WINDOW = timedelta(minutes=5)
 
 
-def message_belongs_to_conversation(
-    message: Message,
-    first_user_id: int,
-    second_user_id: int,
-) -> bool:
+def normalize_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+
+def sorted_direct_user_ids(
+    first_user_id: UUID,
+    second_user_id: UUID,
+) -> tuple[UUID, UUID]:
+    if str(first_user_id) < str(second_user_id):
+        return first_user_id, second_user_id
+
+    return second_user_id, first_user_id
+
+
+def direct_participant_ids(
+    direct_conversation: DirectConversation,
+) -> tuple[UUID, UUID]:
     return (
-        message.sender_id == first_user_id
-        and message.recipient_id == second_user_id
-    ) or (
-        message.sender_id == second_user_id
-        and message.recipient_id == first_user_id
+        direct_conversation.user_one_id,
+        direct_conversation.user_two_id,
     )
+
+
+def direct_recipient_id(
+    direct_conversation: DirectConversation,
+    sender_id: UUID,
+) -> UUID:
+    if sender_id == direct_conversation.user_one_id:
+        return direct_conversation.user_two_id
+
+    return direct_conversation.user_one_id
+
+
+async def send_to_direct_participants(
+    direct_conversation: DirectConversation,
+    data: dict[str, Any],
+) -> None:
+    for user_id in direct_participant_ids(direct_conversation):
+        await connection_manager.send_to_user(
+            user_id=user_id,
+            data=data,
+        )
+
+
+async def get_direct_conversation(
+    session: AsyncSession,
+    first_user_id: UUID,
+    second_user_id: UUID,
+    *,
+    create: bool = False,
+    created_by_user_id: UUID | None = None,
+) -> DirectConversation | None:
+    user_one_id, user_two_id = sorted_direct_user_ids(
+        first_user_id,
+        second_user_id,
+    )
+
+    direct_conversation = await session.scalar(
+        select(DirectConversation).where(
+            DirectConversation.user_one_id == user_one_id,
+            DirectConversation.user_two_id == user_two_id,
+        )
+    )
+
+    if direct_conversation is not None or not create:
+        return direct_conversation
+
+    conversation = Conversation(
+        kind=ConversationKind.DIRECT,
+        created_by_user_id=created_by_user_id,
+    )
+    session.add(conversation)
+    await session.flush()
+
+    direct_conversation = DirectConversation(
+        conversation_id=conversation.id,
+        user_one_id=user_one_id,
+        user_two_id=user_two_id,
+    )
+
+    session.add_all(
+        [
+            direct_conversation,
+            ConversationMember(
+                conversation_id=conversation.id,
+                user_id=user_one_id,
+            ),
+            ConversationMember(
+                conversation_id=conversation.id,
+                user_id=user_two_id,
+            ),
+        ]
+    )
+    await session.flush()
+
+    return direct_conversation
 
 
 def require_metadata_dict(
@@ -123,6 +233,22 @@ def require_non_negative_int(
     return value
 
 
+def decode_preview_base64(value: Any) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="metadata.photos.preview_base64 is required",
+        )
+
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="metadata.photos.preview_base64 is invalid",
+        ) from error
+
+
 def validate_message_metadata(
     message_type: str,
     metadata: dict[str, Any] | None,
@@ -130,10 +256,7 @@ def validate_message_metadata(
     if message_type == "text":
         return
 
-    metadata = require_metadata_dict(
-        message_type,
-        metadata,
-    )
+    metadata = require_metadata_dict(message_type, metadata)
 
     if message_type == "photo":
         photos = metadata.get("photos")
@@ -152,6 +275,7 @@ def validate_message_metadata(
                 )
 
             require_non_empty_string(photo, "asset_id")
+            decode_preview_base64(photo.get("preview_base64"))
             require_non_negative_int(photo, "width")
             require_non_negative_int(photo, "height")
 
@@ -193,6 +317,156 @@ def validate_message_metadata(
         require_non_negative_int(metadata, "duration_ms")
 
 
+async def add_message_payload_records(
+    session: AsyncSession,
+    *,
+    message: Message,
+    sender_id: UUID,
+    message_type: str,
+    metadata: dict[str, Any] | None,
+) -> None:
+    if message_type == "photo":
+        assert metadata is not None
+
+        for position, photo in enumerate(metadata["photos"]):
+            media_asset = MediaAsset(
+                owner_user_id=sender_id,
+                kind=MediaKind.PHOTO,
+                original_asset_id=photo["asset_id"],
+                width=photo["width"],
+                height=photo["height"],
+                preview_bytes=decode_preview_base64(
+                    photo.get("preview_base64")
+                ),
+            )
+            session.add(media_asset)
+            await session.flush()
+
+            session.add(
+                MessageAttachment(
+                    message_id=message.id,
+                    media_asset_id=media_asset.id,
+                    position=position,
+                )
+            )
+
+        return
+
+    if message_type == "file":
+        assert metadata is not None
+        file_metadata = metadata["file"]
+
+        media_asset = MediaAsset(
+            owner_user_id=sender_id,
+            kind=MediaKind.FILE,
+            file_name=file_metadata["name"],
+            size_bytes=file_metadata["size_bytes"],
+        )
+        session.add(media_asset)
+        await session.flush()
+
+        session.add(
+            MessageAttachment(
+                message_id=message.id,
+                media_asset_id=media_asset.id,
+            )
+        )
+        return
+
+    if message_type == "voice_memo":
+        assert metadata is not None
+
+        media_asset = MediaAsset(
+            owner_user_id=sender_id,
+            kind=MediaKind.VOICE_MEMO,
+            duration_ms=metadata["duration_ms"],
+        )
+        session.add(media_asset)
+        await session.flush()
+
+        session.add(
+            MessageAttachment(
+                message_id=message.id,
+                media_asset_id=media_asset.id,
+            )
+        )
+        return
+
+    if message_type == "call":
+        assert metadata is not None
+
+        session.add(
+            MessageCallEvent(
+                message_id=message.id,
+                kind=CallKind(metadata["kind"]),
+                outcome=CallOutcome(metadata["outcome"]),
+                duration_ms=metadata["duration_ms"],
+            )
+        )
+
+
+def build_metadata(
+    message: Message,
+    attachments: list[tuple[MessageAttachment, MediaAsset]],
+    call_event: MessageCallEvent | None,
+) -> dict[str, Any] | None:
+    if message.kind == MessageKind.PHOTO:
+        photos = []
+
+        for _, media_asset in attachments:
+            preview_base64 = ""
+
+            if media_asset.preview_bytes is not None:
+                preview_base64 = base64.b64encode(
+                    media_asset.preview_bytes
+                ).decode("ascii")
+
+            photos.append(
+                {
+                    "asset_id": (
+                        media_asset.original_asset_id
+                        or str(media_asset.id)
+                    ),
+                    "preview_base64": preview_base64,
+                    "width": media_asset.width or 0,
+                    "height": media_asset.height or 0,
+                }
+            )
+
+        return {"photos": photos}
+
+    if message.kind == MessageKind.FILE:
+        if not attachments:
+            return None
+
+        _, media_asset = attachments[0]
+        return {
+            "file": {
+                "name": media_asset.file_name or "",
+                "size_bytes": media_asset.size_bytes or 0,
+            },
+        }
+
+    if message.kind == MessageKind.VOICE_MEMO:
+        if not attachments:
+            return None
+
+        _, media_asset = attachments[0]
+        return {"duration_ms": media_asset.duration_ms or 0}
+
+    if message.kind == MessageKind.CALL:
+        if call_event is None:
+            return None
+
+        return {
+            "kind": call_event.kind.value,
+            "outcome": call_event.outcome.value,
+            "duration_ms": call_event.duration_ms,
+        }
+
+    return None
+
+
 def build_reply_reference(
     message: Message | None,
 ) -> MessageReplyReferenceRead | None:
@@ -202,234 +476,322 @@ def build_reply_reference(
     return MessageReplyReferenceRead(
         message_id=message.id,
         sender_id=message.sender_id,
-        content=message.content,
+        content=message.body,
     )
 
 
-def build_message_read(
-    message: Message,
-    *,
-    reply_to: Message | None = None,
-) -> MessageRead:
-    metadata = message.metadata_json
-
-    if metadata is not None and not isinstance(metadata, dict):
-        metadata = None
-
-    return MessageRead(
-        id=message.id,
-        sender_id=message.sender_id,
-        recipient_id=message.recipient_id,
-        content=message.content,
-        message_type=message.message_type,
-        metadata=metadata,
-        reply_to_message_id=message.reply_to_message_id,
-        reply_to=build_reply_reference(reply_to),
-        created_at=message.created_at,
-        edited_at=message.edited_at,
-        read_at=message.read_at,
-        source_language=message.source_language,
-        translated_content=message.translated_content,
-        translated_language=message.translated_language,
-        translation_status=message.translation_status,
-        translation_provider=message.translation_provider,
-        translation_model=message.translation_model,
+async def load_direct_users(
+    session: AsyncSession,
+    direct_conversation: DirectConversation,
+) -> dict[UUID, User]:
+    result = await session.scalars(
+        select(User).where(
+            User.id.in_(direct_participant_ids(direct_conversation))
+        )
     )
 
-
-def normalize_utc(
-    value: datetime,
-) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-
-    return value.astimezone(timezone.utc)
+    return {user.id: user for user in result}
 
 
 async def build_message_reads(
     session: AsyncSession,
     messages: list[Message],
+    *,
+    direct_conversation: DirectConversation,
 ) -> list[MessageRead]:
+    if not messages:
+        return []
+
+    message_ids = [message.id for message in messages]
+    users_by_id = await load_direct_users(session, direct_conversation)
+
     reply_ids = {
         message.reply_to_message_id
         for message in messages
         if message.reply_to_message_id is not None
     }
-
-    reply_messages: dict[int, Message] = {}
+    reply_messages: dict[UUID, Message] = {}
 
     if reply_ids:
         reply_result = await session.scalars(
             select(Message).where(Message.id.in_(reply_ids))
         )
+        reply_messages = {message.id: message for message in reply_result}
 
-        reply_messages = {
-            message.id: message
-            for message in reply_result
-        }
-
-    return [
-        build_message_read(
-            message,
-            reply_to=reply_messages.get(message.reply_to_message_id),
+    attachment_rows = await session.execute(
+        select(MessageAttachment, MediaAsset)
+        .join(
+            MediaAsset,
+            MessageAttachment.media_asset_id == MediaAsset.id,
         )
-        for message in messages
-    ]
+        .where(MessageAttachment.message_id.in_(message_ids))
+        .order_by(
+            MessageAttachment.message_id,
+            MessageAttachment.position,
+        )
+    )
 
+    attachments_by_message: dict[
+        UUID,
+        list[tuple[MessageAttachment, MediaAsset]],
+    ] = defaultdict(list)
 
-async def publish_translation_update(
-    message: Message,
-    *,
-    reply_to: Message | None = None,
-) -> None:
-    websocket_event = {
-        "type": "message.translation.updated",
-        "message": build_message_read(
-            message,
-            reply_to=reply_to,
-        ).model_dump(mode="json"),
+    for attachment, media_asset in attachment_rows:
+        attachments_by_message[attachment.message_id].append(
+            (attachment, media_asset)
+        )
+
+    call_result = await session.scalars(
+        select(MessageCallEvent).where(
+            MessageCallEvent.message_id.in_(message_ids)
+        )
+    )
+    call_events = {
+        call_event.message_id: call_event
+        for call_event in call_result
     }
 
-    await connection_manager.send_to_user(
-        user_id=message.sender_id,
-        data=websocket_event,
-    )
-
-    await connection_manager.send_to_user(
-        user_id=message.recipient_id,
-        data=websocket_event,
-    )
-
-
-async def translate_and_publish_message(
-    message_id: int,
-) -> None:
-    async with SessionLocal() as session:
-        message = await session.get(
-            Message,
-            message_id,
+    translation_result = await session.scalars(
+        select(MessageTranslation).where(
+            MessageTranslation.message_id.in_(message_ids)
         )
+    )
+    translations: dict[tuple[UUID, str], MessageTranslation] = {}
+
+    for translation in translation_result:
+        translations[
+            (
+                translation.message_id,
+                translation.target_language,
+            )
+        ] = translation
+
+    read_result = await session.scalars(
+        select(MessageReadReceipt).where(
+            MessageReadReceipt.message_id.in_(message_ids)
+        )
+    )
+    reads = {
+        (read.message_id, read.user_id): read
+        for read in read_result
+    }
+
+    response_messages: list[MessageRead] = []
+
+    for message in messages:
+        recipient_id = direct_recipient_id(
+            direct_conversation,
+            message.sender_id,
+        )
+        sender = users_by_id[message.sender_id]
+        recipient = users_by_id[recipient_id]
+        translation = translations.get(
+            (message.id, recipient.preferred_language)
+        )
+        read_receipt = reads.get((message.id, recipient_id))
+
+        if message.kind == MessageKind.TEXT:
+            translation_status = (
+                translation.status.value
+                if translation is not None
+                else TranslationStatus.PENDING.value
+            )
+            translated_content = (
+                translation.translated_body
+                if translation is not None
+                else None
+            )
+            translation_provider = (
+                translation.provider
+                if translation is not None
+                else None
+            )
+            translation_model = (
+                translation.model
+                if translation is not None
+                else None
+            )
+        else:
+            translation_status = TranslationStatus.COMPLETED.value
+            translated_content = None
+            translation_provider = None
+            translation_model = None
+
+        response_messages.append(
+            MessageRead(
+                id=message.id,
+                sender_id=message.sender_id,
+                recipient_id=recipient_id,
+                content=message.body,
+                message_type=message.kind.value,
+                metadata=build_metadata(
+                    message,
+                    attachments_by_message.get(message.id, []),
+                    call_events.get(message.id),
+                ),
+                reply_to_message_id=message.reply_to_message_id,
+                reply_to=build_reply_reference(
+                    reply_messages.get(message.reply_to_message_id)
+                ),
+                created_at=message.created_at,
+                edited_at=message.edited_at,
+                read_at=(
+                    read_receipt.read_at
+                    if read_receipt is not None
+                    else None
+                ),
+                source_language=(
+                    message.source_language or sender.preferred_language
+                ),
+                translated_content=translated_content,
+                translated_language=recipient.preferred_language,
+                translation_status=translation_status,
+                translation_provider=translation_provider,
+                translation_model=translation_model,
+            )
+        )
+
+    return response_messages
+
+
+async def build_single_message_read(
+    session: AsyncSession,
+    message: Message,
+    *,
+    direct_conversation: DirectConversation,
+) -> MessageRead:
+    return (
+        await build_message_reads(
+            session,
+            [message],
+            direct_conversation=direct_conversation,
+        )
+    )[0]
+
+
+async def translate_and_publish_message(message_id: UUID) -> None:
+    async with SessionLocal() as session:
+        message = await session.get(Message, message_id)
 
         if message is None:
             return
 
-        if message.message_type != "text":
+        if message.kind != MessageKind.TEXT or message.deleted_at is not None:
             return
 
-        if message.translation_status != "pending":
+        direct_conversation = await session.scalar(
+            select(DirectConversation).where(
+                DirectConversation.conversation_id
+                == message.conversation_id
+            )
+        )
+
+        if direct_conversation is None:
             return
 
-        sender = await session.get(
-            User,
+        users_by_id = await load_direct_users(session, direct_conversation)
+        sender = users_by_id.get(message.sender_id)
+        recipient_id = direct_recipient_id(
+            direct_conversation,
             message.sender_id,
         )
-
-        recipient = await session.get(
-            User,
-            message.recipient_id,
-        )
+        recipient = users_by_id.get(recipient_id)
 
         if sender is None or recipient is None:
-            message.translation_status = "failed"
-            message.translation_provider = (
-                TRANSLATION_PROVIDER_NAME
+            return
+
+        translation = await session.scalar(
+            select(MessageTranslation).where(
+                MessageTranslation.message_id == message.id,
+                MessageTranslation.target_language
+                == recipient.preferred_language,
             )
-            message.translation_model = DEEPSEEK_MODEL
+        )
 
-            await session.commit()
-            await session.refresh(message)
+        if translation is None:
+            translation = MessageTranslation(
+                message_id=message.id,
+                source_language=(
+                    message.source_language or sender.preferred_language
+                ),
+                target_language=recipient.preferred_language,
+                status=TranslationStatus.PENDING,
+            )
+            session.add(translation)
+            await session.flush()
 
-            await publish_translation_update(message)
+        if translation.status != TranslationStatus.PENDING:
             return
 
         context_result = await session.scalars(
             select(Message)
             .where(
-                Message.id < message.id,
-                Message.message_type == "text",
+                Message.conversation_id == message.conversation_id,
+                Message.id != message.id,
+                Message.kind == MessageKind.TEXT,
                 Message.deleted_at.is_(None),
-                or_(
-                    and_(
-                        Message.sender_id == sender.id,
-                        Message.recipient_id == recipient.id,
-                    ),
-                    and_(
-                        Message.sender_id == recipient.id,
-                        Message.recipient_id == sender.id,
-                    ),
-                ),
+                Message.created_at <= message.created_at,
             )
-            .order_by(
-                desc(Message.created_at),
-                desc(Message.id),
-            )
+            .order_by(desc(Message.created_at), desc(Message.id))
             .limit(8)
         )
 
         previous_messages = list(context_result)
         previous_messages.reverse()
 
-        user_names = {
-            sender.id: sender.display_name,
-            recipient.id: recipient.display_name,
-        }
-
         context_messages = [
             (
-                f"{user_names.get(previous_message.sender_id, 'User')}: "
-                f"{previous_message.content}"
+                f"{users_by_id.get(previous.sender_id, sender).display_name}: "
+                f"{previous.body}"
             )
-            for previous_message in previous_messages
+            for previous in previous_messages
         ]
 
         try:
             translation_result = await translate_message(
-                text=message.content,
-                source_language=message.source_language,
-                target_language=message.translated_language,
+                text=message.body,
+                source_language=(
+                    message.source_language or sender.preferred_language
+                ),
+                target_language=recipient.preferred_language,
                 context_messages=context_messages,
             )
-
-        except Exception:
+        except Exception as error:
             logger.exception(
                 "Translation failed for message ID %s",
                 message.id,
             )
-
-            message.translated_content = None
-            message.translation_status = "failed"
-            message.translation_provider = (
-                TRANSLATION_PROVIDER_NAME
-            )
-            message.translation_model = DEEPSEEK_MODEL
-
+            translation.translated_body = None
+            translation.status = TranslationStatus.FAILED
+            translation.provider = TRANSLATION_PROVIDER_NAME
+            translation.model = DEEPSEEK_MODEL
+            translation.error_message = str(error)
         else:
-            message.translated_content = (
-                translation_result.translated_text
-            )
-            message.translation_status = "completed"
-            message.translation_provider = (
-                translation_result.provider
-            )
-            message.translation_model = (
-                translation_result.model
-            )
+            translation.translated_body = translation_result.translated_text
+            translation.status = TranslationStatus.COMPLETED
+            translation.provider = translation_result.provider
+            translation.model = translation_result.model
+            translation.error_message = None
+
+        translation.updated_at = datetime.now(timezone.utc)
 
         await session.commit()
         await session.refresh(message)
 
-        reply_to = None
-
-        if message.reply_to_message_id is not None:
-            reply_to = await session.get(
-                Message,
-                message.reply_to_message_id,
-            )
-
-        await publish_translation_update(
+        message_read = await build_single_message_read(
+            session,
             message,
-            reply_to=reply_to,
+            direct_conversation=direct_conversation,
         )
+        websocket_event = {
+            "type": "message.translation.updated",
+            "message": message_read.model_dump(mode="json"),
+        }
+
+    await send_to_direct_participants(
+        direct_conversation,
+        websocket_event,
+    )
 
 
 @router.post(
@@ -443,10 +805,7 @@ async def create_message(
     current_user: CurrentUserDependency,
     session: SessionDependency,
 ) -> MessageRead:
-    recipient = await session.get(
-        User,
-        message_data.recipient_id,
-    )
+    recipient = await session.get(User, message_data.recipient_id)
 
     if recipient is None:
         raise HTTPException(
@@ -468,10 +827,16 @@ async def create_message(
             detail="Message content cannot be blank",
         )
 
-    validate_message_metadata(
-        message_data.message_type,
-        message_data.metadata,
+    validate_message_metadata(message_data.message_type, message_data.metadata)
+
+    direct_conversation = await get_direct_conversation(
+        session,
+        current_user.id,
+        recipient.id,
+        create=True,
+        created_by_user_id=current_user.id,
     )
+    assert direct_conversation is not None
 
     reply_to_message = None
 
@@ -484,66 +849,82 @@ async def create_message(
         if (
             reply_to_message is None
             or reply_to_message.deleted_at is not None
-            or not message_belongs_to_conversation(
-                reply_to_message,
-                current_user.id,
-                recipient.id,
-            )
+            or reply_to_message.conversation_id
+            != direct_conversation.conversation_id
         ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Reply target not found",
             )
 
-    translation_status = "pending"
-
-    if message_data.message_type != "text":
-        translation_status = "completed"
-
     message = Message(
+        conversation_id=direct_conversation.conversation_id,
         sender_id=current_user.id,
-        recipient_id=recipient.id,
-        content=content,
-        message_type=message_data.message_type,
-        metadata_json=message_data.metadata,
+        kind=MessageKind(message_data.message_type),
+        body=content,
         reply_to_message_id=message_data.reply_to_message_id,
         source_language=current_user.preferred_language,
-        translated_language=recipient.preferred_language,
-        translated_content=None,
-        translation_status=translation_status,
-        translation_provider=None,
-        translation_model=None,
+        client_created_at=(
+            normalize_utc(message_data.created_at)
+            if message_data.created_at is not None
+            else None
+        ),
     )
 
+    if message_data.created_at is not None:
+        message.created_at = normalize_utc(message_data.created_at)
+
     session.add(message)
+    await session.flush()
+
+    await add_message_payload_records(
+        session,
+        message=message,
+        sender_id=current_user.id,
+        message_type=message_data.message_type,
+        metadata=message_data.metadata,
+    )
+
+    if message.kind == MessageKind.TEXT:
+        session.add(
+            MessageTranslation(
+                message_id=message.id,
+                source_language=current_user.preferred_language,
+                target_language=recipient.preferred_language,
+                status=TranslationStatus.PENDING,
+            )
+        )
+
+    conversation = await session.get(
+        Conversation,
+        direct_conversation.conversation_id,
+    )
+
+    if conversation is not None:
+        conversation.last_message_id = message.id
+        conversation.last_message_at = message.created_at
+        conversation.updated_at = datetime.now(timezone.utc)
+
     await session.commit()
     await session.refresh(message)
 
-    message_read = build_message_read(
+    message_read = await build_single_message_read(
+        session,
         message,
-        reply_to=reply_to_message,
+        direct_conversation=direct_conversation,
     )
-
     message_created_event = {
         "type": "message.created",
         "message": message_read.model_dump(mode="json"),
     }
 
-    await connection_manager.send_to_user(
-        user_id=recipient.id,
-        data=message_created_event,
+    await send_to_direct_participants(
+        direct_conversation,
+        message_created_event,
     )
 
-    await connection_manager.send_to_user(
-        user_id=current_user.id,
-        data=message_created_event,
-    )
-
-    if message.message_type == "text":
-        background_tasks.add_task(
-            translate_and_publish_message,
-            message.id,
-        )
+    if message.kind == MessageKind.TEXT:
+        background_tasks.add_task(translate_and_publish_message, message.id)
 
     return message_read
 
@@ -553,18 +934,12 @@ async def create_message(
     response_model=list[MessageRead],
 )
 async def list_conversation(
-    other_user_id: int,
+    other_user_id: UUID,
     current_user: CurrentUserDependency,
     session: SessionDependency,
-    limit: Annotated[
-        int,
-        Query(ge=1, le=100),
-    ] = 50,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[MessageRead]:
-    other_user = await session.get(
-        User,
-        other_user_id,
-    )
+    other_user = await session.get(User, other_user_id)
 
     if other_user is None:
         raise HTTPException(
@@ -578,25 +953,30 @@ async def list_conversation(
             detail="You cannot open a conversation with yourself",
         )
 
+    direct_conversation = await get_direct_conversation(
+        session,
+        current_user.id,
+        other_user.id,
+    )
+
+    if direct_conversation is None:
+        return []
+
+    hidden_message_ids = select(MessageDeletion.message_id).where(
+        MessageDeletion.conversation_id
+        == direct_conversation.conversation_id,
+        MessageDeletion.user_id == current_user.id,
+    )
+
     result = await session.scalars(
         select(Message)
         .where(
+            Message.conversation_id
+            == direct_conversation.conversation_id,
             Message.deleted_at.is_(None),
-            or_(
-                and_(
-                    Message.sender_id == current_user.id,
-                    Message.recipient_id == other_user.id,
-                ),
-                and_(
-                    Message.sender_id == other_user.id,
-                    Message.recipient_id == current_user.id,
-                ),
-            )
+            Message.id.not_in(hidden_message_ids),
         )
-        .order_by(
-            desc(Message.created_at),
-            desc(Message.id),
-        )
+        .order_by(desc(Message.created_at), desc(Message.id))
         .limit(limit)
     )
 
@@ -606,6 +986,7 @@ async def list_conversation(
     return await build_message_reads(
         session,
         messages,
+        direct_conversation=direct_conversation,
     )
 
 
@@ -614,22 +995,13 @@ async def list_conversation(
     response_model=list[MessageRead],
 )
 async def search_conversation(
-    other_user_id: int,
+    other_user_id: UUID,
     current_user: CurrentUserDependency,
     session: SessionDependency,
-    query: Annotated[
-        str,
-        Query(min_length=1, max_length=100),
-    ],
-    limit: Annotated[
-        int,
-        Query(ge=1, le=100),
-    ] = 50,
+    query: Annotated[str, Query(min_length=1, max_length=100)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[MessageRead]:
-    other_user = await session.get(
-        User,
-        other_user_id,
-    )
+    other_user = await session.get(User, other_user_id)
 
     if other_user is None:
         raise HTTPException(
@@ -643,44 +1015,50 @@ async def search_conversation(
             detail="You cannot search your own conversation",
         )
 
+    direct_conversation = await get_direct_conversation(
+        session,
+        current_user.id,
+        other_user.id,
+    )
+
+    if direct_conversation is None:
+        return []
+
     normalized_query = query.strip()
 
     if not normalized_query:
         return []
 
     search_pattern = f"%{normalized_query.lower()}%"
+    translated_match_ids = select(MessageTranslation.message_id).where(
+        func.lower(MessageTranslation.translated_body).like(search_pattern)
+    )
+    hidden_message_ids = select(MessageDeletion.message_id).where(
+        MessageDeletion.conversation_id
+        == direct_conversation.conversation_id,
+        MessageDeletion.user_id == current_user.id,
+    )
 
     result = await session.scalars(
         select(Message)
         .where(
+            Message.conversation_id
+            == direct_conversation.conversation_id,
             Message.deleted_at.is_(None),
+            Message.id.not_in(hidden_message_ids),
             or_(
-                and_(
-                    Message.sender_id == current_user.id,
-                    Message.recipient_id == other_user.id,
-                ),
-                and_(
-                    Message.sender_id == other_user.id,
-                    Message.recipient_id == current_user.id,
-                ),
-            ),
-            or_(
-                func.lower(Message.content).like(search_pattern),
-                func.lower(Message.translated_content).like(
-                    search_pattern
-                ),
+                func.lower(Message.body).like(search_pattern),
+                Message.id.in_(translated_match_ids),
             ),
         )
-        .order_by(
-            Message.created_at,
-            Message.id,
-        )
+        .order_by(Message.created_at, Message.id)
         .limit(limit)
     )
 
     return await build_message_reads(
         session,
         list(result),
+        direct_conversation=direct_conversation,
     )
 
 
@@ -689,14 +1067,11 @@ async def search_conversation(
     response_model=MessagesMarkedReadResponse,
 )
 async def mark_conversation_as_read(
-    other_user_id: int,
+    other_user_id: UUID,
     current_user: CurrentUserDependency,
     session: SessionDependency,
 ) -> MessagesMarkedReadResponse:
-    other_user = await session.get(
-        User,
-        other_user_id,
-    )
+    other_user = await session.get(User, other_user_id)
 
     if other_user is None:
         raise HTTPException(
@@ -710,51 +1085,71 @@ async def mark_conversation_as_read(
             detail="You cannot mark your own conversation as read",
         )
 
-    result = await session.scalars(
-        select(Message).where(
-            Message.sender_id == other_user.id,
-            Message.recipient_id == current_user.id,
-            Message.deleted_at.is_(None),
-            Message.read_at.is_(None),
-        )
+    direct_conversation = await get_direct_conversation(
+        session,
+        current_user.id,
+        other_user.id,
     )
 
+    if direct_conversation is None:
+        return MessagesMarkedReadResponse(marked_read_count=0)
+
+    existing_read_ids = select(MessageReadReceipt.message_id).where(
+        MessageReadReceipt.conversation_id
+        == direct_conversation.conversation_id,
+        MessageReadReceipt.user_id == current_user.id,
+    )
+
+    result = await session.scalars(
+        select(Message).where(
+            Message.conversation_id
+            == direct_conversation.conversation_id,
+            Message.sender_id == other_user.id,
+            Message.deleted_at.is_(None),
+            Message.id.not_in(existing_read_ids),
+        )
+    )
     unread_messages = list(result)
 
     if not unread_messages:
-        return MessagesMarkedReadResponse(
-            marked_read_count=0,
-        )
+        return MessagesMarkedReadResponse(marked_read_count=0)
 
     read_time = datetime.now(timezone.utc)
 
     for message in unread_messages:
-        message.read_at = read_time
+        session.add(
+            MessageReadReceipt(
+                message_id=message.id,
+                conversation_id=message.conversation_id,
+                user_id=current_user.id,
+                read_at=read_time,
+            )
+        )
+
+    member = await session.get(
+        ConversationMember,
+        (direct_conversation.conversation_id, current_user.id),
+    )
+
+    if member is not None:
+        latest_message = max(
+            unread_messages,
+            key=lambda message: message.created_at,
+        )
+        member.last_read_message_id = latest_message.id
+        member.last_read_at = read_time
 
     await session.commit()
 
-    message_ids = [
-        message.id
-        for message in unread_messages
-    ]
-
     websocket_event = {
         "type": "messages.read",
-        "reader_id": current_user.id,
-        "sender_id": other_user.id,
-        "message_ids": message_ids,
+        "reader_id": str(current_user.id),
+        "sender_id": str(other_user.id),
+        "message_ids": [str(message.id) for message in unread_messages],
         "read_at": read_time.isoformat(),
     }
 
-    await connection_manager.send_to_user(
-        user_id=other_user.id,
-        data=websocket_event,
-    )
-
-    await connection_manager.send_to_user(
-        user_id=current_user.id,
-        data=websocket_event,
-    )
+    await send_to_direct_participants(direct_conversation, websocket_event)
 
     return MessagesMarkedReadResponse(
         marked_read_count=len(unread_messages),
@@ -766,16 +1161,13 @@ async def mark_conversation_as_read(
     response_model=MessageRead,
 )
 async def update_message(
-    message_id: int,
+    message_id: UUID,
     message_data: MessageUpdate,
     background_tasks: BackgroundTasks,
     current_user: CurrentUserDependency,
     session: SessionDependency,
 ) -> MessageRead:
-    message = await session.get(
-        Message,
-        message_id,
-    )
+    message = await session.get(Message, message_id)
 
     if message is None or message.deleted_at is not None:
         raise HTTPException(
@@ -789,7 +1181,7 @@ async def update_message(
             detail="You can only edit your own messages",
         )
 
-    if message.message_type != "text":
+    if message.kind != MessageKind.TEXT:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only text messages can be edited",
@@ -803,48 +1195,83 @@ async def update_message(
             detail="Message content cannot be blank",
         )
 
-    message.content = content
-    message.edited_at = datetime.now(timezone.utc)
-    message.translated_content = None
-    message.translation_status = "pending"
-    message.translation_provider = None
-    message.translation_model = None
+    direct_conversation = await session.scalar(
+        select(DirectConversation).where(
+            DirectConversation.conversation_id == message.conversation_id
+        )
+    )
+
+    if direct_conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
+    session.add(
+        MessageEdit(
+            message_id=message.id,
+            editor_user_id=current_user.id,
+            previous_body=message.body,
+        )
+    )
+
+    now = datetime.now(timezone.utc)
+    message.body = content
+    message.edited_at = now
+    message.updated_at = now
+    message.version += 1
+
+    recipient_id = direct_recipient_id(
+        direct_conversation,
+        message.sender_id,
+    )
+    recipient = await session.get(User, recipient_id)
+
+    if recipient is not None:
+        translation = await session.scalar(
+            select(MessageTranslation).where(
+                MessageTranslation.message_id == message.id,
+                MessageTranslation.target_language
+                == recipient.preferred_language,
+            )
+        )
+
+        if translation is None:
+            translation = MessageTranslation(
+                message_id=message.id,
+                source_language=(
+                    message.source_language
+                    or current_user.preferred_language
+                ),
+                target_language=recipient.preferred_language,
+            )
+            session.add(translation)
+
+        translation.translated_body = None
+        translation.status = TranslationStatus.PENDING
+        translation.provider = None
+        translation.model = None
+        translation.error_message = None
+        translation.updated_at = now
 
     await session.commit()
     await session.refresh(message)
 
-    reply_to = None
-
-    if message.reply_to_message_id is not None:
-        reply_to = await session.get(
-            Message,
-            message.reply_to_message_id,
-        )
-
-    message_read = build_message_read(
+    message_read = await build_single_message_read(
+        session,
         message,
-        reply_to=reply_to,
+        direct_conversation=direct_conversation,
     )
 
-    websocket_event = {
-        "type": "message.updated",
-        "message": message_read.model_dump(mode="json"),
-    }
-
-    await connection_manager.send_to_user(
-        user_id=message.sender_id,
-        data=websocket_event,
+    await send_to_direct_participants(
+        direct_conversation,
+        {
+            "type": "message.updated",
+            "message": message_read.model_dump(mode="json"),
+        },
     )
 
-    await connection_manager.send_to_user(
-        user_id=message.recipient_id,
-        data=websocket_event,
-    )
-
-    background_tasks.add_task(
-        translate_and_publish_message,
-        message.id,
-    )
+    background_tasks.add_task(translate_and_publish_message, message.id)
 
     return message_read
 
@@ -854,14 +1281,11 @@ async def update_message(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_message(
-    message_id: int,
+    message_id: UUID,
     current_user: CurrentUserDependency,
     session: SessionDependency,
 ) -> Response:
-    message = await session.get(
-        Message,
-        message_id,
-    )
+    message = await session.get(Message, message_id)
 
     if message is None or message.deleted_at is not None:
         raise HTTPException(
@@ -875,6 +1299,18 @@ async def delete_message(
             detail="You can only delete your own messages",
         )
 
+    direct_conversation = await session.scalar(
+        select(DirectConversation).where(
+            DirectConversation.conversation_id == message.conversation_id
+        )
+    )
+
+    if direct_conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
     now = datetime.now(timezone.utc)
     created_at = normalize_utc(message.created_at)
 
@@ -885,22 +1321,17 @@ async def delete_message(
         )
 
     message.deleted_at = now
+    message.deleted_by_user_id = current_user.id
+    message.updated_at = now
 
     await session.commit()
 
-    websocket_event = {
-        "type": "message.deleted",
-        "message_id": message.id,
-    }
-
-    await connection_manager.send_to_user(
-        user_id=message.sender_id,
-        data=websocket_event,
-    )
-
-    await connection_manager.send_to_user(
-        user_id=message.recipient_id,
-        data=websocket_event,
+    await send_to_direct_participants(
+        direct_conversation,
+        {
+            "type": "message.deleted",
+            "message_id": str(message.id),
+        },
     )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

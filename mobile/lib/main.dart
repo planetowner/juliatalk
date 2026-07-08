@@ -7,7 +7,6 @@ import 'features/auth/data/auth_api.dart';
 import 'features/auth/domain/auth_session.dart';
 import 'features/auth/presentation/login_screen.dart';
 import 'features/chat/presentation/chat_conversation_screen.dart';
-import 'features/chat/presentation/chat_style_preview_screen.dart';
 
 void main() {
   final AppConfig appConfig = AppConfig.fromEnvironment();
@@ -83,24 +82,6 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
               baseUri: widget.appConfig.apiBaseUri,
               session: session,
             ),
-    );
-  }
-}
-
-/// 기존 채팅 UI 테스트들이 사용하는 테스트 전용 앱.
-///
-/// 실제 앱 실행은 [JuliaTalkApp]을 사용하고,
-/// 이 클래스는 로그인 과정 없이 채팅 화면만 테스트할 때 사용한다.
-final class JuliaTalkPreviewApp extends StatelessWidget {
-  const JuliaTalkPreviewApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'JuliaTalk',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.light,
-      home: const ChatStylePreviewScreen(),
     );
   }
 }

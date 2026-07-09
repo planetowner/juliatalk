@@ -43,6 +43,16 @@ void main() {
       expect(actions, contains(ChatMessageAction.unsend));
     });
 
+    test('outgoing messages with future server timestamps allow unsend', () {
+      final List<ChatMessageAction> actions = availableChatMessageActions(
+        isOutgoing: true,
+        createdAt: createdAt.add(const Duration(seconds: 10)),
+        now: createdAt,
+      );
+
+      expect(actions, contains(ChatMessageAction.unsend));
+    });
+
     test('outgoing messages older than five minutes omit unsend', () {
       final List<ChatMessageAction> actions = availableChatMessageActions(
         isOutgoing: true,

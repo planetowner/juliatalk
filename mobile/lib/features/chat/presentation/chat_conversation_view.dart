@@ -4568,6 +4568,7 @@ final class _MessageListState extends State<_MessageList> {
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
+    _syncMessageClockWithMessages(_messages);
     _nextMessageId = widget.nextLocalMessageId;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -4651,6 +4652,19 @@ final class _MessageListState extends State<_MessageList> {
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
+    _syncMessageClockWithMessages(_messages);
+  }
+
+  void _syncMessageClockWith(ChatMessage message) {
+    if (_messageClock.isBefore(message.createdAt)) {
+      _messageClock = message.createdAt;
+    }
+  }
+
+  void _syncMessageClockWithMessages(Iterable<ChatMessage> messages) {
+    for (final ChatMessage message in messages) {
+      _syncMessageClockWith(message);
+    }
   }
 
   void addMessage(ChatMessage message) {
@@ -4666,6 +4680,7 @@ final class _MessageListState extends State<_MessageList> {
       }
 
       _messages.sort(_compareMessages);
+      _syncMessageClockWith(message);
     });
   }
 
@@ -4688,6 +4703,7 @@ final class _MessageListState extends State<_MessageList> {
       }
 
       _messages.sort(_compareMessages);
+      _syncMessageClockWithMessages(messages);
     });
   }
 
@@ -4703,6 +4719,7 @@ final class _MessageListState extends State<_MessageList> {
     setState(() {
       _messages[messageIndex] = message;
       _messages.sort(_compareMessages);
+      _syncMessageClockWith(message);
     });
 
     return true;
@@ -5031,65 +5048,86 @@ final class _MessageListState extends State<_MessageList> {
       final RenderObject? targetRenderObject = _messageRenderObject(messageId);
 
       if (targetRenderObject != null) {
-        final RenderAbstractViewport viewport = RenderAbstractViewport.of(
-          targetRenderObject,
-        );
+        double targetOffsetFor(RenderObject renderObject) {
+          final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+            renderObject,
+          );
 
-        final ScrollPosition position = _scrollController.position;
+          final ScrollPosition position = _scrollController.position;
 
-        final RevealedOffset leadingReveal = viewport.getOffsetToReveal(
-          targetRenderObject,
-          0,
-        );
+          final RevealedOffset leadingReveal = viewport.getOffsetToReveal(
+            renderObject,
+            0,
+          );
 
-        final RevealedOffset trailingReveal = viewport.getOffsetToReveal(
-          targetRenderObject,
-          1,
-        );
+          final RevealedOffset trailingReveal = viewport.getOffsetToReveal(
+            renderObject,
+            1,
+          );
 
-        final RevealedOffset desiredReveal = viewport.getOffsetToReveal(
-          targetRenderObject,
-          alignment,
-        );
+          final RevealedOffset desiredReveal = viewport.getOffsetToReveal(
+            renderObject,
+            alignment,
+          );
 
-        final double fullyVisibleMinimum = math.min(
-          leadingReveal.offset,
-          trailingReveal.offset,
-        );
+          final double fullyVisibleMinimum = math.min(
+            leadingReveal.offset,
+            trailingReveal.offset,
+          );
 
-        final double fullyVisibleMaximum = math.max(
-          leadingReveal.offset,
-          trailingReveal.offset,
-        );
+          final double fullyVisibleMaximum = math.max(
+            leadingReveal.offset,
+            trailingReveal.offset,
+          );
 
-        final double targetHeight = targetRenderObject is RenderBox
-            ? targetRenderObject.size.height
-            : desiredReveal.rect.height;
+          final double targetHeight = renderObject is RenderBox
+              ? renderObject.size.height
+              : desiredReveal.rect.height;
 
-        final bool canFitEntireMessage =
-            targetHeight <= position.viewportDimension + 0.5;
+          final bool canFitEntireMessage =
+              targetHeight <= position.viewportDimension + 0.5;
 
-        double targetOffset = desiredReveal.offset;
+          double targetOffset = desiredReveal.offset;
 
-        if (canFitEntireMessage) {
-          // 상단 28% 배치를 우선하되, 긴 원문이 잘리는 경우에는
-          // 말풍선 전체가 보이는 범위 안으로 위치를 보정한다.
-          targetOffset = targetOffset
-              .clamp(fullyVisibleMinimum, fullyVisibleMaximum)
+          if (canFitEntireMessage) {
+            // 상단 28% 배치를 우선하되, 긴 원문이 잘리는 경우에는
+            // 말풍선 전체가 보이는 범위 안으로 위치를 보정한다.
+            targetOffset = targetOffset
+                .clamp(fullyVisibleMinimum, fullyVisibleMaximum)
+                .toDouble();
+          }
+
+          return targetOffset
+              .clamp(position.minScrollExtent, position.maxScrollExtent)
               .toDouble();
         }
 
-        targetOffset = targetOffset
-            .clamp(position.minScrollExtent, position.maxScrollExtent)
-            .toDouble();
+        double targetOffset = targetOffsetFor(targetRenderObject);
 
-        if ((targetOffset - position.pixels).abs() >= 0.5) {
+        if ((targetOffset - _scrollController.position.pixels).abs() >= 0.5) {
           // 카카오톡처럼 중간 스크롤 과정을 보여주지 않고
           // 계산된 원문 위치로 즉시 이동한다.
           _scrollController.jumpTo(targetOffset);
         }
 
         await WidgetsBinding.instance.endOfFrame;
+
+        if (!mounted || !_scrollController.hasClients) {
+          return false;
+        }
+
+        final RenderObject? settledTargetRenderObject = _messageRenderObject(
+          messageId,
+        );
+
+        if (settledTargetRenderObject != null) {
+          targetOffset = targetOffsetFor(settledTargetRenderObject);
+
+          if ((targetOffset - _scrollController.position.pixels).abs() >= 0.5) {
+            _scrollController.jumpTo(targetOffset);
+            await WidgetsBinding.instance.endOfFrame;
+          }
+        }
 
         return mounted;
       }
@@ -5390,11 +5428,14 @@ final class _MessageListState extends State<_MessageList> {
 
     final Rect bubbleRect = capturedBubble.rect;
     final ui.Image bubbleImage = capturedBubble.image;
+    final DateTime actionNow = widget.initialClock == null
+        ? DateTime.now()
+        : _messageClock;
 
     final List<ChatMessageAction> actions = availableChatMessageActions(
       isOutgoing: message.senderId == widget.currentUserId,
       createdAt: message.createdAt,
-      now: _messageClock,
+      now: actionNow,
       isMedia:
           message.isPhotoMessage ||
           message.isFileMessage ||
@@ -5707,16 +5748,29 @@ final class _MessageListState extends State<_MessageList> {
       );
 
       if (index != groups.length - 1) {
-        final bool nextGroupStartsNewDate = !isSameChatDate(
-          group.createdAt,
-          groups[index + 1].createdAt,
+        timeline.add(
+          SizedBox(height: _timelineGapBetweenGroups(group, groups[index + 1])),
         );
-
-        timeline.add(SizedBox(height: nextGroupStartsNewDate ? 18 : 14));
       }
     }
 
     return timeline;
+  }
+
+  double _timelineGapBetweenGroups(
+    ChatMessageGroup group,
+    ChatMessageGroup nextGroup,
+  ) {
+    if (!isSameChatDate(group.createdAt, nextGroup.createdAt)) {
+      return 18;
+    }
+
+    final bool consecutiveCallBubbles =
+        group.senderId == nextGroup.senderId &&
+        group.messages.last.isCallMessage &&
+        nextGroup.messages.first.isCallMessage;
+
+    return consecutiveCallBubbles ? 8 : 14;
   }
 }
 
@@ -6233,11 +6287,8 @@ final class _IncomingMessageGroup extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.only(top: 1),
-          child: _ProfilePlaceholder(),
-        ),
-        const SizedBox(width: 8),
+        const _ProfilePlaceholder(),
+        const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -6347,6 +6398,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         messageId: message.id,
         measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
         attachment: message.callAttachment!,
+        isOutgoing: false,
         isHighlighted: isHighlighted,
       );
     } else if (isVoiceMemoMessage) {
@@ -6399,11 +6451,14 @@ final class _IncomingMessageRow extends StatelessWidget {
         child: content,
       ),
     );
+    final Widget rowBubble = isCallMessage
+        ? bubble
+        : Flexible(fit: FlexFit.loose, child: bubble);
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        Flexible(fit: FlexFit.loose, child: bubble),
+        rowBubble,
         if (showTime) ...[
           const SizedBox(width: 6),
           Padding(
@@ -6835,6 +6890,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         messageId: message.id,
         measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
         attachment: message.callAttachment!,
+        isOutgoing: true,
         isHighlighted: isHighlighted,
       );
     } else if (message.isVoiceMemoMessage) {
@@ -6882,6 +6938,25 @@ final class _OutgoingMessageRow extends StatelessWidget {
       );
     }
 
+    final Widget bubble = _MessageCaptureBoundary(
+      key: bubbleInteractionKey,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: message.isFileMessage
+            ? () {
+                onFileMessageTap(message);
+              }
+            : null,
+        onLongPress: () {
+          unawaited(onMessageLongPress(message, bubbleInteractionKey));
+        },
+        child: content,
+      ),
+    );
+    final Widget rowBubble = message.isCallMessage
+        ? bubble
+        : Flexible(fit: FlexFit.loose, child: bubble);
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       crossAxisAlignment: CrossAxisAlignment.end,
@@ -6893,24 +6968,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
           ),
           const SizedBox(width: 6),
         ],
-        Flexible(
-          fit: FlexFit.loose,
-          child: _MessageCaptureBoundary(
-            key: bubbleInteractionKey,
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: message.isFileMessage
-                  ? () {
-                      onFileMessageTap(message);
-                    }
-                  : null,
-              onLongPress: () {
-                unawaited(onMessageLongPress(message, bubbleInteractionKey));
-              },
-              child: content,
-            ),
-          ),
-        ),
+        rowBubble,
       ],
     );
   }
@@ -7971,7 +8029,19 @@ final class _CallMessagePresentation {
 
 _CallMessagePresentation _callMessagePresentation(
   ChatCallAttachment attachment,
+  bool isOutgoing,
 ) {
+  if (!isOutgoing &&
+      (attachment.outcome == ChatCallOutcome.cancelled ||
+          attachment.outcome == ChatCallOutcome.noAnswer)) {
+    return const _CallMessagePresentation(
+      label: 'Missed Call',
+      icon: Icons.phone_missed_rounded,
+      iconColor: AppColors.red500,
+      showsDuration: false,
+    );
+  }
+
   return switch (attachment.outcome) {
     ChatCallOutcome.started => const _CallMessagePresentation(
       label: 'Voice Call',
@@ -7993,14 +8063,14 @@ _CallMessagePresentation _callMessagePresentation(
     ),
     ChatCallOutcome.missed => const _CallMessagePresentation(
       label: 'Missed Call',
-      icon: Icons.call_missed_rounded,
+      icon: Icons.phone_missed_rounded,
       iconColor: AppColors.red500,
       showsDuration: false,
     ),
     ChatCallOutcome.noAnswer => const _CallMessagePresentation(
       label: 'No Answer',
       icon: Icons.phone_disabled_rounded,
-      iconColor: AppColors.red500,
+      iconColor: AppColors.grey500,
       showsDuration: false,
     ),
   };
@@ -8011,97 +8081,88 @@ final class _CallMessageBubble extends StatelessWidget {
     required this.messageId,
     required this.measurementKey,
     required this.attachment,
+    required this.isOutgoing,
     required this.isHighlighted,
   });
 
   final String messageId;
   final Key measurementKey;
   final ChatCallAttachment attachment;
+  final bool isOutgoing;
   final bool isHighlighted;
 
   @override
   Widget build(BuildContext context) {
     final _CallMessagePresentation presentation = _callMessagePresentation(
       attachment,
+      isOutgoing,
     );
     final String? durationText = presentation.showsDuration
         ? _formatCallDuration(attachment.duration)
         : null;
-    final double availableWidth = MediaQuery.sizeOf(context).width * 0.58;
-    final double preferredMinWidth = presentation.showsDuration ? 170 : 150;
-    final double preferredMaxWidth = presentation.showsDuration ? 214 : 182;
-    final double maxWidth = math.min(preferredMaxWidth, availableWidth);
-    final double minWidth = math.min(preferredMinWidth, maxWidth);
+    const double horizontalPadding = _messageHorizontalPadding;
+    const double iconSize = 22;
+    const double iconLabelGap = 10;
+    final TextStyle callTextStyle = AppTypography.subTypography10.copyWith(
+      color: AppColors.grey900,
+      fontWeight: AppTypography.regular,
+    );
+    final StrutStyle callStrutStyle = _buildMessageStrutStyle(callTextStyle);
+    Widget callText(String text) {
+      return Text(
+        key: ValueKey<String>('call-text-slot-$messageId-$text'),
+        text,
+        maxLines: 1,
+        softWrap: false,
+        overflow: TextOverflow.visible,
+        strutStyle: callStrutStyle,
+        style: callTextStyle,
+        textHeightBehavior: _messageTextHeightBehavior,
+      );
+    }
+
+    final Widget callLabel = durationText == null
+        ? callText(presentation.label)
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [callText(presentation.label), callText(durationText)],
+          );
 
     return Transform.scale(
       key: ValueKey<String>('message-pulse-$messageId'),
       scale: 1,
       child: Stack(
         key: measurementKey,
+        clipBehavior: Clip.none,
         children: [
-          ConstrainedBox(
-            constraints: BoxConstraints(minWidth: minWidth, maxWidth: maxWidth),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: AppColors.white,
-                borderRadius: const BorderRadius.all(Radius.circular(17)),
-                border: Border.all(color: AppColors.grey100),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.white,
+              borderRadius: const BorderRadius.all(Radius.circular(17)),
+              border: Border.all(color: AppColors.grey100),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: horizontalPadding,
+                vertical: 9,
               ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 11,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    key: ValueKey<String>('call-icon-slot-$messageId'),
+                    width: iconSize,
+                    height: iconSize,
+                    child: Icon(
                       presentation.icon,
-                      size: 28,
+                      size: iconSize,
                       color: presentation.iconColor,
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: durationText == null
-                          ? Text(
-                              presentation.label,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.right,
-                              style: AppTypography.subTypography10.copyWith(
-                                color: AppColors.grey900,
-                                fontWeight: AppTypography.medium,
-                              ),
-                            )
-                          : Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(
-                                  presentation.label,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  textAlign: TextAlign.right,
-                                  style: AppTypography.subTypography10.copyWith(
-                                    color: AppColors.grey900,
-                                    fontWeight: AppTypography.medium,
-                                  ),
-                                ),
-                                const SizedBox(height: 1),
-                                Text(
-                                  durationText,
-                                  maxLines: 1,
-                                  textAlign: TextAlign.right,
-                                  style: AppTypography.typography5.copyWith(
-                                    color: AppColors.grey900,
-                                    fontWeight: AppTypography.medium,
-                                  ),
-                                ),
-                              ],
-                            ),
-                    ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: iconLabelGap),
+                  callLabel,
+                ],
               ),
             ),
           ),
@@ -8486,7 +8547,7 @@ final class _MessageBubbleState extends State<_MessageBubble>
                 ),
                 if (widget.showTail)
                   Positioned(
-                    top: 3,
+                    top: 6,
                     left: _isOutgoing ? null : -7,
                     right: _isOutgoing ? -7 : null,
                     child: CustomPaint(
@@ -8572,11 +8633,11 @@ final class _ProfilePlaceholder extends StatelessWidget {
     return const DecoratedBox(
       decoration: BoxDecoration(
         color: AppColors.blue100,
-        borderRadius: BorderRadius.all(Radius.circular(13)),
+        borderRadius: BorderRadius.all(Radius.circular(12)),
       ),
       child: SizedBox.square(
-        dimension: 38,
-        child: Icon(Icons.person_rounded, color: AppColors.white, size: 23),
+        dimension: 36,
+        child: Icon(Icons.person_rounded, color: AppColors.white, size: 22),
       ),
     );
   }

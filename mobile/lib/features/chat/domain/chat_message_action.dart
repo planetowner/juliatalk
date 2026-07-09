@@ -17,9 +17,7 @@ List<ChatMessageAction> availableChatMessageActions({
 
   final Duration elapsedSinceCreation = now.difference(createdAt);
 
-  final bool canUnsend =
-      !elapsedSinceCreation.isNegative &&
-      elapsedSinceCreation <= chatMessageUnsendWindow;
+  final bool canUnsend = elapsedSinceCreation <= chatMessageUnsendWindow;
 
   return <ChatMessageAction>[
     if (!isMedia) ChatMessageAction.copy,

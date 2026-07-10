@@ -20,6 +20,12 @@ final class ChatApi {
   final Uri _baseUri;
   final String _accessToken;
 
+  static final RegExp _urlPattern = RegExp(
+    r'''(?:(?:https?):\/\/|www\.)[^\s<>'"]+''',
+    caseSensitive: false,
+  );
+  static const String _trailingUrlPunctuation = '.,!?;:)]}…';
+
   Map<String, String> get _headers {
     return <String, String>{
       'Accept': 'application/json',
@@ -168,10 +174,18 @@ final class ChatApi {
     required String content,
     String? replyToMessageId,
   }) {
+    final String? previewUrl = _firstUrlInText(content);
+
     return _createMessage(
       recipientId: recipientId,
       content: content,
-      messageType: 'text',
+      messageType: previewUrl == null ? 'text' : 'link',
+      metadata: previewUrl == null
+          ? null
+          : <String, Object?>{
+              'url': previewUrl,
+              'domain': _domainForUrl(previewUrl),
+            },
       replyToMessageId: replyToMessageId,
     );
   }
@@ -598,13 +612,14 @@ final class ChatApi {
     final String translationStatus = json['translation_status'] as String;
     final String messageType = json['message_type'] as String? ?? 'text';
     final Map<String, dynamic>? metadata = _optionalMap(json['metadata']);
+    final String content = json['content'] as String;
     final bool translates = messageType == 'text';
 
     return ChatMessage(
       id: _requiredString(json['id'], 'id'),
       senderId: _requiredString(json['sender_id'], 'sender_id'),
       recipientId: _requiredString(json['recipient_id'], 'recipient_id'),
-      content: json['content'] as String,
+      content: content,
       createdAt: _dateTimeFromApi(json['created_at']),
       editedAt: _optionalDateTime(json['edited_at']),
       readAt: _optionalDateTime(json['read_at']),
@@ -635,6 +650,86 @@ final class ChatApi {
       callAttachment: messageType == 'call' && metadata != null
           ? _callFromMetadata(metadata)
           : null,
+      linkPreview: messageType == 'link'
+          ? _linkPreviewFromMetadata(metadata, content)
+          : null,
+    );
+  }
+
+  String? _firstUrlInText(String content) {
+    final RegExpMatch? match = _urlPattern.firstMatch(content);
+
+    if (match == null) {
+      return null;
+    }
+
+    String url = match.group(0)!.trimRight();
+
+    while (url.isNotEmpty &&
+        _trailingUrlPunctuation.contains(url[url.length - 1])) {
+      url = url.substring(0, url.length - 1);
+    }
+
+    if (url.toLowerCase().startsWith('www.')) {
+      return 'https://$url';
+    }
+
+    return url;
+  }
+
+  String _domainForUrl(String url) {
+    final Uri? parsedUrl = Uri.tryParse(url);
+    String domain = parsedUrl?.host ?? '';
+
+    if (domain.isEmpty) {
+      return url;
+    }
+
+    if (domain.startsWith('www.')) {
+      domain = domain.substring(4);
+    }
+
+    return domain;
+  }
+
+  ChatLinkPreview? _linkPreviewFromMetadata(
+    Map<String, dynamic>? metadata,
+    String content,
+  ) {
+    final Object? metadataUrl = metadata == null ? null : metadata['url'];
+    final Object? metadataCanonicalUrl = metadata == null
+        ? null
+        : metadata['canonical_url'];
+    final Object? metadataDomain = metadata == null ? null : metadata['domain'];
+    final Object? metadataTitle = metadata == null ? null : metadata['title'];
+    final Object? metadataDescription = metadata == null
+        ? null
+        : metadata['description'];
+    final Object? metadataSiteName = metadata == null
+        ? null
+        : metadata['site_name'];
+    final Object? metadataImageUrl = metadata == null
+        ? null
+        : metadata['image_url'];
+    final String? url =
+        _optionalString(metadataUrl) ?? _firstUrlInText(content);
+
+    if (url == null) {
+      return null;
+    }
+
+    final String? canonicalUrl = _optionalString(metadataCanonicalUrl);
+    final String domain =
+        _optionalString(metadataDomain) ?? _domainForUrl(canonicalUrl ?? url);
+
+    return ChatLinkPreview(
+      url: url,
+      canonicalUrl: canonicalUrl,
+      domain: domain,
+      title: _optionalString(metadataTitle),
+      description: _optionalString(metadataDescription),
+      siteName: _optionalString(metadataSiteName),
+      imageUrl: _optionalString(metadataImageUrl),
     );
   }
 
@@ -828,6 +923,14 @@ final class ChatApi {
     }
 
     return value;
+  }
+
+  String? _optionalString(Object? value) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+
+    return null;
   }
 
   String _requiredString(Object? value, String fieldName) {

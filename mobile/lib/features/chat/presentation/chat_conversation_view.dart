@@ -29,6 +29,13 @@ import 'read_receipt_formatter.dart';
 
 const double _messageHorizontalPadding = 11;
 
+final RegExp _messageUrlPattern = RegExp(
+  r'''(?:(?:https?):\/\/|www\.)[^\s<>'"]+''',
+  caseSensitive: false,
+);
+
+const String _trailingUrlPunctuation = '.,!?;:)]}…';
+
 const double _messageToComposerGap = 12;
 
 const double _attachmentPanelFallbackHeight = 302;
@@ -5004,6 +5011,64 @@ String _formatSearchMonth(DateTime month) {
   return '${month.year}.${month.month.toString().padLeft(2, '0')}';
 }
 
+String? _firstUrlInMessageText(String content) {
+  final RegExpMatch? match = _messageUrlPattern.firstMatch(content);
+
+  if (match == null) {
+    return null;
+  }
+
+  String url = match.group(0)!.trimRight();
+
+  while (url.isNotEmpty &&
+      _trailingUrlPunctuation.contains(url[url.length - 1])) {
+    url = url.substring(0, url.length - 1);
+  }
+
+  if (url.toLowerCase().startsWith('www.')) {
+    return 'https://$url';
+  }
+
+  return url;
+}
+
+String _domainForLinkUrl(String url) {
+  final Uri? uri = Uri.tryParse(url);
+  String domain = uri?.host ?? '';
+
+  if (domain.isEmpty) {
+    return url;
+  }
+
+  if (domain.startsWith('www.')) {
+    domain = domain.substring(4);
+  }
+
+  return domain;
+}
+
+ChatLinkPreview? _linkPreviewForContent(String content) {
+  final String? url = _firstUrlInMessageText(content);
+
+  if (url == null) {
+    return null;
+  }
+
+  return ChatLinkPreview(url: url, domain: _domainForLinkUrl(url));
+}
+
+bool _isLinkOnlyMessage(ChatMessage message) {
+  if (!message.isLinkMessage) {
+    return false;
+  }
+
+  final String remainingText = message.content
+      .replaceAll(_messageUrlPattern, '')
+      .replaceAll(RegExp(r'[\s.,!?;:()\[\]{}…]+'), '');
+
+  return remainingText.isEmpty;
+}
+
 List<String> _searchableTextSegmentsFor(ChatMessage message) {
   final List<String> segments = <String>[];
 
@@ -5051,6 +5116,7 @@ bool _messageNeedsTranslation(
   if (message.isPhotoMessage ||
       message.isFileMessage ||
       message.isCallMessage ||
+      message.isLinkMessage ||
       message.isVoiceMemoMessage) {
     return false;
   }
@@ -5443,6 +5509,7 @@ final class _MessageListState extends State<_MessageList> {
     setState(() {
       final DateTime createdAt = DateTime.now();
       _messageClock = createdAt;
+      final ChatLinkPreview? linkPreview = _linkPreviewForContent(content);
 
       _messages.add(
         ChatMessage(
@@ -5452,6 +5519,7 @@ final class _MessageListState extends State<_MessageList> {
           content: content,
           createdAt: createdAt,
           replyTo: replyTo,
+          linkPreview: linkPreview,
         ),
       );
     });
@@ -5584,10 +5652,13 @@ final class _MessageListState extends State<_MessageList> {
 
     setState(() {
       _messageClock = DateTime.now();
+      final ChatLinkPreview? linkPreview = _linkPreviewForContent(content);
 
       _messages[messageIndex] = _messages[messageIndex].copyWith(
         content: content,
         editedAt: _messageClock,
+        linkPreview: linkPreview,
+        clearLinkPreview: linkPreview == null,
       );
     });
 
@@ -7157,6 +7228,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     final bool isPhotoMessage = message.isPhotoMessage;
     final bool isCallMessage = message.isCallMessage;
     final bool isVoiceMemoMessage = message.isVoiceMemoMessage;
+    final bool isLinkMessage = message.isLinkMessage;
     final bool canUseTranslation = _messageNeedsTranslation(
       message,
       currentUserPreferredLanguage: currentUserPreferredLanguage,
@@ -7200,6 +7272,18 @@ final class _IncomingMessageRow extends StatelessWidget {
         attachment: message.voiceMemoAttachment!,
         isHighlighted: isHighlighted,
         onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+      );
+    } else if (isLinkMessage) {
+      content = _LinkMessageContent(
+        message: message,
+        isOutgoing: false,
+        showTail: showTail && !_isLinkOnlyMessage(message),
+        isHighlighted: isHighlighted,
+        searchQuery: searchQuery,
+        currentUserId: currentUserId,
+        otherParticipantName: otherParticipantName,
+        onReplyQuoteTap: onReplyQuoteTap,
+        measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
       );
     } else {
       content = _MessageBubble(
@@ -7588,6 +7672,313 @@ final class _SearchHighlightedText extends StatelessWidget {
   }
 }
 
+final class _LinkMessageContent extends StatelessWidget {
+  const _LinkMessageContent({
+    required this.message,
+    required this.isOutgoing,
+    required this.showTail,
+    required this.isHighlighted,
+    required this.searchQuery,
+    required this.currentUserId,
+    required this.otherParticipantName,
+    required this.onReplyQuoteTap,
+    required this.measurementKey,
+  });
+
+  final ChatMessage message;
+  final bool isOutgoing;
+  final bool showTail;
+  final bool isHighlighted;
+  final String searchQuery;
+  final String currentUserId;
+  final String otherParticipantName;
+  final _ReplyQuoteTapCallback onReplyQuoteTap;
+  final Key measurementKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final ChatLinkPreview preview = message.linkPreview!;
+    final bool linkOnly = _isLinkOnlyMessage(message);
+    final CrossAxisAlignment crossAxisAlignment = isOutgoing
+        ? CrossAxisAlignment.end
+        : CrossAxisAlignment.start;
+    final TextStyle messageTextStyle = AppTypography.subTypography10.copyWith(
+      color: isOutgoing ? AppColors.white : AppColors.grey900,
+      fontWeight: AppTypography.regular,
+    );
+
+    final List<Widget> children = <Widget>[];
+
+    if (!linkOnly) {
+      children.add(
+        _MessageBubble(
+          messageId: message.id,
+          measurementKey: measurementKey,
+          backgroundColor: isOutgoing ? AppColors.blue500 : AppColors.grey100,
+          direction: isOutgoing
+              ? _BubbleDirection.outgoing
+              : _BubbleDirection.incoming,
+          showTail: showTail,
+          isHighlighted: isHighlighted,
+          child: _ReplyMessageBody(
+            message: message,
+            currentUserId: currentUserId,
+            otherParticipantName: otherParticipantName,
+            isOutgoing: isOutgoing,
+            searchQuery: searchQuery,
+            onReplyQuoteTap: onReplyQuoteTap,
+            child: _LinkifiedMessageText(
+              text: message.content,
+              style: messageTextStyle,
+              linkColor: isOutgoing ? AppColors.white : AppColors.blue500,
+            ),
+          ),
+        ),
+      );
+      children.add(const SizedBox(height: 6));
+    }
+
+    children.add(
+      _LinkPreviewCard(
+        key: linkOnly ? measurementKey : null,
+        preview: preview,
+        isHighlighted: linkOnly && isHighlighted,
+      ),
+    );
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: crossAxisAlignment,
+      children: children,
+    );
+  }
+}
+
+final class _LinkifiedMessageText extends StatelessWidget {
+  const _LinkifiedMessageText({
+    required this.text,
+    required this.style,
+    required this.linkColor,
+  });
+
+  final String text;
+  final TextStyle style;
+  final Color linkColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text.rich(
+      _buildSpan(),
+      softWrap: true,
+      strutStyle: _buildMessageStrutStyle(style),
+      textWidthBasis: TextWidthBasis.longestLine,
+      textHeightBehavior: _messageTextHeightBehavior,
+    );
+  }
+
+  TextSpan _buildSpan() {
+    final List<InlineSpan> children = <InlineSpan>[];
+    int cursor = 0;
+
+    for (final RegExpMatch match in _messageUrlPattern.allMatches(text)) {
+      if (match.start > cursor) {
+        children.add(TextSpan(text: text.substring(cursor, match.start)));
+      }
+
+      final String rawUrl = match.group(0)!;
+      int linkEnd = rawUrl.length;
+
+      while (linkEnd > 0 &&
+          _trailingUrlPunctuation.contains(rawUrl[linkEnd - 1])) {
+        linkEnd--;
+      }
+
+      final String linkText = rawUrl.substring(0, linkEnd);
+      final String trailingText = rawUrl.substring(linkEnd);
+
+      if (linkText.isNotEmpty) {
+        children.add(
+          TextSpan(
+            text: linkText,
+            style: style.copyWith(
+              color: linkColor,
+              decoration: TextDecoration.underline,
+              decorationColor: linkColor,
+              decorationThickness: 1.2,
+            ),
+          ),
+        );
+      }
+
+      if (trailingText.isNotEmpty) {
+        children.add(TextSpan(text: trailingText));
+      }
+
+      cursor = match.end;
+    }
+
+    if (cursor < text.length) {
+      children.add(TextSpan(text: text.substring(cursor)));
+    }
+
+    return TextSpan(style: style, children: children);
+  }
+}
+
+final class _LinkPreviewCard extends StatelessWidget {
+  const _LinkPreviewCard({
+    required this.preview,
+    required this.isHighlighted,
+    super.key,
+  });
+
+  final ChatLinkPreview preview;
+  final bool isHighlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final double cardWidth = math.min(
+      MediaQuery.sizeOf(context).width * 0.68,
+      316,
+    );
+    final Border border = Border.all(
+      color: isHighlighted
+          ? AppColors.primary.withAlpha(110)
+          : AppColors.grey200,
+      width: isHighlighted ? 1.6 : 1,
+    );
+    final String title = preview.title ?? preview.siteName ?? preview.domain;
+    final String? description = preview.description;
+    final String domain = preview.domain;
+
+    return SizedBox(
+      width: cardWidth,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: AppColors.white,
+          borderRadius: BorderRadius.circular(17),
+          border: border,
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(17),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _LinkPreviewImage(preview: preview, width: cardWidth),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTypography.subTypography10.copyWith(
+                        color: AppColors.grey900,
+                        fontWeight: AppTypography.bold,
+                      ),
+                    ),
+                    if (description != null) ...[
+                      const SizedBox(height: 5),
+                      Text(
+                        description,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTypography.subTypography12.copyWith(
+                          color: AppColors.grey600,
+                          fontWeight: AppTypography.regular,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Text(
+                      domain,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTypography.subTypography12.copyWith(
+                        color: AppColors.blue500,
+                        fontWeight: AppTypography.regular,
+                        decoration: TextDecoration.underline,
+                        decorationColor: AppColors.blue500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _LinkPreviewImage extends StatelessWidget {
+  const _LinkPreviewImage({required this.preview, required this.width});
+
+  final ChatLinkPreview preview;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) {
+    final String? imageUrl = preview.imageUrl;
+    final Uri? imageUri = imageUrl == null ? null : Uri.tryParse(imageUrl);
+
+    if (imageUri == null ||
+        (imageUri.scheme != 'http' && imageUri.scheme != 'https')) {
+      return _buildPlaceholder();
+    }
+
+    return Image.network(
+      imageUri.toString(),
+      width: width,
+      height: 128,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      loadingBuilder:
+          (
+            BuildContext context,
+            Widget child,
+            ImageChunkEvent? loadingProgress,
+          ) {
+            if (loadingProgress == null) {
+              return child;
+            }
+
+            return _buildPlaceholder();
+          },
+      errorBuilder: (_, _, _) {
+        return _buildPlaceholder();
+      },
+    );
+  }
+
+  Widget _buildPlaceholder() {
+    final String label = preview.siteName ?? preview.domain;
+
+    return Container(
+      width: width,
+      height: 112,
+      alignment: Alignment.center,
+      color: AppColors.grey50,
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      child: Text(
+        label,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+        style: AppTypography.subTypography10.copyWith(
+          color: AppColors.grey600,
+          fontWeight: AppTypography.bold,
+        ),
+      ),
+    );
+  }
+}
+
 final class _OutgoingMessageGroup extends StatelessWidget {
   const _OutgoingMessageGroup({
     required this.messages,
@@ -7728,6 +8119,18 @@ final class _OutgoingMessageRow extends StatelessWidget {
         attachment: message.voiceMemoAttachment!,
         isHighlighted: isHighlighted,
         onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+      );
+    } else if (message.isLinkMessage) {
+      content = _LinkMessageContent(
+        message: message,
+        isOutgoing: true,
+        showTail: showTail && !_isLinkOnlyMessage(message),
+        isHighlighted: isHighlighted,
+        searchQuery: searchQuery,
+        currentUserId: currentUserId,
+        otherParticipantName: otherParticipantName,
+        onReplyQuoteTap: onReplyQuoteTap,
+        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
       );
     } else if (message.isFileMessage) {
       content = _MessageBubble(

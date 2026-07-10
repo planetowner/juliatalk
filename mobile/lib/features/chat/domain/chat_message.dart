@@ -98,6 +98,26 @@ final class ChatVoiceMemoAttachment {
   }
 }
 
+final class ChatLinkPreview {
+  const ChatLinkPreview({
+    required this.url,
+    required this.domain,
+    this.canonicalUrl,
+    this.title,
+    this.description,
+    this.siteName,
+    this.imageUrl,
+  });
+
+  final String url;
+  final String domain;
+  final String? canonicalUrl;
+  final String? title;
+  final String? description;
+  final String? siteName;
+  final String? imageUrl;
+}
+
 final class ChatMessage {
   const ChatMessage({
     required this.id,
@@ -117,6 +137,7 @@ final class ChatMessage {
     this.fileAttachment,
     this.callAttachment,
     this.voiceMemoAttachment,
+    this.linkPreview,
   });
 
   final String id;
@@ -137,6 +158,7 @@ final class ChatMessage {
   final ChatFileAttachment? fileAttachment;
   final ChatCallAttachment? callAttachment;
   final ChatVoiceMemoAttachment? voiceMemoAttachment;
+  final ChatLinkPreview? linkPreview;
 
   bool get isPhotoMessage {
     return photoAttachments.isNotEmpty;
@@ -154,9 +176,17 @@ final class ChatMessage {
     return voiceMemoAttachment != null;
   }
 
+  bool get isLinkMessage {
+    return linkPreview != null;
+  }
+
   String get replyPreviewContent {
     if (isVoiceMemoMessage) {
       return 'Voice Memo';
+    }
+
+    if (isLinkMessage) {
+      return linkPreview!.title ?? linkPreview!.domain;
     }
 
     if (isCallMessage) {
@@ -198,6 +228,7 @@ final class ChatMessage {
     ChatFileAttachment? fileAttachment,
     ChatCallAttachment? callAttachment,
     ChatVoiceMemoAttachment? voiceMemoAttachment,
+    ChatLinkPreview? linkPreview,
     bool clearEditedAt = false,
     bool clearReadAt = false,
     bool clearTranslatedContent = false,
@@ -207,6 +238,7 @@ final class ChatMessage {
     bool clearFileAttachment = false,
     bool clearCallAttachment = false,
     bool clearVoiceMemoAttachment = false,
+    bool clearLinkPreview = false,
   }) {
     return ChatMessage(
       id: id,
@@ -238,6 +270,7 @@ final class ChatMessage {
       voiceMemoAttachment: clearVoiceMemoAttachment
           ? null
           : voiceMemoAttachment ?? this.voiceMemoAttachment,
+      linkPreview: clearLinkPreview ? null : linkPreview ?? this.linkPreview,
     );
   }
 }

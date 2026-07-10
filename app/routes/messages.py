@@ -1,9 +1,16 @@
+import asyncio
 import base64
+import html
 import logging
 import math
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from typing import Annotated, Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 from uuid import UUID
 
 from fastapi import (
@@ -88,6 +95,10 @@ CALL_KINDS = {
 }
 
 UNSEND_WINDOW = timedelta(minutes=5)
+LINK_PREVIEW_FETCH_TIMEOUT_SECONDS = 4
+LINK_PREVIEW_MAX_BYTES = 256 * 1024
+URL_PATTERN = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>'\"]+")
+TRAILING_URL_PUNCTUATION = ".,!?;:)]}…"
 
 
 def normalize_utc(value: datetime) -> datetime:
@@ -124,6 +135,226 @@ def direct_recipient_id(
         return direct_conversation.user_two_id
 
     return direct_conversation.user_one_id
+
+
+class LinkPreviewHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.meta: dict[str, str] = {}
+        self._title_parts: list[str] = []
+        self._in_title = False
+
+    @property
+    def title(self) -> str | None:
+        value = clean_preview_text(" ".join(self._title_parts))
+        return value or None
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        normalized_tag = tag.lower()
+
+        if normalized_tag == "title":
+            self._in_title = True
+            return
+
+        if normalized_tag != "meta":
+            return
+
+        attr_map = {
+            key.lower(): value
+            for key, value in attrs
+            if value is not None
+        }
+        key = attr_map.get("property") or attr_map.get("name")
+        content = attr_map.get("content")
+
+        if key is None or content is None:
+            return
+
+        self.meta[key.lower()] = content.strip()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_parts.append(data)
+
+
+def clean_preview_text(value: str | None, *, max_length: int = 280) -> str | None:
+    if value is None:
+        return None
+
+    normalized = html.unescape(value)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    if not normalized:
+        return None
+
+    if len(normalized) <= max_length:
+        return normalized
+
+    return normalized[: max_length - 1].rstrip() + "…"
+
+
+def first_url_in_text(content: str) -> str | None:
+    match = URL_PATTERN.search(content)
+
+    if match is None:
+        return None
+
+    url = match.group(0).rstrip(TRAILING_URL_PUNCTUATION)
+
+    if url.lower().startswith("www."):
+        return f"https://{url}"
+
+    return url
+
+
+def domain_for_url(url: str) -> str:
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc.lower()
+
+    if domain.startswith("www."):
+        return domain[4:]
+
+    return domain
+
+
+def build_fallback_link_preview(
+    url: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    preview = dict(metadata or {})
+    preview_url = clean_preview_text(
+        str(preview.get("url") or preview.get("canonical_url") or url),
+        max_length=1000,
+    )
+    preview["url"] = preview_url or url
+    preview["canonical_url"] = clean_preview_text(
+        str(preview.get("canonical_url") or preview["url"]),
+        max_length=1000,
+    )
+    preview["domain"] = clean_preview_text(
+        str(preview.get("domain") or domain_for_url(preview["canonical_url"])),
+        max_length=255,
+    )
+
+    for key in ("title", "description", "site_name", "image_url"):
+        value = preview.get(key)
+
+        if isinstance(value, str):
+            preview[key] = clean_preview_text(value, max_length=1000)
+        elif value is not None:
+            preview.pop(key, None)
+
+    return {key: value for key, value in preview.items() if value}
+
+
+def build_link_preview_metadata(
+    content: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    url = first_url_in_text(content)
+
+    if url is None:
+        return metadata if metadata else None
+
+    fallback = build_fallback_link_preview(url, metadata)
+    parsed_url = urlparse(url)
+
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return fallback
+
+    try:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; JuliaTalkLinkPreview/1.0)"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+
+        with urlopen(
+            request,
+            timeout=LINK_PREVIEW_FETCH_TIMEOUT_SECONDS,
+        ) as response:
+            content_type = response.headers.get("Content-Type", "")
+
+            if (
+                "html" not in content_type.lower()
+                and "text" not in content_type.lower()
+            ):
+                return fallback
+
+            charset = response.headers.get_content_charset() or "utf-8"
+            raw_body = response.read(LINK_PREVIEW_MAX_BYTES)
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        logger.info("Link preview fetch failed for %s: %s", url, error)
+        return fallback
+
+    parser = LinkPreviewHTMLParser()
+
+    try:
+        parser.feed(raw_body.decode(charset, errors="replace"))
+    except (LookupError, UnicodeDecodeError):
+        parser.feed(raw_body.decode("utf-8", errors="replace"))
+
+    meta = parser.meta
+    canonical_url = clean_preview_text(
+        meta.get("og:url") or fallback.get("canonical_url") or url,
+        max_length=1000,
+    )
+    title = clean_preview_text(
+        meta.get("og:title") or meta.get("twitter:title") or parser.title,
+        max_length=180,
+    )
+    description = clean_preview_text(
+        meta.get("og:description")
+        or meta.get("twitter:description")
+        or meta.get("description"),
+        max_length=260,
+    )
+    site_name = clean_preview_text(
+        meta.get("og:site_name") or fallback.get("site_name"),
+        max_length=120,
+    )
+    image_url = clean_preview_text(
+        meta.get("og:image")
+        or meta.get("og:image:url")
+        or meta.get("twitter:image"),
+        max_length=1000,
+    )
+
+    if image_url is not None:
+        image_url = urljoin(url, image_url)
+
+    preview = {
+        **fallback,
+        "url": url,
+        "canonical_url": canonical_url or url,
+        "domain": domain_for_url(canonical_url or url),
+    }
+
+    if title is not None:
+        preview["title"] = title
+
+    if description is not None:
+        preview["description"] = description
+
+    if site_name is not None:
+        preview["site_name"] = site_name
+
+    if image_url is not None:
+        preview["image_url"] = image_url
+
+    return preview
 
 
 async def send_to_direct_participants(
@@ -872,14 +1103,26 @@ async def create_message(
         )
 
     content = message_data.content
+    message_type = message_data.message_type
 
-    if message_data.message_type in {"text", "link"} and not content.strip():
+    if message_type in {"text", "link"}:
+        message_type = "link" if first_url_in_text(content) is not None else "text"
+
+    if message_type in {"text", "link"} and not content.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message content cannot be blank",
         )
 
-    validate_message_metadata(message_data.message_type, message_data.metadata)
+    validate_message_metadata(message_type, message_data.metadata)
+    message_metadata = message_data.metadata
+
+    if message_type == "link":
+        message_metadata = await asyncio.to_thread(
+            build_link_preview_metadata,
+            content,
+            message_data.metadata,
+        )
 
     direct_conversation = await get_direct_conversation(
         session,
@@ -912,11 +1155,11 @@ async def create_message(
     message = Message(
         conversation_id=direct_conversation.conversation_id,
         sender_id=current_user.id,
-        kind=MessageKind(message_data.message_type),
+        kind=MessageKind(message_type),
         body=content,
         metadata_json=message_metadata_for_storage(
-            message_data.message_type,
-            message_data.metadata,
+            message_type,
+            message_metadata,
         ),
         reply_to_message_id=message_data.reply_to_message_id,
         source_language=current_user.preferred_language,
@@ -937,8 +1180,8 @@ async def create_message(
         session,
         message=message,
         sender_id=current_user.id,
-        message_type=message_data.message_type,
-        metadata=message_data.metadata,
+        message_type=message_type,
+        metadata=message_metadata,
     )
 
     should_translate_created_message = (
@@ -1246,10 +1489,10 @@ async def update_message(
             detail="You can only edit your own messages",
         )
 
-    if message.kind != MessageKind.TEXT:
+    if message.kind not in {MessageKind.TEXT, MessageKind.LINK}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only text messages can be edited",
+            detail="Only text and link messages can be edited",
         )
 
     content = message_data.content
@@ -1259,6 +1502,15 @@ async def update_message(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message content cannot be blank",
         )
+
+    updated_message_type = (
+        "link" if first_url_in_text(content) is not None else "text"
+    )
+    updated_metadata = (
+        await asyncio.to_thread(build_link_preview_metadata, content, None)
+        if updated_message_type == "link"
+        else None
+    )
 
     direct_conversation = await session.scalar(
         select(DirectConversation).where(
@@ -1281,7 +1533,12 @@ async def update_message(
     )
 
     now = datetime.now(timezone.utc)
+    message.kind = MessageKind(updated_message_type)
     message.body = content
+    message.metadata_json = message_metadata_for_storage(
+        updated_message_type,
+        updated_metadata,
+    )
     message.edited_at = now
     message.updated_at = now
     message.version += 1
@@ -1293,7 +1550,7 @@ async def update_message(
     recipient = await session.get(User, recipient_id)
     should_translate_updated_message = False
 
-    if recipient is not None:
+    if recipient is not None and message.kind == MessageKind.TEXT:
         source_language = (
             message.source_language
             or current_user.preferred_language

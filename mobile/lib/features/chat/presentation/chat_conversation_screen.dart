@@ -34,6 +34,13 @@ final class ChatConversationHomeScreen extends StatefulWidget {
 
 final class _ChatConversationHomeScreenState
     extends State<ChatConversationHomeScreen> {
+  static const Map<String, List<String>> _chatOrderByUsername =
+      <String, List<String>>{
+        'liababo': <String>['lia', 'yun'],
+        'junebabo': <String>['june', 'yun'],
+        'yunjung5437': <String>['lia', 'june'],
+      };
+
   late final ChatApi _chatApi;
   late Future<List<AppUser>> _usersFuture;
 
@@ -55,9 +62,52 @@ final class _ChatConversationHomeScreenState
   Future<List<AppUser>> _loadChatUsers() async {
     final List<AppUser> users = await _chatApi.listUsers();
 
-    return users
+    final List<AppUser> chatUsers = users
         .where((AppUser user) => user.id != widget.session.user.id)
         .toList(growable: false);
+
+    _sortChatUsers(chatUsers);
+
+    return chatUsers;
+  }
+
+  void _sortChatUsers(List<AppUser> users) {
+    final List<String>? chatOrder =
+        _chatOrderByUsername[_normalizeUserKey(widget.session.user.username)];
+
+    if (chatOrder == null) {
+      return;
+    }
+
+    final Map<String, int> priorityByName = <String, int>{
+      for (int index = 0; index < chatOrder.length; index++)
+        chatOrder[index]: index,
+    };
+
+    users.sort((AppUser first, AppUser second) {
+      final int firstPriority =
+          priorityByName[_normalizeUserKey(first.displayName)] ??
+          priorityByName[_normalizeUserKey(first.username)] ??
+          chatOrder.length;
+      final int secondPriority =
+          priorityByName[_normalizeUserKey(second.displayName)] ??
+          priorityByName[_normalizeUserKey(second.username)] ??
+          chatOrder.length;
+
+      final int priorityComparison = firstPriority.compareTo(secondPriority);
+
+      if (priorityComparison != 0) {
+        return priorityComparison;
+      }
+
+      return _normalizeUserKey(
+        first.displayName,
+      ).compareTo(_normalizeUserKey(second.displayName));
+    });
+  }
+
+  String _normalizeUserKey(String value) {
+    return value.trim().toLowerCase();
   }
 
   void _retryUsers() {
@@ -663,12 +713,12 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   }
 
   Future<ChatMessage> _sendVoiceMemoMessage({
-    required Duration duration,
+    required ChatVoiceMemoAttachment voiceMemo,
     ChatReplyReference? replyTo,
   }) async {
     final ChatMessage message = await widget.chatApi.sendVoiceMemoMessage(
       recipientId: widget.otherUser.id,
-      duration: duration,
+      voiceMemo: voiceMemo,
       replyToMessageId: replyTo?.messageId,
     );
 
@@ -761,6 +811,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         onSendFileMessage: _sendFileMessage,
         onSendVoiceMemoMessage: _sendVoiceMemoMessage,
         onSendCallMessage: _sendCallMessage,
+        onCreateMediaAssetAccessUrl: widget.chatApi.createMediaAssetAccessUrl,
         onEditTextMessage: _editTextMessage,
         onDeleteMessage: _deleteMessage,
       ),

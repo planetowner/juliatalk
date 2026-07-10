@@ -1,5 +1,4 @@
 import base64
-import binascii
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -203,21 +202,6 @@ def require_metadata_dict(
     return metadata
 
 
-def require_non_empty_string(
-    metadata: dict[str, Any],
-    key: str,
-) -> str:
-    value = metadata.get(key)
-
-    if not isinstance(value, str) or not value.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"metadata.{key} must be a non-empty string",
-        )
-
-    return value
-
-
 def require_non_negative_int(
     metadata: dict[str, Any],
     key: str,
@@ -233,20 +217,29 @@ def require_non_negative_int(
     return value
 
 
-def decode_preview_base64(value: Any) -> bytes:
-    if not isinstance(value, str) or not value:
+def require_media_asset_ids(
+    metadata: dict[str, Any],
+) -> list[UUID]:
+    value = metadata.get("media_asset_ids")
+
+    if not isinstance(value, list) or not value:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="metadata.photos.preview_base64 is required",
+            detail="metadata.media_asset_ids must be a non-empty list",
         )
 
-    try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="metadata.photos.preview_base64 is invalid",
-        ) from error
+    media_asset_ids: list[UUID] = []
+
+    for item in value:
+        try:
+            media_asset_ids.append(UUID(str(item)))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="metadata.media_asset_ids must contain UUIDs",
+            ) from error
+
+    return media_asset_ids
 
 
 def validate_message_metadata(
@@ -256,46 +249,13 @@ def validate_message_metadata(
     if message_type == "text":
         return
 
+    if message_type == "link":
+        return
+
     metadata = require_metadata_dict(message_type, metadata)
 
-    if message_type == "photo":
-        photos = metadata.get("photos")
-
-        if not isinstance(photos, list) or not photos:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="metadata.photos must be a non-empty list",
-            )
-
-        for photo in photos:
-            if not isinstance(photo, dict):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="metadata.photos must contain objects",
-                )
-
-            require_non_empty_string(photo, "asset_id")
-            decode_preview_base64(photo.get("preview_base64"))
-            require_non_negative_int(photo, "width")
-            require_non_negative_int(photo, "height")
-
-        return
-
-    if message_type == "file":
-        file_metadata = metadata.get("file")
-
-        if not isinstance(file_metadata, dict):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="metadata.file must be an object",
-            )
-
-        require_non_empty_string(file_metadata, "name")
-        require_non_negative_int(file_metadata, "size_bytes")
-        return
-
-    if message_type == "voice_memo":
-        require_non_negative_int(metadata, "duration_ms")
+    if message_type in {"photo", "video", "file", "voice_memo"}:
+        require_media_asset_ids(metadata)
         return
 
     if message_type == "call":
@@ -325,22 +285,28 @@ async def add_message_payload_records(
     message_type: str,
     metadata: dict[str, Any] | None,
 ) -> None:
-    if message_type == "photo":
+    if message_type in {"photo", "video", "file", "voice_memo"}:
         assert metadata is not None
+        expected_kind = MediaKind(message_type)
+        media_asset_ids = require_media_asset_ids(metadata)
 
-        for position, photo in enumerate(metadata["photos"]):
-            media_asset = MediaAsset(
-                owner_user_id=sender_id,
-                kind=MediaKind.PHOTO,
-                original_asset_id=photo["asset_id"],
-                width=photo["width"],
-                height=photo["height"],
-                preview_bytes=decode_preview_base64(
-                    photo.get("preview_base64")
-                ),
-            )
-            session.add(media_asset)
-            await session.flush()
+        for position, media_asset_id in enumerate(media_asset_ids):
+            media_asset = await session.get(MediaAsset, media_asset_id)
+
+            if (
+                media_asset is None
+                or media_asset.owner_user_id != sender_id
+                or media_asset.kind != expected_kind
+                or media_asset.upload_status != "complete"
+                or media_asset.storage_key is None
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "metadata.media_asset_ids must reference completed "
+                        f"{message_type} uploads owned by the sender"
+                    ),
+                )
 
             session.add(
                 MessageAttachment(
@@ -350,46 +316,6 @@ async def add_message_payload_records(
                 )
             )
 
-        return
-
-    if message_type == "file":
-        assert metadata is not None
-        file_metadata = metadata["file"]
-
-        media_asset = MediaAsset(
-            owner_user_id=sender_id,
-            kind=MediaKind.FILE,
-            file_name=file_metadata["name"],
-            size_bytes=file_metadata["size_bytes"],
-        )
-        session.add(media_asset)
-        await session.flush()
-
-        session.add(
-            MessageAttachment(
-                message_id=message.id,
-                media_asset_id=media_asset.id,
-            )
-        )
-        return
-
-    if message_type == "voice_memo":
-        assert metadata is not None
-
-        media_asset = MediaAsset(
-            owner_user_id=sender_id,
-            kind=MediaKind.VOICE_MEMO,
-            duration_ms=metadata["duration_ms"],
-        )
-        session.add(media_asset)
-        await session.flush()
-
-        session.add(
-            MessageAttachment(
-                message_id=message.id,
-                media_asset_id=media_asset.id,
-            )
-        )
         return
 
     if message_type == "call":
@@ -410,49 +336,79 @@ def build_metadata(
     attachments: list[tuple[MessageAttachment, MediaAsset]],
     call_event: MessageCallEvent | None,
 ) -> dict[str, Any] | None:
+    def media_asset_metadata(media_asset: MediaAsset) -> dict[str, Any]:
+        return {
+            "media_asset_id": str(media_asset.id),
+            "kind": media_asset.kind.value,
+            "file_name": media_asset.file_name,
+            "mime_type": media_asset.mime_type,
+            "size_bytes": media_asset.size_bytes or 0,
+            "width": media_asset.width or 0,
+            "height": media_asset.height or 0,
+            "duration_ms": media_asset.duration_ms or 0,
+            "has_thumbnail": media_asset.thumbnail_storage_key is not None,
+            "available": (
+                media_asset.upload_status == "complete"
+                and media_asset.storage_key is not None
+            ),
+        }
+
     if message.kind == MessageKind.PHOTO:
         photos = []
 
         for _, media_asset in attachments:
-            preview_base64 = ""
+            photo = media_asset_metadata(media_asset)
+            photo["asset_id"] = (
+                media_asset.original_asset_id or str(media_asset.id)
+            )
 
-            if media_asset.preview_bytes is not None:
-                preview_base64 = base64.b64encode(
+            if (
+                media_asset.storage_key is None
+                and media_asset.preview_bytes is not None
+            ):
+                photo["preview_base64"] = base64.b64encode(
                     media_asset.preview_bytes
                 ).decode("ascii")
 
-            photos.append(
-                {
-                    "asset_id": (
-                        media_asset.original_asset_id
-                        or str(media_asset.id)
-                    ),
-                    "preview_base64": preview_base64,
-                    "width": media_asset.width or 0,
-                    "height": media_asset.height or 0,
-                }
-            )
+            photos.append(photo)
 
         return {"photos": photos}
+
+    if message.kind == MessageKind.VIDEO:
+        if not attachments:
+            return None
+
+        _, media_asset = attachments[0]
+        return {"video": media_asset_metadata(media_asset)}
 
     if message.kind == MessageKind.FILE:
         if not attachments:
             return None
 
         _, media_asset = attachments[0]
-        return {
-            "file": {
-                "name": media_asset.file_name or "",
-                "size_bytes": media_asset.size_bytes or 0,
-            },
-        }
+        file_metadata = media_asset_metadata(media_asset)
+        file_metadata["name"] = media_asset.file_name or ""
+        return {"file": file_metadata}
 
     if message.kind == MessageKind.VOICE_MEMO:
         if not attachments:
             return None
 
         _, media_asset = attachments[0]
-        return {"duration_ms": media_asset.duration_ms or 0}
+        metadata = media_asset_metadata(media_asset)
+
+        if (
+            media_asset.storage_key is None
+            and media_asset.preview_bytes is not None
+        ):
+            metadata["audio_base64"] = base64.b64encode(
+                media_asset.preview_bytes
+            ).decode("ascii")
+
+        return metadata
+
+    if message.kind == MessageKind.LINK:
+        return message.metadata_json or None
 
     if message.kind == MessageKind.CALL:
         if call_event is None:
@@ -821,7 +777,7 @@ async def create_message(
 
     content = message_data.content
 
-    if message_data.message_type == "text" and not content.strip():
+    if message_data.message_type in {"text", "link"} and not content.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message content cannot be blank",
@@ -862,6 +818,12 @@ async def create_message(
         sender_id=current_user.id,
         kind=MessageKind(message_data.message_type),
         body=content,
+        metadata_json=(
+            message_data.metadata
+            if message_data.message_type == "link"
+            and message_data.metadata is not None
+            else {}
+        ),
         reply_to_message_id=message_data.reply_to_message_id,
         source_language=current_user.preferred_language,
         client_created_at=(

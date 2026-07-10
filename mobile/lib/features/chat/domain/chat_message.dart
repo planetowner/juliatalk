@@ -21,22 +21,41 @@ final class ChatReplyReference {
 final class ChatPhotoAttachment {
   const ChatPhotoAttachment({
     required this.assetId,
-    required this.previewBytes,
     required this.width,
     required this.height,
+    this.mediaAssetId,
+    this.previewBytes,
+    this.fileName,
+    this.mimeType,
+    this.sizeBytes,
+    this.uploadBytes,
   });
 
   final String assetId;
-  final Uint8List previewBytes;
   final int width;
   final int height;
+  final String? mediaAssetId;
+  final Uint8List? previewBytes;
+  final String? fileName;
+  final String? mimeType;
+  final int? sizeBytes;
+  final Uint8List? uploadBytes;
 }
 
 final class ChatFileAttachment {
-  const ChatFileAttachment({required this.name, required this.sizeBytes});
+  const ChatFileAttachment({
+    required this.name,
+    required this.sizeBytes,
+    this.mediaAssetId,
+    this.mimeType,
+    this.uploadBytes,
+  });
 
   final String name;
   final int sizeBytes;
+  final String? mediaAssetId;
+  final String? mimeType;
+  final Uint8List? uploadBytes;
 }
 
 final class ChatCallAttachment {
@@ -52,9 +71,29 @@ final class ChatCallAttachment {
 }
 
 final class ChatVoiceMemoAttachment {
-  const ChatVoiceMemoAttachment({required this.duration});
+  const ChatVoiceMemoAttachment({
+    required this.duration,
+    this.audioBytes,
+    this.mimeType,
+    this.fileName,
+    this.sizeBytes,
+    this.localPath,
+    this.mediaAssetId,
+  });
 
   final Duration duration;
+  final Uint8List? audioBytes;
+  final String? mimeType;
+  final String? fileName;
+  final int? sizeBytes;
+  final String? localPath;
+  final String? mediaAssetId;
+
+  bool get hasPlayableAudio {
+    return localPath != null ||
+        mediaAssetId != null ||
+        (audioBytes != null && audioBytes!.isNotEmpty);
+  }
 }
 
 final class ChatMessage {

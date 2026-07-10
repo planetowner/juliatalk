@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:photo_manager/photo_manager.dart';
@@ -32,6 +33,20 @@ final class ChatPhotoAsset {
   final int height;
 }
 
+final class ChatPhotoFile {
+  const ChatPhotoFile({
+    required this.bytes,
+    required this.fileName,
+    required this.mimeType,
+    required this.sizeBytes,
+  });
+
+  final Uint8List bytes;
+  final String fileName;
+  final String mimeType;
+  final int sizeBytes;
+}
+
 abstract interface class ChatPhotoLibrary {
   Future<ChatPhotoAccessState> requestAccess();
 
@@ -50,6 +65,8 @@ abstract interface class ChatPhotoLibrary {
   });
 
   Future<Uint8List?> loadMessagePreview({required String assetId});
+
+  Future<ChatPhotoFile?> loadOriginalFile({required String assetId});
 
   Future<void> openSettings();
 }
@@ -265,6 +282,39 @@ final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
     );
   }
 
+  @override
+  Future<ChatPhotoFile?> loadOriginalFile({required String assetId}) async {
+    final AssetEntity? entity = await _assetEntityFor(assetId);
+
+    if (entity == null) {
+      return null;
+    }
+
+    final File? file = await entity.file;
+
+    if (file == null) {
+      return null;
+    }
+
+    final Uint8List bytes = await file.readAsBytes();
+
+    if (bytes.isEmpty) {
+      return null;
+    }
+
+    final String fallbackName = '$assetId.jpg';
+    final String? entityTitle = entity.title;
+    final String fileName =
+        entityTitle == null || entityTitle.isEmpty ? fallbackName : entityTitle;
+
+    return ChatPhotoFile(
+      bytes: bytes,
+      fileName: fileName,
+      mimeType: _imageMimeTypeForFileName(fileName),
+      sizeBytes: bytes.length,
+    );
+  }
+
   Future<AssetEntity?> _assetEntityFor(String assetId) async {
     final AssetEntity? cached = _assetEntities[assetId];
 
@@ -285,4 +335,22 @@ final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
   Future<void> openSettings() async {
     await PhotoManager.openSetting();
   }
+}
+
+String _imageMimeTypeForFileName(String fileName) {
+  final String lowerCase = fileName.toLowerCase();
+
+  if (lowerCase.endsWith('.png')) {
+    return 'image/png';
+  }
+
+  if (lowerCase.endsWith('.heic')) {
+    return 'image/heic';
+  }
+
+  if (lowerCase.endsWith('.webp')) {
+    return 'image/webp';
+  }
+
+  return 'image/jpeg';
 }

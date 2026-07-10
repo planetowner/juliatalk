@@ -89,6 +89,40 @@ async def ensure_database_extensions(
     )
 
 
+async def ensure_schema_compatibility(
+    connection: AsyncConnection,
+) -> None:
+    await connection.execute(
+        text(
+            "ALTER TABLE messages "
+            "ADD COLUMN IF NOT EXISTS metadata JSONB "
+            "NOT NULL DEFAULT '{}'::jsonb"
+        )
+    )
+    await connection.execute(
+        text("ALTER TYPE message_kind ADD VALUE IF NOT EXISTS 'link'")
+    )
+    await connection.execute(
+        text("ALTER TYPE message_kind ADD VALUE IF NOT EXISTS 'video'")
+    )
+    await connection.execute(
+        text("ALTER TYPE media_kind ADD VALUE IF NOT EXISTS 'video'")
+    )
+    await connection.execute(
+        text(
+            "ALTER TABLE media_assets "
+            "ADD COLUMN IF NOT EXISTS thumbnail_storage_key TEXT"
+        )
+    )
+    await connection.execute(
+        text(
+            "ALTER TABLE media_assets "
+            "ADD COLUMN IF NOT EXISTS upload_status TEXT "
+            "NOT NULL DEFAULT 'complete'"
+        )
+    )
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
         yield session

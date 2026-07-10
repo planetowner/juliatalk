@@ -38,6 +38,9 @@ dependencies:
   photo_manager: 3.9.0
   image_picker: 1.1.2
   file_picker: ^8.1.0
+  just_audio: ^0.10.6
+  path_provider: ^2.1.6
+  record: ^7.1.1
   web_socket_channel: ^3.0.3
 
 dev_dependencies:

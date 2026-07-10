@@ -91,6 +91,16 @@ final class TestChatPhotoLibrary implements ChatPhotoLibrary {
   }
 
   @override
+  Future<ChatPhotoFile?> loadOriginalFile({required String assetId}) async {
+    return ChatPhotoFile(
+      bytes: _testPng,
+      fileName: '$assetId.png',
+      mimeType: 'image/png',
+      sizeBytes: _testPng.length,
+    );
+  }
+
+  @override
   Future<void> openSettings() async {}
 }
 

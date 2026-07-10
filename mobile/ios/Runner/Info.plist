@@ -75,6 +75,9 @@
 	<key>NSCameraUsageDescription</key>
 	<string>JuliaTalk needs access to your camera so you can take and send photos in chats.</string>
 
+	<key>NSMicrophoneUsageDescription</key>
+	<string>JuliaTalk needs access to your microphone so you can record and send voice memos in chats.</string>
+
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
 </dict>

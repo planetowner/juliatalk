@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -179,23 +180,29 @@ final class ChatApi {
     required String recipientId,
     required List<ChatPhotoAttachment> photos,
     String? replyToMessageId,
-  }) {
+  }) async {
+    final List<String> mediaAssetIds = <String>[];
+
+    for (final ChatPhotoAttachment photo in photos) {
+      final String mediaAssetId = photo.mediaAssetId ??
+          await _uploadMediaAsset(
+            kind: 'photo',
+            fileName: photo.fileName ?? '${photo.assetId}.jpg',
+            mimeType: photo.mimeType ?? 'image/jpeg',
+            sizeBytes: photo.sizeBytes ?? photo.uploadBytes?.length ?? 0,
+            bytes: photo.uploadBytes,
+            width: photo.width,
+            height: photo.height,
+          );
+
+      mediaAssetIds.add(mediaAssetId);
+    }
+
     return _createMessage(
       recipientId: recipientId,
       messageType: 'photo',
       replyToMessageId: replyToMessageId,
-      metadata: <String, Object?>{
-        'photos': photos
-            .map((ChatPhotoAttachment photo) {
-              return <String, Object?>{
-                'asset_id': photo.assetId,
-                'preview_base64': base64Encode(photo.previewBytes),
-                'width': photo.width,
-                'height': photo.height,
-              };
-            })
-            .toList(growable: false),
-      },
+      metadata: <String, Object?>{'media_asset_ids': mediaAssetIds},
     );
   }
 
@@ -203,31 +210,183 @@ final class ChatApi {
     required String recipientId,
     required ChatFileAttachment file,
     String? replyToMessageId,
-  }) {
+  }) async {
+    final String mediaAssetId = file.mediaAssetId ??
+        await _uploadMediaAsset(
+          kind: 'file',
+          fileName: file.name,
+          mimeType: file.mimeType ?? 'application/octet-stream',
+          sizeBytes: file.sizeBytes,
+          bytes: file.uploadBytes,
+        );
+
     return _createMessage(
       recipientId: recipientId,
       messageType: 'file',
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{
-        'file': <String, Object?>{
-          'name': file.name,
-          'size_bytes': file.sizeBytes,
-        },
+        'media_asset_ids': <String>[mediaAssetId],
       },
     );
   }
 
   Future<ChatMessage> sendVoiceMemoMessage({
     required String recipientId,
-    required Duration duration,
+    required ChatVoiceMemoAttachment voiceMemo,
     String? replyToMessageId,
-  }) {
+  }) async {
+    final Uint8List? audioBytes = voiceMemo.audioBytes;
+    final String mediaAssetId;
+
+    if (voiceMemo.mediaAssetId != null) {
+      mediaAssetId = voiceMemo.mediaAssetId!;
+    } else {
+      mediaAssetId = await _uploadMediaAsset(
+        kind: 'voice_memo',
+        fileName: voiceMemo.fileName ?? 'voice-memo.m4a',
+        mimeType: voiceMemo.mimeType ?? 'audio/mp4',
+        sizeBytes: voiceMemo.sizeBytes ?? audioBytes?.length ?? 0,
+        bytes: audioBytes,
+        duration: voiceMemo.duration,
+      );
+    }
+
     return _createMessage(
       recipientId: recipientId,
       messageType: 'voice_memo',
       replyToMessageId: replyToMessageId,
-      metadata: <String, Object?>{'duration_ms': duration.inMilliseconds},
+      metadata: <String, Object?>{
+        'media_asset_ids': <String>[mediaAssetId],
+      },
     );
+  }
+
+  Future<String> _uploadMediaAsset({
+    required String kind,
+    required String fileName,
+    required String mimeType,
+    required int sizeBytes,
+    required Uint8List? bytes,
+    int? width,
+    int? height,
+    Duration? duration,
+  }) async {
+    if (bytes == null || bytes.isEmpty) {
+      throw const ChatApiException('The selected media file is empty.');
+    }
+
+    final http.Response createResponse = await _client.post(
+      _baseUri.resolve('/media-assets'),
+      headers: _jsonHeaders,
+      body: jsonEncode(<String, Object?>{
+        'kind': kind,
+        'file_name': fileName,
+        'mime_type': mimeType,
+        'size_bytes': sizeBytes > 0 ? sizeBytes : bytes.length,
+        if (width != null) 'width': width,
+        if (height != null) 'height': height,
+        if (duration != null) 'duration_ms': duration.inMilliseconds,
+      }),
+    );
+
+    if (createResponse.statusCode != 201) {
+      throw ChatApiException(
+        _readErrorMessage(
+          createResponse,
+          fallback:
+              'Media upload preparation failed with status code '
+              '${createResponse.statusCode}.',
+        ),
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(createResponse.body);
+
+    if (decodedBody is! Map<String, dynamic>) {
+      throw const ChatApiException(
+        'The server returned an invalid media upload.',
+      );
+    }
+
+    final String mediaAssetId = _requiredString(
+      decodedBody['media_asset_id'],
+      'media_asset_id',
+    );
+    final String uploadUrl = _requiredString(
+      decodedBody['upload_url'],
+      'upload_url',
+    );
+    final Object? uploadHeadersJson = decodedBody['upload_headers'];
+    final Map<String, String> uploadHeaders = uploadHeadersJson
+            is Map<String, dynamic>
+        ? uploadHeadersJson.map(
+            (String key, dynamic value) => MapEntry<String, String>(
+              key,
+              value.toString(),
+            ),
+          )
+        : <String, String>{'Content-Type': mimeType};
+
+    final http.Response uploadResponse = await _client.put(
+      Uri.parse(uploadUrl),
+      headers: uploadHeaders,
+      body: bytes,
+    );
+
+    if (uploadResponse.statusCode < 200 || uploadResponse.statusCode >= 300) {
+      throw ChatApiException(
+        'Media upload failed with status code '
+        '${uploadResponse.statusCode}.',
+      );
+    }
+
+    final http.Response completeResponse = await _client.post(
+      _baseUri.resolve('/media-assets/$mediaAssetId/complete'),
+      headers: _headers,
+    );
+
+    if (completeResponse.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          completeResponse,
+          fallback:
+              'Media upload completion failed with status code '
+              '${completeResponse.statusCode}.',
+        ),
+      );
+    }
+
+    return mediaAssetId;
+  }
+
+  Future<Uri> createMediaAssetAccessUrl({
+    required String mediaAssetId,
+  }) async {
+    final http.Response response = await _client.get(
+      _baseUri.resolve('/media-assets/$mediaAssetId/access'),
+      headers: _headers,
+    );
+
+    if (response.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          response,
+          fallback:
+              'Media URL creation failed with status code '
+              '${response.statusCode}.',
+        ),
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(response.body);
+
+    if (decodedBody is! Map<String, dynamic>) {
+      throw const ChatApiException(
+        'The server returned an invalid media URL.',
+      );
+    }
+
+    return Uri.parse(_requiredString(decodedBody['access_url'], 'access_url'));
   }
 
   Future<ChatMessage> sendCallMessage({
@@ -382,7 +541,8 @@ final class ChatApi {
       photoAttachments: messageType == 'photo' && metadata != null
           ? _photosFromMetadata(metadata)
           : const <ChatPhotoAttachment>[],
-      fileAttachment: messageType == 'file' && metadata != null
+      fileAttachment:
+          (messageType == 'file' || messageType == 'video') && metadata != null
           ? _fileFromMetadata(metadata)
           : null,
       voiceMemoAttachment: messageType == 'voice_memo' && metadata != null
@@ -430,25 +590,31 @@ final class ChatApi {
           }
 
           final Object? previewBase64 = item['preview_base64'];
-
-          if (previewBase64 is! String) {
-            throw const ChatApiException(
-              'The server returned a photo without a preview.',
-            );
-          }
+          final Uint8List? previewBytes =
+              previewBase64 is String && previewBase64.isNotEmpty
+              ? base64Decode(previewBase64)
+              : null;
+          final String mediaAssetId = _requiredString(
+            item['media_asset_id'],
+            'media_asset_id',
+          );
 
           return ChatPhotoAttachment(
-            assetId: item['asset_id'] as String,
-            previewBytes: base64Decode(previewBase64),
-            width: item['width'] as int,
-            height: item['height'] as int,
+            assetId: item['asset_id'] as String? ?? mediaAssetId,
+            mediaAssetId: mediaAssetId,
+            previewBytes: previewBytes,
+            width: item['width'] as int? ?? 0,
+            height: item['height'] as int? ?? 0,
+            fileName: item['file_name'] as String?,
+            mimeType: item['mime_type'] as String?,
+            sizeBytes: item['size_bytes'] as int?,
           );
         })
         .toList(growable: false);
   }
 
   ChatFileAttachment _fileFromMetadata(Map<String, dynamic> metadata) {
-    final Object? file = metadata['file'];
+    final Object? file = metadata['file'] ?? metadata['video'];
 
     if (file is! Map<String, dynamic>) {
       throw const ChatApiException(
@@ -456,9 +622,14 @@ final class ChatApi {
       );
     }
 
+    final String fileName =
+        (file['name'] as String?) ?? (file['file_name'] as String?) ?? '';
+
     return ChatFileAttachment(
-      name: file['name'] as String,
-      sizeBytes: file['size_bytes'] as int,
+      name: fileName.isEmpty ? 'File' : fileName,
+      mediaAssetId: file['media_asset_id'] as String?,
+      mimeType: file['mime_type'] as String?,
+      sizeBytes: file['size_bytes'] as int? ?? 0,
     );
   }
 
@@ -466,9 +637,18 @@ final class ChatApi {
     Map<String, dynamic> metadata,
   ) {
     final int durationMs = metadata['duration_ms'] as int;
+    final Object? audioBase64 = metadata['audio_base64'];
+    final Uint8List? audioBytes = audioBase64 is String && audioBase64.isNotEmpty
+        ? base64Decode(audioBase64)
+        : null;
 
     return ChatVoiceMemoAttachment(
       duration: Duration(milliseconds: durationMs),
+      audioBytes: audioBytes,
+      mimeType: metadata['mime_type'] as String?,
+      fileName: metadata['file_name'] as String?,
+      sizeBytes: metadata['size_bytes'] as int?,
+      mediaAssetId: metadata['media_asset_id'] as String?,
     );
   }
 

@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -7,8 +9,12 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:record/record.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
@@ -72,12 +78,15 @@ typedef ChatFileMessageSender =
 
 typedef ChatVoiceMemoMessageSender =
     Future<ChatMessage> Function({
-      required Duration duration,
+      required ChatVoiceMemoAttachment voiceMemo,
       ChatReplyReference? replyTo,
     });
 
 typedef ChatCallMessageSender =
     Future<ChatMessage> Function({required ChatCallAttachment call});
+
+typedef ChatMediaAssetAccessUrlCreator =
+    Future<Uri> Function({required String mediaAssetId});
 
 typedef ChatTextMessageEditor =
     Future<ChatMessage> Function({
@@ -198,6 +207,7 @@ final class ChatConversationView extends StatefulWidget {
     this.onSendFileMessage,
     this.onSendVoiceMemoMessage,
     this.onSendCallMessage,
+    this.onCreateMediaAssetAccessUrl,
     this.onEditTextMessage,
     this.onTranslateMessage,
     this.onDeleteMessage,
@@ -217,6 +227,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatFileMessageSender? onSendFileMessage;
   final ChatVoiceMemoMessageSender? onSendVoiceMemoMessage;
   final ChatCallMessageSender? onSendCallMessage;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatTextMessageEditor? onEditTextMessage;
   final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageDeleter? onDeleteMessage;
@@ -617,19 +628,25 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final List<ChatPhotoAttachment?> loadedAttachments =
         await Future.wait<ChatPhotoAttachment?>(
           result.assets.map((ChatPhotoAsset asset) async {
-            final bytes = await _photoLibrary.loadMessagePreview(
-              assetId: asset.id,
-            );
+            final ChatPhotoFile? originalFile = await _photoLibrary
+                .loadOriginalFile(assetId: asset.id);
 
-            if (bytes == null) {
+            if (originalFile == null) {
               return null;
             }
 
+            final Uint8List? previewBytes =
+                await _photoLibrary.loadMessagePreview(assetId: asset.id);
+
             return ChatPhotoAttachment(
               assetId: asset.id,
-              previewBytes: bytes,
+              previewBytes: previewBytes ?? originalFile.bytes,
               width: asset.width,
               height: asset.height,
+              fileName: originalFile.fileName,
+              mimeType: originalFile.mimeType,
+              sizeBytes: originalFile.sizeBytes,
+              uploadBytes: originalFile.bytes,
             );
           }),
         );
@@ -715,6 +732,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
             initialIndex: resolvedInitialIndex,
             senderName: senderName,
             sentAt: message.createdAt,
+            onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
           );
         },
       ),
@@ -791,6 +809,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       previewBytes: bytes,
       width: width > 0 ? width : 1080,
       height: height > 0 ? height : 1440,
+      fileName: capture.name,
+      mimeType: capture.mimeType ?? _mimeTypeForFileName(capture.name),
+      sizeBytes: bytes.length,
+      uploadBytes: bytes,
     );
 
     final ChatPhotoMessageSender? sender = widget.onSendPhotoMessages;
@@ -828,7 +850,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     FilePickerResult? result;
 
     try {
-      result = await FilePicker.platform.pickFiles();
+      result = await FilePicker.platform.pickFiles(withData: true);
     } on PlatformException catch (_) {
       if (!mounted) {
         return;
@@ -849,6 +871,21 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     final PlatformFile file = result.files.first;
+    Uint8List? fileBytes = file.bytes;
+
+    if (fileBytes == null && file.path != null) {
+      fileBytes = await File(file.path!).readAsBytes();
+    }
+
+    if (!mounted || fileBytes == null || fileBytes.isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('The selected file could not be read.')),
+        );
+
+      return;
+    }
 
     final _MessageListState? messageListState = _messageListKey.currentState;
 
@@ -858,7 +895,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     final ChatFileAttachment attachment = ChatFileAttachment(
       name: file.name,
-      sizeBytes: file.size,
+      sizeBytes: fileBytes.length,
+      mimeType: _mimeTypeForFileName(file.name),
+      uploadBytes: fileBytes,
     );
 
     final ChatFileMessageSender? sender = widget.onSendFileMessage;
@@ -892,7 +931,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   Future<void> _openVoiceMemoSheet() async {
     _dismissComposerSurface();
 
-    final Duration? duration = await showModalBottomSheet<Duration>(
+    final ChatVoiceMemoAttachment? voiceMemo =
+        await showModalBottomSheet<ChatVoiceMemoAttachment>(
       context: context,
       backgroundColor: Colors.transparent,
       barrierColor: AppColors.black.withAlpha(112),
@@ -902,7 +942,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       },
     );
 
-    if (!mounted || duration == null) {
+    if (!mounted || voiceMemo == null) {
       return;
     }
 
@@ -915,11 +955,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final ChatVoiceMemoMessageSender? sender = widget.onSendVoiceMemoMessage;
 
     if (sender == null) {
-      messageListState.addOutgoingVoiceMemoMessage(duration: duration);
+      messageListState.addOutgoingVoiceMemoMessage(voiceMemo: voiceMemo);
     } else {
       try {
         final ChatMessage message = await sender(
-          duration: duration,
+          voiceMemo: voiceMemo,
           replyTo: _currentReplyReference(),
         );
 
@@ -2132,6 +2172,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       onTranslateMessage: widget.onTranslateMessage,
                       onDeleteMessage: widget.onDeleteMessage,
                       onPhotoMessageTap: _openPhotoViewer,
+                      onCreateMediaAssetAccessUrl:
+                          widget.onCreateMediaAssetAccessUrl,
                       translationDelay: widget.translationDelay,
                       initialClock: widget.initialClock,
                       nextLocalMessageId: widget.nextLocalMessageId,
@@ -3331,18 +3373,18 @@ final class _CallNowSheet extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         child: SingleChildScrollView(
           child: Padding(
-            padding: EdgeInsets.fromLTRB(18, 36, 18, bottomPadding + 28),
+            padding: EdgeInsets.fromLTRB(18, 26, 18, bottomPadding + 22),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
                   'Call Now',
-                  style: AppTypography.typography4.copyWith(
+                  style: AppTypography.typography5.copyWith(
                     color: AppColors.grey900,
-                    fontWeight: AppTypography.bold,
+                    fontWeight: AppTypography.semibold,
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 18),
                 _CallNowOption(
                   label: 'Voice Call',
                   icon: Icons.call_rounded,
@@ -3350,7 +3392,7 @@ final class _CallNowSheet extends StatelessWidget {
                     Navigator.of(context).pop(_CallNowAction.voice);
                   },
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 12),
                 _CallNowOption(
                   label: 'Video Call',
                   icon: Icons.videocam_rounded,
@@ -3387,27 +3429,27 @@ final class _CallNowOption extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: SizedBox(
-          height: 82,
+          height: 68,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
               children: [
                 Container(
-                  width: 48,
-                  height: 48,
+                  width: 40,
+                  height: 40,
                   alignment: Alignment.center,
                   decoration: const BoxDecoration(
                     color: AppColors.green50,
-                    borderRadius: BorderRadius.all(Radius.circular(16)),
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
                   ),
-                  child: Icon(icon, size: 25, color: AppColors.green500),
+                  child: Icon(icon, size: 21, color: AppColors.green500),
                 ),
-                const SizedBox(width: 18),
+                const SizedBox(width: 14),
                 Text(
                   label,
-                  style: AppTypography.typography5.copyWith(
+                  style: AppTypography.subTypography10.copyWith(
                     color: AppColors.grey900,
-                    fontWeight: AppTypography.bold,
+                    fontWeight: AppTypography.semibold,
                   ),
                 ),
               ],
@@ -3429,37 +3471,140 @@ final class _VoiceMemoSheet extends StatefulWidget {
 }
 
 final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
+  final AudioRecorder _recorder = AudioRecorder();
+  final AudioPlayer _previewPlayer = AudioPlayer();
+
   Timer? _timer;
+  StreamSubscription<Duration>? _previewPositionSubscription;
+  StreamSubscription<PlayerState>? _previewStateSubscription;
+
   _VoiceMemoSheetMode _mode = _VoiceMemoSheetMode.idle;
   Duration _elapsed = Duration.zero;
   Duration _playbackPosition = Duration.zero;
+  String? _recordingPath;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _previewPositionSubscription = _previewPlayer.positionStream.listen((
+      Duration position,
+    ) {
+      if (!mounted || _mode != _VoiceMemoSheetMode.playing) {
+        return;
+      }
+
+      setState(() {
+        _playbackPosition = position > _elapsed ? _elapsed : position;
+      });
+    });
+
+    _previewStateSubscription = _previewPlayer.playerStateStream.listen((
+      PlayerState state,
+    ) {
+      if (!mounted || state.processingState != ProcessingState.completed) {
+        return;
+      }
+
+      setState(() {
+        _mode = _VoiceMemoSheetMode.recorded;
+        _playbackPosition = Duration.zero;
+      });
+      unawaited(_previewPlayer.seek(Duration.zero));
+    });
+  }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _previewPositionSubscription?.cancel();
+    _previewStateSubscription?.cancel();
+    unawaited(_previewPlayer.dispose());
+    unawaited(_recorder.dispose());
     super.dispose();
   }
 
-  void _startRecording() {
-    _timer?.cancel();
-    setState(() {
-      _mode = _VoiceMemoSheetMode.recording;
-      _elapsed = Duration.zero;
-      _playbackPosition = Duration.zero;
-    });
+  Future<String> _createRecordingPath() async {
+    final Directory temporaryDirectory = await getTemporaryDirectory();
+    final int timestamp = DateTime.now().microsecondsSinceEpoch;
 
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+    return '${temporaryDirectory.path}/juliatalk_voice_$timestamp.m4a';
+  }
+
+  void _showVoiceMemoFailure(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  Future<void> _deleteRecordingFile(String? path) async {
+    if (path == null) {
+      return;
+    }
+
+    final File file = File(path);
+
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
+
+  Future<void> _startRecording() async {
+    _timer?.cancel();
+
+    try {
+      await _previewPlayer.stop();
+
+      if (!await _recorder.hasPermission()) {
+        _showVoiceMemoFailure('Microphone permission is required.');
+        return;
+      }
+
+      await _deleteRecordingFile(_recordingPath);
+
+      final String recordingPath = await _createRecordingPath();
+
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 64000,
+          sampleRate: 44100,
+        ),
+        path: recordingPath,
+      );
+
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _elapsed += const Duration(seconds: 1);
+        _mode = _VoiceMemoSheetMode.recording;
+        _elapsed = Duration.zero;
+        _playbackPosition = Duration.zero;
+        _recordingPath = recordingPath;
       });
-    });
+
+      _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _elapsed += const Duration(seconds: 1);
+        });
+      });
+    } catch (_) {
+      _timer?.cancel();
+      _timer = null;
+      _showVoiceMemoFailure('Voice memo recording failed.');
+    }
   }
 
-  void _stopRecording() {
+  Future<void> _stopRecording() async {
     if (_mode != _VoiceMemoSheetMode.recording) {
       return;
     }
@@ -3467,30 +3612,53 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
     _timer?.cancel();
     _timer = null;
 
-    setState(() {
-      _mode = _VoiceMemoSheetMode.recorded;
-      if (_elapsed.inSeconds == 0) {
-        _elapsed = const Duration(seconds: 1);
+    try {
+      final String? stoppedPath = await _recorder.stop();
+
+      if (!mounted) {
+        return;
       }
-      _playbackPosition = Duration.zero;
-    });
+
+      setState(() {
+        _mode = _VoiceMemoSheetMode.recorded;
+        if (_elapsed.inSeconds == 0) {
+          _elapsed = const Duration(seconds: 1);
+        }
+        _playbackPosition = Duration.zero;
+        _recordingPath = stoppedPath ?? _recordingPath;
+      });
+    } catch (_) {
+      _showVoiceMemoFailure('Voice memo recording failed.');
+    }
   }
 
-  void _resetRecording() {
+  Future<void> _resetRecording() async {
     _timer?.cancel();
     _timer = null;
+
+    try {
+      await _previewPlayer.stop();
+      await _recorder.cancel();
+      await _deleteRecordingFile(_recordingPath);
+    } catch (_) {
+      // Reset should still clear local UI state even if cleanup fails.
+    }
+
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       _mode = _VoiceMemoSheetMode.idle;
       _elapsed = Duration.zero;
       _playbackPosition = Duration.zero;
+      _recordingPath = null;
     });
   }
 
-  void _togglePlayback() {
+  Future<void> _togglePlayback() async {
     if (_mode == _VoiceMemoSheetMode.playing) {
-      _timer?.cancel();
-      _timer = null;
+      await _previewPlayer.pause();
 
       setState(() {
         _mode = _VoiceMemoSheetMode.recorded;
@@ -3502,43 +3670,70 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
       return;
     }
 
-    _timer?.cancel();
-    setState(() {
-      _mode = _VoiceMemoSheetMode.playing;
-      _playbackPosition = Duration.zero;
-    });
+    final String? recordingPath = _recordingPath;
 
-    _timer = Timer.periodic(const Duration(milliseconds: 250), (_) {
-      if (!mounted) {
-        return;
-      }
+    if (recordingPath == null) {
+      _showVoiceMemoFailure('Voice memo audio is not available.');
+      return;
+    }
 
-      final Duration nextPosition =
-          _playbackPosition + const Duration(milliseconds: 250);
-
-      if (nextPosition >= _elapsed) {
-        _timer?.cancel();
-        _timer = null;
-
-        setState(() {
-          _mode = _VoiceMemoSheetMode.recorded;
-          _playbackPosition = Duration.zero;
-        });
-        return;
-      }
+    try {
+      await _previewPlayer.stop();
+      await _previewPlayer.setUrl(Uri.file(recordingPath).toString());
+      await _previewPlayer.seek(Duration.zero);
 
       setState(() {
-        _playbackPosition = nextPosition;
+        _mode = _VoiceMemoSheetMode.playing;
+        _playbackPosition = Duration.zero;
       });
-    });
+
+      unawaited(_previewPlayer.play());
+    } catch (_) {
+      _showVoiceMemoFailure('Voice memo playback failed.');
+    }
   }
 
-  void _sendVoiceMemo() {
+  Future<void> _sendVoiceMemo() async {
+    if (_mode == _VoiceMemoSheetMode.recording) {
+      await _stopRecording();
+    }
+
     final Duration duration = _elapsed.inSeconds == 0
         ? const Duration(seconds: 1)
         : _elapsed;
 
-    Navigator.of(context).pop(duration);
+    final String? recordingPath = _recordingPath;
+
+    if (recordingPath == null) {
+      _showVoiceMemoFailure('Voice memo audio is not available.');
+      return;
+    }
+
+    try {
+      final Uint8List audioBytes = await File(recordingPath).readAsBytes();
+
+      if (audioBytes.isEmpty) {
+        _showVoiceMemoFailure('Voice memo audio is empty.');
+        return;
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      Navigator.of(context).pop(
+        ChatVoiceMemoAttachment(
+          duration: duration,
+          audioBytes: audioBytes,
+          mimeType: 'audio/mp4',
+          fileName: 'voice-memo.m4a',
+          sizeBytes: audioBytes.length,
+          localPath: recordingPath,
+        ),
+      );
+    } catch (_) {
+      _showVoiceMemoFailure('Voice memo sending failed.');
+    }
   }
 
   @override
@@ -3557,36 +3752,30 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
         ),
         clipBehavior: Clip.antiAlias,
         child: Padding(
-          padding: EdgeInsets.fromLTRB(18, 12, 18, bottomPadding + 34),
+          padding: EdgeInsets.fromLTRB(18, 26, 18, bottomPadding + 22),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Container(
-                width: 44,
-                height: 5,
-                decoration: const BoxDecoration(
-                  color: AppColors.grey400,
-                  borderRadius: BorderRadius.all(Radius.circular(3)),
-                ),
-              ),
-              const SizedBox(height: 34),
               Text(
                 'Voice Memo',
-                style: AppTypography.typography4.copyWith(
+                style: AppTypography.typography5.copyWith(
                   color: AppColors.grey900,
-                  fontWeight: AppTypography.bold,
+                  fontWeight: AppTypography.semibold,
                 ),
               ),
-              const SizedBox(height: 38),
-              _VoiceMemoRecorderBar(
-                mode: _mode,
-                elapsed: _elapsed,
-                playbackPosition: _playbackPosition,
-                onPlayPressed: _togglePlayback,
+              const SizedBox(height: 22),
+              Transform.translate(
+                offset: const Offset(0, 4),
+                child: _VoiceMemoRecorderBar(
+                  mode: _mode,
+                  elapsed: _elapsed,
+                  playbackPosition: _playbackPosition,
+                  onPlayPressed: _togglePlayback,
+                ),
               ),
-              const SizedBox(height: 74),
+              const SizedBox(height: 44),
               SizedBox(
-                height: 72,
+                height: 54,
                 child: _VoiceMemoRecorderControls(
                   mode: _mode,
                   onRecordPressed: _startRecording,
@@ -3640,14 +3829,14 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
         : playbackPosition.inMilliseconds / elapsed.inMilliseconds;
 
     return SizedBox(
-      height: 84,
+      height: 64,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: backgroundColor,
-          borderRadius: AppRadius.borderRadius16,
+          borderRadius: const BorderRadius.all(Radius.circular(14)),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 22),
+          padding: const EdgeInsets.symmetric(horizontal: 18),
           child: Row(
             children: [
               if (_canPlay) ...[
@@ -3656,7 +3845,7 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
                   color: foregroundColor,
                   onPressed: onPlayPressed,
                 ),
-                const SizedBox(width: 14),
+                const SizedBox(width: 12),
               ],
               Expanded(
                 child: _hasRecording
@@ -3669,12 +3858,12 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
                       )
                     : const SizedBox.shrink(),
               ),
-              const SizedBox(width: 18),
+              const SizedBox(width: 14),
               Text(
                 _formatVoiceMemoSheetDuration(displayDuration),
-                style: AppTypography.typography4.copyWith(
+                style: AppTypography.typography5.copyWith(
                   color: foregroundColor,
-                  fontWeight: AppTypography.bold,
+                  fontWeight: AppTypography.semibold,
                 ),
               ),
             ],
@@ -3702,10 +3891,10 @@ final class _VoiceMemoInlinePlayButton extends StatelessWidget {
       key: const ValueKey<String>('voice-memo-preview-play'),
       onPressed: onPressed,
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+      constraints: const BoxConstraints.tightFor(width: 30, height: 30),
       icon: Icon(
         playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-        size: 34,
+        size: 30,
         color: color,
       ),
     );
@@ -3733,7 +3922,7 @@ final class _VoiceMemoRecorderControls extends StatelessWidget {
       return Center(
         child: _VoiceMemoRoundButton(
           key: const ValueKey<String>('voice-memo-record'),
-          size: 58,
+          size: 44,
           backgroundColor: AppColors.error,
           foregroundColor: AppColors.white,
           onPressed: onRecordPressed,
@@ -3745,19 +3934,19 @@ final class _VoiceMemoRecorderControls extends StatelessWidget {
     final Widget centerButton = mode == _VoiceMemoSheetMode.recording
         ? _VoiceMemoRoundButton(
             key: const ValueKey<String>('voice-memo-stop'),
-            size: 58,
+            size: 44,
             backgroundColor: AppColors.grey50,
             foregroundColor: AppColors.grey900,
             onPressed: onStopPressed,
-            child: const Icon(Icons.stop_rounded, size: 34),
+            child: const Icon(Icons.stop_rounded, size: 28),
           )
         : _VoiceMemoRoundButton(
             key: const ValueKey<String>('voice-memo-reset'),
-            size: 58,
+            size: 44,
             backgroundColor: AppColors.white,
             foregroundColor: AppColors.grey900,
             onPressed: onResetPressed,
-            child: const Icon(Icons.replay_rounded, size: 38),
+            child: const Icon(Icons.replay_rounded, size: 31),
           );
 
     return Stack(
@@ -3768,11 +3957,11 @@ final class _VoiceMemoRecorderControls extends StatelessWidget {
           alignment: Alignment.centerRight,
           child: _VoiceMemoRoundButton(
             key: const ValueKey<String>('voice-memo-send'),
-            size: 58,
+            size: 44,
             backgroundColor: AppColors.primary,
             foregroundColor: AppColors.white,
             onPressed: onSendPressed,
-            child: const Icon(Icons.arrow_upward_rounded, size: 36),
+            child: const Icon(Icons.arrow_upward_rounded, size: 31),
           ),
         ),
       ],
@@ -3804,7 +3993,7 @@ final class _VoiceMemoRoundButton extends StatelessWidget {
         shape: BoxShape.circle,
       ),
       child: Padding(
-        padding: const EdgeInsets.all(7),
+        padding: const EdgeInsets.all(5),
         child: Material(
           color: backgroundColor,
           shape: const CircleBorder(),
@@ -3886,19 +4075,26 @@ final class _VoiceMemoWaveformPainter extends CustomPainter {
       final bool isBar = distanceFromActive <= 3;
 
       if (!isBar) {
-        canvas.drawCircle(Offset(x, centerY), 2.2, paint);
+        final double dotRadius = math.min(
+          1.7,
+          math.max(1.1, size.height * 0.07),
+        );
+        canvas.drawCircle(Offset(x, centerY), dotRadius, paint);
         continue;
       }
 
       final double normalized = 1 - distanceFromActive / 4;
-      final double barHeight = 16 + normalized * 24;
+      final double minBarHeight = math.min(10, size.height * 0.28);
+      final double maxBarHeight = math.min(28, size.height * 0.78);
+      final double barHeight =
+          minBarHeight + normalized * (maxBarHeight - minBarHeight);
       final RRect bar = RRect.fromRectAndRadius(
         Rect.fromCenter(
           center: Offset(x, centerY),
-          width: 4.2,
+          width: math.min(3.2, math.max(2.2, size.height * 0.1)),
           height: barHeight,
         ),
-        const Radius.circular(3),
+        const Radius.circular(2),
       );
 
       canvas.drawRRect(bar, paint);
@@ -4499,6 +4695,7 @@ final class _MessageList extends StatefulWidget {
     required this.onTranslateMessage,
     required this.onDeleteMessage,
     required this.onPhotoMessageTap,
+    required this.onCreateMediaAssetAccessUrl,
     required this.translationDelay,
     required this.initialClock,
     required this.nextLocalMessageId,
@@ -4521,6 +4718,7 @@ final class _MessageList extends StatefulWidget {
   final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageDeleter? onDeleteMessage;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final Duration translationDelay;
   final DateTime? initialClock;
   final int nextLocalMessageId;
@@ -4822,7 +5020,9 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
-  void addOutgoingVoiceMemoMessage({required Duration duration}) {
+  void addOutgoingVoiceMemoMessage({
+    required ChatVoiceMemoAttachment voiceMemo,
+  }) {
     setState(() {
       final DateTime createdAt = DateTime.now();
       _messageClock = createdAt;
@@ -4834,7 +5034,7 @@ final class _MessageListState extends State<_MessageList> {
           recipientId: widget.otherParticipantId,
           content: '',
           createdAt: createdAt,
-          voiceMemoAttachment: ChatVoiceMemoAttachment(duration: duration),
+          voiceMemoAttachment: voiceMemo,
         ),
       );
     });
@@ -5367,15 +5567,59 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   void _handleFileMessageTap(ChatMessage message) {
-    if (message.fileAttachment == null) {
+    final ChatFileAttachment? attachment = message.fileAttachment;
+    final String? mediaAssetId = attachment?.mediaAssetId;
+    final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+        widget.onCreateMediaAssetAccessUrl;
+
+    if (mediaAssetId == null || createAccessUrl == null) {
       return;
     }
 
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(content: Text('File preview is not available yet.')),
+    unawaited(_downloadFileAttachment(attachment!, mediaAssetId));
+  }
+
+  Future<void> _downloadFileAttachment(
+    ChatFileAttachment attachment,
+    String mediaAssetId,
+  ) async {
+    try {
+      final Uri accessUrl = await widget.onCreateMediaAssetAccessUrl!(
+        mediaAssetId: mediaAssetId,
       );
+      final http.Response response = await http.get(accessUrl);
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('File download failed.');
+      }
+
+      final Directory temporaryDirectory = await getTemporaryDirectory();
+      final String fileName = _safeLocalFileName(attachment.name);
+      final File file = File('${temporaryDirectory.path}/$fileName');
+
+      await file.writeAsBytes(response.bodyBytes, flush: true);
+      await Clipboard.setData(ClipboardData(text: file.path));
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('File downloaded. Path copied.')),
+        );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('File download is not available.')),
+        );
+    }
   }
 
   void _retryTranslation(String messageId) {
@@ -5740,6 +5984,7 @@ final class _MessageListState extends State<_MessageList> {
           onIncomingMessageTap: _handleIncomingMessageTap,
           onFileMessageTap: _handleFileMessageTap,
           onPhotoMessageTap: widget.onPhotoMessageTap,
+          onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
           onRetryTranslation: _retryTranslation,
           onMessageLongPress: _handleMessageLongPress,
           onReplyQuoteTap: _handleReplyQuoteTap,
@@ -6188,6 +6433,7 @@ final class _MessageGroup extends StatelessWidget {
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -6206,6 +6452,7 @@ final class _MessageGroup extends StatelessWidget {
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -6224,6 +6471,7 @@ final class _MessageGroup extends StatelessWidget {
         searchQuery: searchQuery,
         onFileMessageTap: onFileMessageTap,
         onPhotoMessageTap: onPhotoMessageTap,
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
         onMessageLongPress: onMessageLongPress,
         onReplyQuoteTap: onReplyQuoteTap,
         messageBubbleKeyFor: messageBubbleKeyFor,
@@ -6241,6 +6489,7 @@ final class _MessageGroup extends StatelessWidget {
       onIncomingMessageTap: onIncomingMessageTap,
       onFileMessageTap: onFileMessageTap,
       onPhotoMessageTap: onPhotoMessageTap,
+      onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
       onRetryTranslation: onRetryTranslation,
       onMessageLongPress: onMessageLongPress,
       onReplyQuoteTap: onReplyQuoteTap,
@@ -6261,6 +6510,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -6277,6 +6527,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -6311,6 +6562,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   },
                   onFileMessageTap: onFileMessageTap,
                   onPhotoMessageTap: onPhotoMessageTap,
+                  onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
                   onRetryTranslation: () {
                     onRetryTranslation(messages[index].id);
                   },
@@ -6342,6 +6594,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.onMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -6360,6 +6613,7 @@ final class _IncomingMessageRow extends StatelessWidget {
   final VoidCallback onMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final VoidCallback onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -6389,6 +6643,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         attachments: message.photoAttachments,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerLeft,
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
         onPhotoTap: (int photoIndex) {
           onPhotoMessageTap(message, photoIndex);
         },
@@ -6407,6 +6662,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
         attachment: message.voiceMemoAttachment!,
         isHighlighted: isHighlighted,
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
       );
     } else {
       content = _MessageBubble(
@@ -6723,6 +6979,7 @@ final class _SearchHighlightedText extends StatelessWidget {
         softWrap: true,
         strutStyle: _buildMessageStrutStyle(style),
         style: style,
+        textWidthBasis: TextWidthBasis.longestLine,
         textHeightBehavior: _messageTextHeightBehavior,
       );
     }
@@ -6733,6 +6990,7 @@ final class _SearchHighlightedText extends StatelessWidget {
       overflow: overflow,
       softWrap: true,
       strutStyle: _buildMessageStrutStyle(style),
+      textWidthBasis: TextWidthBasis.longestLine,
       textHeightBehavior: _messageTextHeightBehavior,
     );
   }
@@ -6777,6 +7035,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
     required this.searchQuery,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.messageBubbleKeyFor,
@@ -6791,6 +7050,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final _MessageBubbleKeyFor messageBubbleKeyFor;
@@ -6811,6 +7071,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
             searchQuery: searchQuery,
             onFileMessageTap: onFileMessageTap,
             onPhotoMessageTap: onPhotoMessageTap,
+            onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
             onMessageLongPress: onMessageLongPress,
             onReplyQuoteTap: onReplyQuoteTap,
             bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
@@ -6847,6 +7108,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
     required this.searchQuery,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.bubbleInteractionKey,
@@ -6861,6 +7123,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final GlobalKey bubbleInteractionKey;
@@ -6881,6 +7144,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         attachments: message.photoAttachments,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerRight,
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
         onPhotoTap: (int photoIndex) {
           onPhotoMessageTap(message, photoIndex);
         },
@@ -6899,6 +7163,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
         attachment: message.voiceMemoAttachment!,
         isHighlighted: isHighlighted,
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
       );
     } else if (message.isFileMessage) {
       content = _MessageBubble(
@@ -6981,6 +7246,7 @@ final class _PhotoMessage extends StatefulWidget {
     required this.isHighlighted,
     required this.measurementKey,
     required this.pulseAlignment,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onPhotoTap,
   });
 
@@ -6989,6 +7255,7 @@ final class _PhotoMessage extends StatefulWidget {
   final bool isHighlighted;
   final Key measurementKey;
   final Alignment pulseAlignment;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ValueChanged<int> onPhotoTap;
 
   @override
@@ -7083,6 +7350,7 @@ final class _PhotoMessageState extends State<_PhotoMessage>
       animation: _pulseController,
       child: _PhotoMessageCollage(
         attachments: widget.attachments,
+        onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
         onPhotoTap: widget.onPhotoTap,
       ),
       builder: (BuildContext context, Widget? child) {
@@ -7140,10 +7408,12 @@ final class _PhotoMessageState extends State<_PhotoMessage>
 final class _PhotoMessageCollage extends StatelessWidget {
   const _PhotoMessageCollage({
     required this.attachments,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onPhotoTap,
   });
 
   final List<ChatPhotoAttachment> attachments;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ValueChanged<int> onPhotoTap;
 
   static const double _spacing = 2;
@@ -7178,6 +7448,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
             attachment: attachment,
             itemIndex: 0,
             hiddenCount: 0,
+            onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
             onTap: () {
               onPhotoTap(0);
             },
@@ -7213,6 +7484,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
                 attachment: attachments[0],
                 itemIndex: 0,
                 hiddenCount: 0,
+                onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
                 onTap: () {
                   onPhotoTap(0);
                 },
@@ -7227,6 +7499,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
                       attachment: attachments[1],
                       itemIndex: 1,
                       hiddenCount: 0,
+                      onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
                       onTap: () {
                         onPhotoTap(1);
                       },
@@ -7238,6 +7511,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
                       attachment: attachments[2],
                       itemIndex: 2,
                       hiddenCount: 0,
+                      onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
                       onTap: () {
                         onPhotoTap(2);
                       },
@@ -7298,6 +7572,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
               attachment: visible[itemIndex],
               itemIndex: itemIndex,
               hiddenCount: itemIndex == visible.length - 1 ? hiddenCount : 0,
+              onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
               onTap: () {
                 onPhotoTap(itemIndex);
               },
@@ -7338,6 +7613,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
     required ChatPhotoAttachment attachment,
     required int itemIndex,
     required int hiddenCount,
+    required ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl,
     required VoidCallback onTap,
   }) {
     return GestureDetector(
@@ -7346,7 +7622,11 @@ final class _PhotoMessageCollage extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          _PhotoMessageImage(attachment: attachment, itemIndex: itemIndex),
+          _PhotoMessageImage(
+            attachment: attachment,
+            itemIndex: itemIndex,
+            onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+          ),
           if (hiddenCount > 0)
             ColoredBox(
               color: AppColors.black.withAlpha(112),
@@ -7366,24 +7646,137 @@ final class _PhotoMessageCollage extends StatelessWidget {
   }
 }
 
-final class _PhotoMessageImage extends StatelessWidget {
-  const _PhotoMessageImage({required this.attachment, required this.itemIndex});
+final class _PhotoMessageImage extends StatefulWidget {
+  const _PhotoMessageImage({
+    required this.attachment,
+    required this.itemIndex,
+    required this.onCreateMediaAssetAccessUrl,
+    this.width,
+    this.height,
+    this.fit = BoxFit.cover,
+    this.filterQuality = FilterQuality.medium,
+  });
 
   final ChatPhotoAttachment attachment;
   final int itemIndex;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final double? width;
+  final double? height;
+  final BoxFit fit;
+  final FilterQuality filterQuality;
+
+  @override
+  State<_PhotoMessageImage> createState() {
+    return _PhotoMessageImageState();
+  }
+}
+
+final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
+  Future<Uri>? _accessUrlFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncAccessUrlFuture();
+  }
+
+  @override
+  void didUpdateWidget(_PhotoMessageImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.attachment != widget.attachment ||
+        oldWidget.onCreateMediaAssetAccessUrl !=
+            widget.onCreateMediaAssetAccessUrl) {
+      _syncAccessUrlFuture();
+    }
+  }
+
+  void _syncAccessUrlFuture() {
+    if (widget.attachment.previewBytes != null) {
+      _accessUrlFuture = null;
+      return;
+    }
+
+    final String? mediaAssetId = widget.attachment.mediaAssetId;
+    final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+        widget.onCreateMediaAssetAccessUrl;
+
+    if (mediaAssetId == null || createAccessUrl == null) {
+      _accessUrlFuture = null;
+      return;
+    }
+
+    _accessUrlFuture = createAccessUrl(mediaAssetId: mediaAssetId);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Image.memory(
-      attachment.previewBytes,
-      key: ValueKey<String>(
-        'photo-message-'
-        '${attachment.assetId}-'
-        '$itemIndex',
+    final Uint8List? previewBytes = widget.attachment.previewBytes;
+
+    if (previewBytes != null) {
+      return Image.memory(
+        previewBytes,
+        key: ValueKey<String>(
+          'photo-message-'
+          '${widget.attachment.assetId}-'
+          '${widget.itemIndex}',
+        ),
+        width: widget.width,
+        height: widget.height,
+        fit: widget.fit,
+        gaplessPlayback: true,
+        filterQuality: widget.filterQuality,
+      );
+    }
+
+    final Future<Uri>? accessUrlFuture = _accessUrlFuture;
+
+    if (accessUrlFuture == null) {
+      return const _PhotoMessagePlaceholder();
+    }
+
+    return FutureBuilder<Uri>(
+      future: accessUrlFuture,
+      builder: (BuildContext context, AsyncSnapshot<Uri> snapshot) {
+        if (!snapshot.hasData) {
+          return const _PhotoMessagePlaceholder();
+        }
+
+        return Image.network(
+          snapshot.data!.toString(),
+          key: ValueKey<String>(
+            'photo-message-remote-'
+            '${widget.attachment.mediaAssetId}-'
+            '${widget.itemIndex}',
+          ),
+          width: widget.width,
+          height: widget.height,
+          fit: widget.fit,
+          gaplessPlayback: true,
+          filterQuality: widget.filterQuality,
+          errorBuilder: (_, __, ___) {
+            return const _PhotoMessagePlaceholder();
+          },
+        );
+      },
+    );
+  }
+}
+
+final class _PhotoMessagePlaceholder extends StatelessWidget {
+  const _PhotoMessagePlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return const ColoredBox(
+      color: AppColors.grey100,
+      child: Center(
+        child: Icon(
+          Icons.image_outlined,
+          color: AppColors.grey400,
+          size: 28,
+        ),
       ),
-      fit: BoxFit.cover,
-      gaplessPlayback: true,
-      filterQuality: FilterQuality.medium,
     );
   }
 }
@@ -7394,12 +7787,14 @@ final class _PhotoViewerScreen extends StatefulWidget {
     required this.initialIndex,
     required this.senderName,
     required this.sentAt,
+    required this.onCreateMediaAssetAccessUrl,
   });
 
   final List<ChatPhotoAttachment> attachments;
   final int initialIndex;
   final String senderName;
   final DateTime sentAt;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
 
   @override
   State<_PhotoViewerScreen> createState() {
@@ -7526,8 +7921,29 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
     final int timestamp = DateTime.now().millisecondsSinceEpoch;
 
     try {
+      Uint8List? imageBytes = attachment.previewBytes;
+
+      if (imageBytes == null) {
+        final String? mediaAssetId = attachment.mediaAssetId;
+        final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+            widget.onCreateMediaAssetAccessUrl;
+
+        if (mediaAssetId == null || createAccessUrl == null) {
+          throw StateError('Photo bytes are not available.');
+        }
+
+        final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
+        final http.Response response = await http.get(accessUrl);
+
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw StateError('Photo download failed.');
+        }
+
+        imageBytes = response.bodyBytes;
+      }
+
       await PhotoManager.editor.saveImage(
-        attachment.previewBytes,
+        imageBytes,
         filename: 'juliatalk-$timestamp.jpg',
         title: 'JuliaTalk Photo',
         creationDate: DateTime.now(),
@@ -7583,6 +7999,8 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                 itemBuilder: (BuildContext context, int index) {
                   return _PhotoViewerPage(
                     attachment: widget.attachments[index],
+                    onCreateMediaAssetAccessUrl:
+                        widget.onCreateMediaAssetAccessUrl,
                   );
                 },
               ),
@@ -7597,6 +8015,8 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                 attachments: widget.attachments,
                 currentIndex: _currentIndex,
                 thumbnailKeys: _thumbnailKeys,
+                onCreateMediaAssetAccessUrl:
+                    widget.onCreateMediaAssetAccessUrl,
                 onThumbnailPressed: (int index) {
                   _pageController.animateToPage(
                     index,
@@ -7617,25 +8037,29 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
 }
 
 final class _PhotoViewerPage extends StatelessWidget {
-  const _PhotoViewerPage({required this.attachment});
+  const _PhotoViewerPage({
+    required this.attachment,
+    required this.onCreateMediaAssetAccessUrl,
+  });
 
   final ChatPhotoAttachment attachment;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         return Center(
-          child: Image.memory(
-            attachment.previewBytes,
-            key: ValueKey<String>('photo-viewer-image-${attachment.assetId}'),
+          child: _PhotoMessageImage(
+            attachment: attachment,
+            itemIndex: 0,
+            onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
             width: constraints.maxWidth,
             height: constraints.maxHeight,
             fit: _photoViewerFit(
               attachment: attachment,
               viewport: Size(constraints.maxWidth, constraints.maxHeight),
             ),
-            gaplessPlayback: true,
             filterQuality: FilterQuality.high,
           ),
         );
@@ -7738,6 +8162,7 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
     required this.attachments,
     required this.currentIndex,
     required this.thumbnailKeys,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onThumbnailPressed,
     required this.onDownloadPressed,
   });
@@ -7746,6 +8171,7 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
   final List<ChatPhotoAttachment> attachments;
   final int currentIndex;
   final List<GlobalKey> thumbnailKeys;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ValueChanged<int> onThumbnailPressed;
   final VoidCallback onDownloadPressed;
 
@@ -7783,6 +8209,8 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
                         attachments: attachments,
                         currentIndex: currentIndex,
                         thumbnailKeys: thumbnailKeys,
+                        onCreateMediaAssetAccessUrl:
+                            onCreateMediaAssetAccessUrl,
                         onThumbnailPressed: onThumbnailPressed,
                       ),
                     ),
@@ -7819,12 +8247,14 @@ final class _PhotoViewerThumbnailBar extends StatelessWidget {
     required this.attachments,
     required this.currentIndex,
     required this.thumbnailKeys,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onThumbnailPressed,
   });
 
   final List<ChatPhotoAttachment> attachments;
   final int currentIndex;
   final List<GlobalKey> thumbnailKeys;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ValueChanged<int> onThumbnailPressed;
 
   @override
@@ -7846,6 +8276,8 @@ final class _PhotoViewerThumbnailBar extends StatelessWidget {
                       key: thumbnailKeys[index],
                       attachment: attachments[index],
                       selected: index == currentIndex,
+                      onCreateMediaAssetAccessUrl:
+                          onCreateMediaAssetAccessUrl,
                       onPressed: () {
                         onThumbnailPressed(index);
                       },
@@ -7887,12 +8319,14 @@ final class _PhotoViewerThumbnail extends StatelessWidget {
   const _PhotoViewerThumbnail({
     required this.attachment,
     required this.selected,
+    required this.onCreateMediaAssetAccessUrl,
     required this.onPressed,
     super.key,
   });
 
   final ChatPhotoAttachment attachment;
   final bool selected;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final VoidCallback onPressed;
 
   @override
@@ -7917,13 +8351,11 @@ final class _PhotoViewerThumbnail extends StatelessWidget {
         ),
         child: ClipRRect(
           borderRadius: const BorderRadius.all(Radius.circular(4)),
-          child: Image.memory(
-            attachment.previewBytes,
-            key: ValueKey<String>(
-              'photo-viewer-thumbnail-${attachment.assetId}',
-            ),
+          child: _PhotoMessageImage(
+            attachment: attachment,
+            itemIndex: 0,
+            onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
             fit: BoxFit.cover,
-            gaplessPlayback: true,
             filterQuality: FilterQuality.medium,
           ),
         ),
@@ -8011,6 +8443,58 @@ String _formatFileSize(int bytes) {
   final double gb = mb / 1024;
 
   return '${gb.toStringAsFixed(1)} GB';
+}
+
+String _mimeTypeForFileName(String fileName) {
+  final String lowerCase = fileName.toLowerCase();
+
+  if (lowerCase.endsWith('.jpg') || lowerCase.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+
+  if (lowerCase.endsWith('.png')) {
+    return 'image/png';
+  }
+
+  if (lowerCase.endsWith('.heic')) {
+    return 'image/heic';
+  }
+
+  if (lowerCase.endsWith('.webp')) {
+    return 'image/webp';
+  }
+
+  if (lowerCase.endsWith('.mp4')) {
+    return 'video/mp4';
+  }
+
+  if (lowerCase.endsWith('.mov')) {
+    return 'video/quicktime';
+  }
+
+  if (lowerCase.endsWith('.m4a')) {
+    return 'audio/mp4';
+  }
+
+  if (lowerCase.endsWith('.mp3')) {
+    return 'audio/mpeg';
+  }
+
+  if (lowerCase.endsWith('.pdf')) {
+    return 'application/pdf';
+  }
+
+  return 'application/octet-stream';
+}
+
+String _safeLocalFileName(String fileName) {
+  final List<String> segments = fileName
+      .split(RegExp(r'[/\\]'))
+      .where((String segment) => segment.isNotEmpty)
+      .toList(growable: false);
+  final String sanitized = segments.isEmpty ? 'download.bin' : segments.last;
+
+  return sanitized.trim().isEmpty ? 'download.bin' : sanitized.trim();
 }
 
 final class _CallMessagePresentation {
@@ -8180,71 +8664,269 @@ final class _CallMessageBubble extends StatelessWidget {
   }
 }
 
-final class _VoiceMemoMessageBubble extends StatelessWidget {
+final class _VoiceMemoMessageBubble extends StatefulWidget {
   const _VoiceMemoMessageBubble({
     required this.messageId,
     required this.measurementKey,
     required this.attachment,
     required this.isHighlighted,
+    required this.onCreateMediaAssetAccessUrl,
   });
 
   final String messageId;
   final Key measurementKey;
   final ChatVoiceMemoAttachment attachment;
   final bool isHighlighted;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+
+  @override
+  State<_VoiceMemoMessageBubble> createState() {
+    return _VoiceMemoMessageBubbleState();
+  }
+}
+
+final class _VoiceMemoMessageBubbleState
+    extends State<_VoiceMemoMessageBubble> {
+  AudioPlayer? _player;
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<PlayerState>? _playerStateSubscription;
+  Duration _playbackPosition = Duration.zero;
+  bool _playing = false;
+  String? _cachedAudioPath;
+
+  double get _progress {
+    final int durationMs = widget.attachment.duration.inMilliseconds;
+
+    if (durationMs <= 0) {
+      return 0;
+    }
+
+    return (_playbackPosition.inMilliseconds / durationMs)
+        .clamp(0, 1)
+        .toDouble();
+  }
+
+  @override
+  void didUpdateWidget(_VoiceMemoMessageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.attachment != widget.attachment ||
+        oldWidget.messageId != widget.messageId) {
+      unawaited(_stopPlayback(resetPosition: true));
+      _cachedAudioPath = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _positionSubscription?.cancel();
+    _playerStateSubscription?.cancel();
+    unawaited(_player?.dispose());
+    super.dispose();
+  }
+
+  Future<AudioPlayer> _ensurePlayer() async {
+    final AudioPlayer existingPlayer;
+
+    if (_player case final AudioPlayer player) {
+      existingPlayer = player;
+    } else {
+      existingPlayer = AudioPlayer();
+      _player = existingPlayer;
+
+      _positionSubscription = existingPlayer.positionStream.listen((
+        Duration position,
+      ) {
+        if (!mounted || !_playing) {
+          return;
+        }
+
+        setState(() {
+          _playbackPosition = position > widget.attachment.duration
+              ? widget.attachment.duration
+              : position;
+        });
+      });
+
+      _playerStateSubscription = existingPlayer.playerStateStream.listen((
+        PlayerState state,
+      ) {
+        if (!mounted || state.processingState != ProcessingState.completed) {
+          return;
+        }
+
+        setState(() {
+          _playing = false;
+          _playbackPosition = Duration.zero;
+        });
+        unawaited(existingPlayer.seek(Duration.zero));
+      });
+    }
+
+    return existingPlayer;
+  }
+
+  Future<String?> _audioPathForPlayback() async {
+    final String? localPath = widget.attachment.localPath;
+
+    if (localPath != null && await File(localPath).exists()) {
+      return localPath;
+    }
+
+    final String? cachedAudioPath = _cachedAudioPath;
+
+    if (cachedAudioPath != null && await File(cachedAudioPath).exists()) {
+      return cachedAudioPath;
+    }
+
+    final Uint8List? audioBytes = widget.attachment.audioBytes;
+
+    if (audioBytes == null || audioBytes.isEmpty) {
+      return null;
+    }
+
+    final Directory temporaryDirectory = await getTemporaryDirectory();
+    final File audioFile = File(
+      '${temporaryDirectory.path}/juliatalk_voice_${widget.messageId}.m4a',
+    );
+
+    await audioFile.writeAsBytes(audioBytes, flush: true);
+    _cachedAudioPath = audioFile.path;
+
+    return audioFile.path;
+  }
+
+  Future<void> _stopPlayback({required bool resetPosition}) async {
+    final AudioPlayer? player = _player;
+
+    if (player != null) {
+      await player.stop();
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _playing = false;
+      if (resetPosition) {
+        _playbackPosition = Duration.zero;
+      }
+    });
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_playing) {
+      await _stopPlayback(resetPosition: false);
+      return;
+    }
+
+    final String? audioPath = await _audioPathForPlayback();
+    Uri? audioUri;
+
+    if (audioPath != null) {
+      audioUri = Uri.file(audioPath);
+    } else {
+      final String? mediaAssetId = widget.attachment.mediaAssetId;
+      final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+          widget.onCreateMediaAssetAccessUrl;
+
+      if (mediaAssetId == null || createAccessUrl == null) {
+        return;
+      }
+
+      try {
+        audioUri = await createAccessUrl(mediaAssetId: mediaAssetId);
+      } catch (_) {
+        return;
+      }
+    }
+
+    final AudioPlayer player = await _ensurePlayer();
+
+    try {
+      await player.stop();
+      await player.setUrl(audioUri.toString());
+      await player.seek(Duration.zero);
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _playing = true;
+        _playbackPosition = Duration.zero;
+      });
+
+      unawaited(player.play());
+    } catch (_) {
+      await _stopPlayback(resetPosition: true);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final double maxWidth = MediaQuery.sizeOf(context).width * 0.72;
     final double width = math.min(304, maxWidth);
+    final bool canPlay = widget.attachment.hasPlayableAudio;
 
     return Transform.scale(
-      key: ValueKey<String>('message-pulse-$messageId'),
+      key: ValueKey<String>('message-pulse-${widget.messageId}'),
       scale: 1,
       child: Stack(
-        key: measurementKey,
+        key: widget.measurementKey,
         children: [
           SizedBox(
             width: width,
-            height: 70,
+            height: 56,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: AppColors.white,
-                borderRadius: const BorderRadius.all(Radius.circular(17)),
+                borderRadius: const BorderRadius.all(Radius.circular(15)),
                 border: Border.all(color: AppColors.grey100),
               ),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 16, 10),
+                padding: const EdgeInsets.fromLTRB(10, 8, 14, 8),
                 child: Row(
                   children: [
                     SizedBox.square(
-                      dimension: 48,
-                      child: DecoratedBox(
-                        decoration: const BoxDecoration(
-                          color: AppColors.grey50,
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.play_arrow_rounded,
-                          size: 36,
-                          color: AppColors.grey900,
+                      dimension: 40,
+                      child: Material(
+                        color: AppColors.grey50,
+                        shape: const CircleBorder(),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: canPlay ? _togglePlayback : null,
+                          child: Icon(
+                            _playing
+                                ? Icons.pause_rounded
+                                : Icons.play_arrow_rounded,
+                            size: 30,
+                            color: canPlay
+                                ? AppColors.grey900
+                                : AppColors.grey300,
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 16),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: SizedBox(
-                        height: 30,
+                        height: 22,
                         child: _VoiceMemoWaveform(
                           color: AppColors.grey300,
-                          emphasized: false,
+                          progress: _progress,
+                          emphasized: _playing,
                         ),
                       ),
                     ),
-                    const SizedBox(width: 14),
+                    const SizedBox(width: 12),
                     Text(
-                      _formatVoiceMemoBubbleDuration(attachment.duration),
-                      style: AppTypography.typography5.copyWith(
+                      _formatVoiceMemoBubbleDuration(
+                        widget.attachment.duration,
+                      ),
+                      style: AppTypography.subTypography10.copyWith(
                         color: AppColors.grey900,
                         fontWeight: AppTypography.medium,
                       ),
@@ -8254,11 +8936,13 @@ final class _VoiceMemoMessageBubble extends StatelessWidget {
               ),
             ),
           ),
-          if (isHighlighted)
+          if (widget.isHighlighted)
             Positioned.fill(
               child: IgnorePointer(
                 child: SizedBox.expand(
-                  key: ValueKey<String>('message-highlight-$messageId'),
+                  key: ValueKey<String>(
+                    'message-highlight-${widget.messageId}',
+                  ),
                 ),
               ),
             ),

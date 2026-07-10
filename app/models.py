@@ -51,7 +51,9 @@ class DevicePlatform(str, enum.Enum):
 
 class MessageKind(str, enum.Enum):
     TEXT = "text"
+    LINK = "link"
     PHOTO = "photo"
+    VIDEO = "video"
     FILE = "file"
     VOICE_MEMO = "voice_memo"
     CALL = "call"
@@ -60,6 +62,7 @@ class MessageKind(str, enum.Enum):
 
 class MediaKind(str, enum.Enum):
     PHOTO = "photo"
+    VIDEO = "video"
     FILE = "file"
     VOICE_MEMO = "voice_memo"
 
@@ -506,6 +509,14 @@ class Message(Base):
         server_default="",
     )
 
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+
     reply_to_message_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("messages.id", ondelete="SET NULL"),
@@ -593,6 +604,15 @@ class MediaAsset(Base):
     )
 
     storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
+
+    thumbnail_storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
+
+    upload_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="complete",
+        server_default="complete",
+    )
 
     original_asset_id: Mapped[str | None] = mapped_column(Text)
 

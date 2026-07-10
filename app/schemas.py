@@ -18,10 +18,19 @@ TranslationStatus = Literal[
 
 MessageType = Literal[
     "text",
+    "link",
     "photo",
+    "video",
     "file",
     "voice_memo",
     "call",
+]
+
+MediaType = Literal[
+    "photo",
+    "video",
+    "file",
+    "voice_memo",
 ]
 
 
@@ -88,6 +97,61 @@ class MessageCreate(BaseModel):
     reply_to_message_id: UUID | None = Field(
         default=None,
     )
+
+
+class MediaAssetUploadCreate(BaseModel):
+    kind: MediaType
+
+    file_name: str | None = Field(
+        default=None,
+        max_length=255,
+    )
+
+    mime_type: str = Field(
+        min_length=1,
+        max_length=255,
+    )
+
+    size_bytes: int = Field(
+        ge=1,
+    )
+
+    width: int | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    height: int | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    duration_ms: int | None = Field(
+        default=None,
+        ge=0,
+    )
+
+
+class MediaAssetUploadRead(BaseModel):
+    media_asset_id: UUID
+    storage_key: str
+    upload_url: str
+    upload_headers: dict[str, str]
+    expires_in_seconds: int
+
+
+class MediaAssetCompleteRead(BaseModel):
+    media_asset_id: UUID
+    upload_status: str
+
+
+class MediaAssetAccessRead(BaseModel):
+    media_asset_id: UUID
+    access_url: str
+    expires_in_seconds: int
+    mime_type: str | None
+    file_name: str | None
+    size_bytes: int | None
 
 
 class MessageUpdate(BaseModel):

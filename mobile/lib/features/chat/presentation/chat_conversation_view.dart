@@ -218,6 +218,8 @@ final class ChatConversationView extends StatefulWidget {
     this.onEditTextMessage,
     this.onTranslateMessage,
     this.onDeleteMessage,
+    this.onBack,
+    this.unreadOtherConversationCount = 0,
     this.translationDelay = Duration.zero,
     this.initialClock,
     this.nextLocalMessageId = 1,
@@ -239,6 +241,8 @@ final class ChatConversationView extends StatefulWidget {
   final ChatTextMessageEditor? onEditTextMessage;
   final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageDeleter? onDeleteMessage;
+  final VoidCallback? onBack;
+  final int unreadOtherConversationCount;
   final Duration translationDelay;
   final DateTime? initialClock;
   final int nextLocalMessageId;
@@ -2344,6 +2348,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       else
                         _ChatTopBar(
                           participantName: widget.otherParticipantName,
+                          unreadOtherConversationCount:
+                              widget.unreadOtherConversationCount,
+                          onBackPressed: widget.onBack,
                           onSearchPressed: _enterSearchMode,
                           onCallPressed: _openCallNowSheet,
                         ),
@@ -2407,6 +2414,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 final class _ChatTopBar extends StatelessWidget {
   const _ChatTopBar({
     required this.participantName,
+    required this.unreadOtherConversationCount,
+    required this.onBackPressed,
     required this.onSearchPressed,
     required this.onCallPressed,
   });
@@ -2414,6 +2423,8 @@ final class _ChatTopBar extends StatelessWidget {
   static const double height = 56;
 
   final String participantName;
+  final int unreadOtherConversationCount;
+  final VoidCallback? onBackPressed;
   final VoidCallback onSearchPressed;
   final VoidCallback onCallPressed;
 
@@ -2431,15 +2442,61 @@ final class _ChatTopBar extends StatelessWidget {
           child: Stack(
             alignment: Alignment.center,
             children: [
-              IgnorePointer(
-                child: Text(
-                  participantName,
-                  style: AppTypography.typography4.copyWith(
-                    color: AppColors.grey900,
-                    fontWeight: AppTypography.bold,
+              Positioned(
+                left: 112,
+                right: 112,
+                child: IgnorePointer(
+                  child: Text(
+                    participantName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: AppTypography.typography4.copyWith(
+                      color: AppColors.grey900,
+                      fontWeight: AppTypography.bold,
+                    ),
                   ),
                 ),
               ),
+              if (onBackPressed != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Back',
+                          onPressed: onBackPressed,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 48,
+                            height: 48,
+                          ),
+                          icon: const Icon(
+                            Icons.chevron_left_rounded,
+                            size: 40,
+                            color: AppColors.grey900,
+                          ),
+                        ),
+                        Transform.translate(
+                          offset: const Offset(-6, 0),
+                          child: Text(
+                            _formatUnreadCount(unreadOtherConversationCount),
+                            maxLines: 1,
+                            overflow: TextOverflow.fade,
+                            softWrap: false,
+                            style: AppTypography.typography5.copyWith(
+                              color: AppColors.grey900,
+                              fontWeight: AppTypography.medium,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               Align(
                 alignment: Alignment.centerRight,
                 child: Padding(
@@ -2474,6 +2531,14 @@ final class _ChatTopBar extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _formatUnreadCount(int count) {
+    if (count > 999) {
+      return '999+';
+    }
+
+    return count.toString();
   }
 }
 
@@ -5416,10 +5481,21 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
+    final bool shouldPinToBottomAfterUpdate =
+        !_didResolveInitialScrollPosition || isNearBottom;
+
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
     _syncMessageClockWithMessages(_messages);
+
+    if (shouldPinToBottomAfterUpdate) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(scrollToBottom(animate: false));
+        }
+      });
+    }
   }
 
   void _syncMessageClockWith(ChatMessage message) {
@@ -7841,10 +7917,11 @@ final class _LinkPreviewCard extends StatelessWidget {
       MediaQuery.sizeOf(context).width * 0.68,
       316,
     );
+    final BorderRadius borderRadius = BorderRadius.circular(17);
     final Border border = Border.all(
       color: isHighlighted
           ? AppColors.primary.withAlpha(110)
-          : AppColors.grey200,
+          : AppColors.grey100,
       width: isHighlighted ? 1.6 : 1,
     );
     final String title = preview.title ?? preview.siteName ?? preview.domain;
@@ -7853,64 +7930,77 @@ final class _LinkPreviewCard extends StatelessWidget {
 
     return SizedBox(
       width: cardWidth,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: AppColors.white,
-          borderRadius: BorderRadius.circular(17),
-          border: border,
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(17),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _LinkPreviewImage(preview: preview, width: cardWidth),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTypography.subTypography10.copyWith(
-                        color: AppColors.grey900,
-                        fontWeight: AppTypography.bold,
-                      ),
-                    ),
-                    if (description != null) ...[
-                      const SizedBox(height: 5),
-                      Text(
-                        description,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: AppTypography.subTypography12.copyWith(
-                          color: AppColors.grey600,
-                          fontWeight: AppTypography.regular,
+      child: Stack(
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.white,
+              borderRadius: borderRadius,
+            ),
+            child: ClipRRect(
+              borderRadius: borderRadius,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _LinkPreviewImage(preview: preview, width: cardWidth),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.subTypography10.copyWith(
+                            color: AppColors.grey900,
+                            fontWeight: AppTypography.bold,
+                          ),
                         ),
-                      ),
-                    ],
-                    const SizedBox(height: 8),
-                    Text(
-                      domain,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTypography.subTypography12.copyWith(
-                        color: AppColors.blue500,
-                        fontWeight: AppTypography.regular,
-                        decoration: TextDecoration.underline,
-                        decorationColor: AppColors.blue500,
-                      ),
+                        if (description != null) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            description,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.subTypography12.copyWith(
+                              color: AppColors.grey600,
+                              fontWeight: AppTypography.regular,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 8),
+                        Text(
+                          domain,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTypography.subTypography12.copyWith(
+                            color: AppColors.blue500,
+                            fontWeight: AppTypography.regular,
+                            decoration: TextDecoration.underline,
+                            decorationColor: AppColors.blue500,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: borderRadius,
+                  border: border,
                 ),
               ),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -7918,6 +8008,8 @@ final class _LinkPreviewCard extends StatelessWidget {
 
 final class _LinkPreviewImage extends StatelessWidget {
   const _LinkPreviewImage({required this.preview, required this.width});
+
+  static const double _height = 128;
 
   final ChatLinkPreview preview;
   final double width;
@@ -7935,7 +8027,7 @@ final class _LinkPreviewImage extends StatelessWidget {
     return Image.network(
       imageUri.toString(),
       width: width,
-      height: 128,
+      height: _height,
       fit: BoxFit.cover,
       gaplessPlayback: true,
       loadingBuilder:
@@ -7961,7 +8053,7 @@ final class _LinkPreviewImage extends StatelessWidget {
 
     return Container(
       width: width,
-      height: 112,
+      height: _height,
       alignment: Alignment.center,
       color: AppColors.grey50,
       padding: const EdgeInsets.symmetric(horizontal: 18),

@@ -265,6 +265,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   bool _disposed = false;
   bool _connectedOnce = false;
   bool _syncingAfterReconnect = false;
+  int _unreadOutsideCurrentConversationCount = 0;
   List<ChatMessage> _messages = const <ChatMessage>[];
 
   @override
@@ -309,12 +310,17 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         otherUserId: widget.otherUser.id,
       );
 
+      final int unreadOutsideCurrentConversationCount =
+          await _loadUnreadOutsideCurrentConversationCount();
+
       if (!mounted) {
         return;
       }
 
       setState(() {
         _messages = messages;
+        _unreadOutsideCurrentConversationCount =
+            unreadOutsideCurrentConversationCount;
         _loading = false;
       });
 
@@ -347,12 +353,17 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         otherUserId: widget.otherUser.id,
       );
 
+      final int unreadOutsideCurrentConversationCount =
+          await _loadUnreadOutsideCurrentConversationCount();
+
       if (!mounted) {
         return;
       }
 
       setState(() {
         _messages = messages;
+        _unreadOutsideCurrentConversationCount =
+            unreadOutsideCurrentConversationCount;
         _errorMessage = null;
       });
     } catch (_) {
@@ -473,6 +484,10 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     }
 
     if (!_messageBelongsToConversation(message)) {
+      if (message.senderId != widget.currentUser.id) {
+        unawaited(_refreshUnreadOutsideCurrentConversationCount());
+      }
+
       return;
     }
 
@@ -482,6 +497,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
       unawaited(
         widget.chatApi.markConversationAsRead(otherUserId: widget.otherUser.id),
       );
+      unawaited(_refreshUnreadOutsideCurrentConversationCount());
     }
   }
 
@@ -491,6 +507,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     if (messageId is String) {
       _removeMessage(messageId);
     }
+
+    unawaited(_refreshUnreadOutsideCurrentConversationCount());
   }
 
   void _handleMessagesReadEvent(Map<String, dynamic> event) {
@@ -518,6 +536,37 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
       messageIds.whereType<String>().toList(growable: false),
       readAt,
     );
+
+    unawaited(_refreshUnreadOutsideCurrentConversationCount());
+  }
+
+  Future<int> _loadUnreadOutsideCurrentConversationCount() async {
+    try {
+      return await widget.chatApi.countUnreadMessages(
+        excludeUserId: widget.otherUser.id,
+      );
+    } catch (_) {
+      return _unreadOutsideCurrentConversationCount;
+    }
+  }
+
+  Future<void> _refreshUnreadOutsideCurrentConversationCount() async {
+    final int unreadOutsideCurrentConversationCount =
+        await _loadUnreadOutsideCurrentConversationCount();
+
+    if (!mounted) {
+      return;
+    }
+
+    if (unreadOutsideCurrentConversationCount ==
+        _unreadOutsideCurrentConversationCount) {
+      return;
+    }
+
+    setState(() {
+      _unreadOutsideCurrentConversationCount =
+          unreadOutsideCurrentConversationCount;
+    });
   }
 
   void _handleWebSocketDisconnected() {
@@ -815,6 +864,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         onCreateMediaAssetAccessUrl: widget.chatApi.createMediaAssetAccessUrl,
         onEditTextMessage: _editTextMessage,
         onDeleteMessage: _deleteMessage,
+        onBack: widget.onBack,
+        unreadOtherConversationCount: _unreadOutsideCurrentConversationCount,
       ),
     );
   }

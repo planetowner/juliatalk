@@ -53,6 +53,7 @@ from app.schemas import (
     MessageRead,
     MessageUpdate,
     MessagesMarkedReadResponse,
+    UnreadMessageCountRead,
 )
 from app.translation import (
     DEEPSEEK_MODEL,
@@ -1235,6 +1236,61 @@ async def create_message(
         background_tasks.add_task(translate_and_publish_message, message.id)
 
     return message_read
+
+
+@router.get(
+    "/unread-count",
+    response_model=UnreadMessageCountRead,
+)
+async def count_unread_messages(
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+    exclude_user_id: Annotated[UUID | None, Query()] = None,
+) -> UnreadMessageCountRead:
+    member_conversation_ids = select(
+        ConversationMember.conversation_id
+    ).where(
+        ConversationMember.user_id == current_user.id,
+    )
+    read_message_ids = select(
+        MessageReadReceipt.message_id
+    ).where(
+        MessageReadReceipt.user_id == current_user.id,
+    )
+    hidden_message_ids = select(
+        MessageDeletion.message_id
+    ).where(
+        MessageDeletion.user_id == current_user.id,
+    )
+
+    unread_count_query = (
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.conversation_id.in_(member_conversation_ids),
+            Message.sender_id != current_user.id,
+            Message.deleted_at.is_(None),
+            Message.id.not_in(read_message_ids),
+            Message.id.not_in(hidden_message_ids),
+        )
+    )
+
+    if exclude_user_id is not None:
+        excluded_conversation = await get_direct_conversation(
+            session,
+            current_user.id,
+            exclude_user_id,
+        )
+
+        if excluded_conversation is not None:
+            unread_count_query = unread_count_query.where(
+                Message.conversation_id
+                != excluded_conversation.conversation_id,
+            )
+
+    unread_count = await session.scalar(unread_count_query)
+
+    return UnreadMessageCountRead(unread_count=int(unread_count or 0))
 
 
 @router.get(

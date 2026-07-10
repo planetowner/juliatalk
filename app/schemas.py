@@ -197,3 +197,7 @@ class MessageRead(BaseModel):
 
 class MessagesMarkedReadResponse(BaseModel):
     marked_read_count: int
+
+
+class UnreadMessageCountRead(BaseModel):
+    unread_count: int

@@ -169,6 +169,49 @@ final class ChatApi {
         .toList(growable: false);
   }
 
+  Future<int> countUnreadMessages({String? excludeUserId}) async {
+    final Map<String, String>? queryParameters = excludeUserId == null
+        ? null
+        : <String, String>{'exclude_user_id': excludeUserId};
+    final Uri requestUri = _baseUri
+        .resolve('/messages/unread-count')
+        .replace(queryParameters: queryParameters);
+
+    final http.Response response = await _client.get(
+      requestUri,
+      headers: _headers,
+    );
+
+    if (response.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          response,
+          fallback:
+              'Unread count loading failed with status code '
+              '${response.statusCode}.',
+        ),
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(response.body);
+
+    if (decodedBody is! Map<String, dynamic>) {
+      throw const ChatApiException(
+        'The server returned an invalid unread count.',
+      );
+    }
+
+    final Object? unreadCount = decodedBody['unread_count'];
+
+    if (unreadCount is int && unreadCount >= 0) {
+      return unreadCount;
+    }
+
+    throw const ChatApiException(
+      'The server returned an invalid unread count.',
+    );
+  }
+
   Future<ChatMessage> sendTextMessage({
     required String recipientId,
     required String content,

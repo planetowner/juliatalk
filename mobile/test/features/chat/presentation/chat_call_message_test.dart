@@ -7,6 +7,7 @@ import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart
 Widget _buildCallMessageScreen(
   ChatMessage message, {
   String currentUserId = '1',
+  DateTime? initialClock,
 }) {
   final ChatCallAttachment attachment = message.callAttachment!;
 
@@ -18,6 +19,7 @@ Widget _buildCallMessageScreen(
       ),
       initialMessages: <ChatMessage>[message],
       currentUserId: currentUserId,
+      initialClock: initialClock,
     ),
   );
 }
@@ -359,5 +361,25 @@ void main() {
 
     expect(icon.icon, Icons.phone_missed_rounded);
     expect(icon.color, AppColors.red500);
+  });
+
+  testWidgets('call message action menu only allows reply', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildCallMessageScreen(
+        _callMessage(outcome: ChatCallOutcome.started),
+        initialClock: DateTime(2026, 7, 4, 17, 16, 30),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('Voice Call'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Reply'), findsOneWidget);
+    expect(find.text('Copy'), findsNothing);
+    expect(find.text('Edit'), findsNothing);
+    expect(find.text('Unsend'), findsNothing);
   });
 }

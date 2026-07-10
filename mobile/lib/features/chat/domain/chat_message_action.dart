@@ -7,22 +7,26 @@ List<ChatMessageAction> availableChatMessageActions({
   required DateTime createdAt,
   required DateTime now,
   bool isMedia = false,
+  bool isCall = false,
 }) {
+  final bool canUseTextActions = !isMedia && !isCall;
+
   if (!isOutgoing) {
     return <ChatMessageAction>[
-      if (!isMedia) ChatMessageAction.copy,
+      if (canUseTextActions) ChatMessageAction.copy,
       ChatMessageAction.reply,
     ];
   }
 
   final Duration elapsedSinceCreation = now.difference(createdAt);
 
-  final bool canUnsend = elapsedSinceCreation <= chatMessageUnsendWindow;
+  final bool canUnsend =
+      !isCall && elapsedSinceCreation <= chatMessageUnsendWindow;
 
   return <ChatMessageAction>[
-    if (!isMedia) ChatMessageAction.copy,
+    if (canUseTextActions) ChatMessageAction.copy,
     ChatMessageAction.reply,
-    if (!isMedia) ChatMessageAction.edit,
+    if (canUseTextActions) ChatMessageAction.edit,
     if (canUnsend) ChatMessageAction.unsend,
   ];
 }

@@ -83,5 +83,27 @@ void main() {
         ]);
       },
     );
+
+    test('incoming media messages only allow reply', () {
+      final List<ChatMessageAction> actions = availableChatMessageActions(
+        isOutgoing: false,
+        createdAt: createdAt,
+        now: createdAt,
+        isMedia: true,
+      );
+
+      expect(actions, const <ChatMessageAction>[ChatMessageAction.reply]);
+    });
+
+    test('outgoing call messages only allow reply', () {
+      final List<ChatMessageAction> actions = availableChatMessageActions(
+        isOutgoing: true,
+        createdAt: createdAt,
+        now: createdAt,
+        isCall: true,
+      );
+
+      expect(actions, const <ChatMessageAction>[ChatMessageAction.reply]);
+    });
   });
 }

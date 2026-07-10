@@ -3405,6 +3405,10 @@ String _formatVoiceMemoBubbleDuration(Duration duration) {
   return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }
 
+double _voiceMemoMessageBubbleWidth(BuildContext context) {
+  return math.min(304, math.max(196, MediaQuery.sizeOf(context).width - 128));
+}
+
 const int _voiceMemoWaveformSampleCount = 42;
 const int _voiceMemoWaveformRawSampleLimit = 1800;
 final ValueNotifier<String?> _activeVoiceMemoPlaybackMessageId =
@@ -3624,70 +3628,6 @@ List<double> _voiceMemoWaveformSamplesFromBytes(Uint8List bytes) {
 
 String _safeVoiceMemoCacheKey(String value) {
   return value.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
-}
-
-int _stableVoiceMemoWaveformSeed(String value) {
-  int hash = 0x811c9dc5;
-
-  for (final int codeUnit in value.codeUnits) {
-    hash ^= codeUnit;
-    hash = (hash * 0x01000193) & 0xffffffff;
-  }
-
-  return hash == 0 ? 0x9e3779b9 : hash;
-}
-
-List<double> _voiceMemoFallbackWaveformSamples({
-  required ChatVoiceMemoAttachment attachment,
-  required String messageId,
-}) {
-  final String seedSource = [
-    attachment.mediaAssetId,
-    attachment.localPath,
-    messageId,
-    attachment.duration.inMilliseconds.toString(),
-    attachment.sizeBytes?.toString(),
-  ].whereType<String>().join(':');
-  int state = _stableVoiceMemoWaveformSeed(seedSource);
-
-  double nextUnit() {
-    state = ((state * 1664525) + 1013904223) & 0xffffffff;
-    return state / 0xffffffff;
-  }
-
-  final int peakCount = 2 + (nextUnit() * 2).floor();
-  final List<double> centers = <double>[];
-  final List<double> widths = <double>[];
-  final List<double> heights = <double>[];
-
-  for (int index = 0; index < peakCount; index++) {
-    centers.add(0.14 + (nextUnit() * 0.72));
-    widths.add(0.045 + (nextUnit() * 0.13));
-    heights.add(0.34 + (nextUnit() * 0.58));
-  }
-
-  final List<double> samples = <double>[];
-
-  for (int index = 0; index < _voiceMemoWaveformSampleCount; index++) {
-    final double position = _voiceMemoWaveformSampleCount == 1
-        ? 0
-        : index / (_voiceMemoWaveformSampleCount - 1);
-    double sample = 0.035 + (nextUnit() * 0.035);
-
-    for (int peakIndex = 0; peakIndex < peakCount; peakIndex++) {
-      final double distance = (position - centers[peakIndex]).abs();
-      final double influence = math.max(0, 1 - (distance / widths[peakIndex]));
-
-      sample = math.max(
-        sample,
-        (math.pow(influence, 1.8) * heights[peakIndex]).toDouble(),
-      );
-    }
-
-    samples.add(sample.clamp(0.04, 0.92).toDouble());
-  }
-
-  return _finalizeVoiceMemoWaveformSamples(samples);
 }
 
 final class _CallNowSheet extends StatelessWidget {
@@ -6258,7 +6198,8 @@ final class _MessageListState extends State<_MessageList> {
       isMedia:
           message.isPhotoMessage ||
           message.isFileMessage ||
-          message.isCallMessage,
+          message.isVoiceMemoMessage,
+      isCall: message.isCallMessage,
     );
 
     ChatMessageAction? selectedAction;
@@ -9451,7 +9392,9 @@ final class _VoiceMemoMessageBubbleState
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<PlayerState>? _playerStateSubscription;
   Duration _playbackPosition = Duration.zero;
+  Duration? _scrubPosition;
   bool _playing = false;
+  bool _draggingWaveform = false;
   String? _cachedAudioPath;
   String? _loadedAudioPath;
   List<double> _waveformSamples = const <double>[];
@@ -9461,6 +9404,10 @@ final class _VoiceMemoMessageBubbleState
     return _waveformCacheKeyFor(widget.attachment, widget.messageId);
   }
 
+  Duration get _displayPlaybackPosition {
+    return _scrubPosition ?? _playbackPosition;
+  }
+
   double get _progress {
     final int durationMs = widget.attachment.duration.inMilliseconds;
 
@@ -9468,7 +9415,7 @@ final class _VoiceMemoMessageBubbleState
       return 0;
     }
 
-    return (_playbackPosition.inMilliseconds / durationMs)
+    return (_displayPlaybackPosition.inMilliseconds / durationMs)
         .clamp(0, 1)
         .toDouble();
   }
@@ -9513,6 +9460,8 @@ final class _VoiceMemoMessageBubbleState
       _audioPathFuture = null;
       _waveformSamples = _initialWaveformSamples();
       _playbackPosition = _initialPlaybackPosition();
+      _scrubPosition = null;
+      _draggingWaveform = false;
     } else {
       _syncWaveformSamplesFromAttachment(clearExisting: sourceChanged);
     }
@@ -9581,13 +9530,7 @@ final class _VoiceMemoMessageBubbleState
       return cachedSamples;
     }
 
-    final List<double> fallbackSamples = _voiceMemoFallbackWaveformSamples(
-      attachment: widget.attachment,
-      messageId: widget.messageId,
-    );
-    _cacheWaveformSamples(fallbackSamples);
-
-    return fallbackSamples;
+    return const <double>[];
   }
 
   Duration _initialPlaybackPosition() {
@@ -9630,12 +9573,7 @@ final class _VoiceMemoMessageBubbleState
     }
 
     if (clearExisting) {
-      final List<double> fallbackSamples = _voiceMemoFallbackWaveformSamples(
-        attachment: widget.attachment,
-        messageId: widget.messageId,
-      );
-      _cacheWaveformSamples(fallbackSamples);
-      _waveformSamples = fallbackSamples;
+      _waveformSamples = const <double>[];
     }
   }
 
@@ -9720,6 +9658,8 @@ final class _VoiceMemoMessageBubbleState
         setState(() {
           _playing = false;
           _playbackPosition = Duration.zero;
+          _scrubPosition = null;
+          _draggingWaveform = false;
         });
         _cachePlaybackPosition(Duration.zero);
         if (_activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
@@ -9879,6 +9819,87 @@ final class _VoiceMemoMessageBubbleState
     return _clampedPlaybackPosition(_playbackPosition);
   }
 
+  Duration _waveformPositionFromLocalDx(double localDx, double width) {
+    final Duration duration = widget.attachment.duration;
+
+    if (duration <= Duration.zero || width <= 0) {
+      return Duration.zero;
+    }
+
+    final double progress = (localDx / width).clamp(0, 1).toDouble();
+
+    return _clampedPlaybackPosition(
+      Duration(microseconds: (duration.inMicroseconds * progress).round()),
+    );
+  }
+
+  void _beginWaveformScrub(Offset localPosition, double width) {
+    final Duration targetPosition = _waveformPositionFromLocalDx(
+      localPosition.dx,
+      width,
+    );
+
+    setState(() {
+      _scrubPosition = targetPosition;
+    });
+  }
+
+  void _updateWaveformScrub(Offset localPosition, double width) {
+    final Duration targetPosition = _waveformPositionFromLocalDx(
+      localPosition.dx,
+      width,
+    );
+
+    if (_scrubPosition == targetPosition) {
+      return;
+    }
+
+    setState(() {
+      _scrubPosition = targetPosition;
+    });
+  }
+
+  void _cancelWaveformScrub() {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _scrubPosition = null;
+      _draggingWaveform = false;
+    });
+  }
+
+  Future<void> _commitWaveformScrub() async {
+    final Duration? targetPosition = _scrubPosition;
+
+    if (targetPosition == null) {
+      _cancelWaveformScrub();
+      return;
+    }
+
+    final Duration clampedPosition = _clampedPlaybackPosition(targetPosition);
+    Duration resolvedPosition = clampedPosition;
+    final AudioPlayer? player = _player;
+
+    if (player != null && _loadedAudioPath != null) {
+      try {
+        await player.seek(clampedPosition);
+      } catch (_) {
+        resolvedPosition = _currentPlaybackPositionForCaching();
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _playbackPosition = resolvedPosition;
+        _scrubPosition = null;
+        _draggingWaveform = false;
+      });
+    }
+    _cachePlaybackPosition(resolvedPosition);
+  }
+
   Future<void> _pausePlayback({
     required bool resetPosition,
     required bool clearActivePlaybackId,
@@ -9896,6 +9917,8 @@ final class _VoiceMemoMessageBubbleState
 
     setState(() {
       _playing = false;
+      _scrubPosition = null;
+      _draggingWaveform = false;
       if (resetPosition) {
         _playbackPosition = Duration.zero;
       } else {
@@ -9924,6 +9947,8 @@ final class _VoiceMemoMessageBubbleState
 
     setState(() {
       _playing = false;
+      _scrubPosition = null;
+      _draggingWaveform = false;
       if (resetPosition) {
         _playbackPosition = Duration.zero;
       }
@@ -10005,15 +10030,14 @@ final class _VoiceMemoMessageBubbleState
 
   @override
   Widget build(BuildContext context) {
-    final double width = math.min(
-      304,
-      math.max(196, MediaQuery.sizeOf(context).width - 128),
-    );
+    final double width = _voiceMemoMessageBubbleWidth(context);
+    final Duration displayPlaybackPosition = _displayPlaybackPosition;
     final bool canPlay =
         widget.attachment.localPath != null ||
         (widget.attachment.audioBytes?.isNotEmpty ?? false) ||
         (widget.attachment.mediaAssetId != null &&
             widget.onCreateMediaAssetAccessUrl != null);
+    final bool canScrub = canPlay && widget.attachment.duration > Duration.zero;
 
     return Transform.scale(
       key: ValueKey<String>('message-pulse-${widget.messageId}'),
@@ -10057,17 +10081,76 @@ final class _VoiceMemoMessageBubbleState
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: SizedBox(
-                        height: 22,
-                        child: _VoiceMemoWaveform(
-                          color: AppColors.grey300,
-                          playedColor: AppColors.grey900,
-                          samples: _waveformSamples,
-                          progress: _progress,
-                          showProgress:
-                              _playbackPosition > Duration.zero &&
-                              _playbackPosition < widget.attachment.duration,
-                        ),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          final double scrubWidth = constraints.maxWidth;
+
+                          return GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTapDown: canScrub
+                                ? (details) {
+                                    _draggingWaveform = false;
+                                    _beginWaveformScrub(
+                                      details.localPosition,
+                                      scrubWidth,
+                                    );
+                                  }
+                                : null,
+                            onTapUp: canScrub
+                                ? (details) {
+                                    _updateWaveformScrub(
+                                      details.localPosition,
+                                      scrubWidth,
+                                    );
+                                    unawaited(_commitWaveformScrub());
+                                  }
+                                : null,
+                            onTapCancel: canScrub
+                                ? () {
+                                    if (!_draggingWaveform) {
+                                      _cancelWaveformScrub();
+                                    }
+                                  }
+                                : null,
+                            onHorizontalDragStart: canScrub
+                                ? (details) {
+                                    _draggingWaveform = true;
+                                    _beginWaveformScrub(
+                                      details.localPosition,
+                                      scrubWidth,
+                                    );
+                                  }
+                                : null,
+                            onHorizontalDragUpdate: canScrub
+                                ? (details) {
+                                    _updateWaveformScrub(
+                                      details.localPosition,
+                                      scrubWidth,
+                                    );
+                                  }
+                                : null,
+                            onHorizontalDragEnd: canScrub
+                                ? (_) {
+                                    unawaited(_commitWaveformScrub());
+                                  }
+                                : null,
+                            onHorizontalDragCancel: canScrub
+                                ? _cancelWaveformScrub
+                                : null,
+                            child: SizedBox(
+                              height: 22,
+                              child: _VoiceMemoWaveform(
+                                color: AppColors.grey300,
+                                playedColor: AppColors.grey900,
+                                samples: _waveformSamples,
+                                progress: _progress,
+                                showProgress:
+                                    displayPlaybackPosition > Duration.zero &&
+                                    widget.attachment.duration > Duration.zero,
+                              ),
+                            ),
+                          );
+                        },
                       ),
                     ),
                     const SizedBox(width: 12),

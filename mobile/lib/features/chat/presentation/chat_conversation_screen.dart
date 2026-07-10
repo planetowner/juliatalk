@@ -804,6 +804,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         initialMessages: _messages,
         currentUserId: widget.currentUser.id,
         currentUserName: widget.currentUser.displayName,
+        currentUserPreferredLanguage: widget.currentUser.preferredLanguage,
         otherParticipantId: widget.otherUser.id,
         otherParticipantName: widget.otherUser.displayName,
         onSendTextMessage: _sendTextMessage,

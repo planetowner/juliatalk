@@ -121,6 +121,13 @@ async def ensure_schema_compatibility(
             "NOT NULL DEFAULT 'complete'"
         )
     )
+    await connection.execute(
+        text(
+            "ALTER TABLE media_assets "
+            "ADD COLUMN IF NOT EXISTS metadata JSONB "
+            "NOT NULL DEFAULT '{}'::jsonb"
+        )
+    )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

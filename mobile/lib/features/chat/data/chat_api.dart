@@ -184,7 +184,8 @@ final class ChatApi {
     final List<String> mediaAssetIds = <String>[];
 
     for (final ChatPhotoAttachment photo in photos) {
-      final String mediaAssetId = photo.mediaAssetId ??
+      final String mediaAssetId =
+          photo.mediaAssetId ??
           await _uploadMediaAsset(
             kind: 'photo',
             fileName: photo.fileName ?? '${photo.assetId}.jpg',
@@ -198,12 +199,14 @@ final class ChatApi {
       mediaAssetIds.add(mediaAssetId);
     }
 
-    return _createMessage(
+    final ChatMessage message = await _createMessage(
       recipientId: recipientId,
       messageType: 'photo',
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{'media_asset_ids': mediaAssetIds},
     );
+
+    return _withLocalPhotoPreviews(message, photos);
   }
 
   Future<ChatMessage> sendFileMessage({
@@ -211,7 +214,8 @@ final class ChatApi {
     required ChatFileAttachment file,
     String? replyToMessageId,
   }) async {
-    final String mediaAssetId = file.mediaAssetId ??
+    final String mediaAssetId =
+        file.mediaAssetId ??
         await _uploadMediaAsset(
           kind: 'file',
           fileName: file.name,
@@ -236,6 +240,9 @@ final class ChatApi {
     String? replyToMessageId,
   }) async {
     final Uint8List? audioBytes = voiceMemo.audioBytes;
+    final List<double> waveformSamples = voiceMemo.waveformSamples
+        .map((double sample) => sample.clamp(0, 1).toDouble())
+        .toList(growable: false);
     final String mediaAssetId;
 
     if (voiceMemo.mediaAssetId != null) {
@@ -248,17 +255,23 @@ final class ChatApi {
         sizeBytes: voiceMemo.sizeBytes ?? audioBytes?.length ?? 0,
         bytes: audioBytes,
         duration: voiceMemo.duration,
+        metadata: waveformSamples.isEmpty
+            ? null
+            : <String, Object?>{'waveform_samples': waveformSamples},
       );
     }
 
-    return _createMessage(
+    final ChatMessage message = await _createMessage(
       recipientId: recipientId,
       messageType: 'voice_memo',
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{
         'media_asset_ids': <String>[mediaAssetId],
+        if (waveformSamples.isNotEmpty) 'waveform_samples': waveformSamples,
       },
     );
+
+    return _withLocalVoiceMemoPreview(message, voiceMemo);
   }
 
   Future<String> _uploadMediaAsset({
@@ -270,6 +283,7 @@ final class ChatApi {
     int? width,
     int? height,
     Duration? duration,
+    Map<String, Object?>? metadata,
   }) async {
     if (bytes == null || bytes.isEmpty) {
       throw const ChatApiException('The selected media file is empty.');
@@ -283,9 +297,10 @@ final class ChatApi {
         'file_name': fileName,
         'mime_type': mimeType,
         'size_bytes': sizeBytes > 0 ? sizeBytes : bytes.length,
-        if (width != null) 'width': width,
-        if (height != null) 'height': height,
+        'width': ?width,
+        'height': ?height,
         if (duration != null) 'duration_ms': duration.inMilliseconds,
+        if (metadata != null && metadata.isNotEmpty) 'metadata': metadata,
       }),
     );
 
@@ -317,13 +332,11 @@ final class ChatApi {
       'upload_url',
     );
     final Object? uploadHeadersJson = decodedBody['upload_headers'];
-    final Map<String, String> uploadHeaders = uploadHeadersJson
-            is Map<String, dynamic>
+    final Map<String, String> uploadHeaders =
+        uploadHeadersJson is Map<String, dynamic>
         ? uploadHeadersJson.map(
-            (String key, dynamic value) => MapEntry<String, String>(
-              key,
-              value.toString(),
-            ),
+            (String key, dynamic value) =>
+                MapEntry<String, String>(key, value.toString()),
           )
         : <String, String>{'Content-Type': mimeType};
 
@@ -359,9 +372,7 @@ final class ChatApi {
     return mediaAssetId;
   }
 
-  Future<Uri> createMediaAssetAccessUrl({
-    required String mediaAssetId,
-  }) async {
+  Future<Uri> createMediaAssetAccessUrl({required String mediaAssetId}) async {
     final http.Response response = await _client.get(
       _baseUri.resolve('/media-assets/$mediaAssetId/access'),
       headers: _headers,
@@ -381,12 +392,81 @@ final class ChatApi {
     final Object? decodedBody = jsonDecode(response.body);
 
     if (decodedBody is! Map<String, dynamic>) {
-      throw const ChatApiException(
-        'The server returned an invalid media URL.',
-      );
+      throw const ChatApiException('The server returned an invalid media URL.');
     }
 
     return Uri.parse(_requiredString(decodedBody['access_url'], 'access_url'));
+  }
+
+  ChatMessage _withLocalPhotoPreviews(
+    ChatMessage message,
+    List<ChatPhotoAttachment> localPhotos,
+  ) {
+    final List<ChatPhotoAttachment> serverPhotos = message.photoAttachments;
+
+    if (serverPhotos.isEmpty || localPhotos.isEmpty) {
+      return message;
+    }
+
+    return message.copyWith(
+      photoAttachments: List<ChatPhotoAttachment>.generate(
+        serverPhotos.length,
+        (int index) {
+          final ChatPhotoAttachment serverPhoto = serverPhotos[index];
+
+          if (index >= localPhotos.length) {
+            return serverPhoto;
+          }
+
+          final ChatPhotoAttachment localPhoto = localPhotos[index];
+
+          return ChatPhotoAttachment(
+            assetId: serverPhoto.assetId,
+            mediaAssetId: serverPhoto.mediaAssetId,
+            previewBytes: serverPhoto.previewBytes ?? localPhoto.previewBytes,
+            width: serverPhoto.width > 0 ? serverPhoto.width : localPhoto.width,
+            height: serverPhoto.height > 0
+                ? serverPhoto.height
+                : localPhoto.height,
+            fileName: serverPhoto.fileName ?? localPhoto.fileName,
+            mimeType: serverPhoto.mimeType ?? localPhoto.mimeType,
+            sizeBytes: serverPhoto.sizeBytes ?? localPhoto.sizeBytes,
+            uploadBytes: localPhoto.uploadBytes,
+          );
+        },
+        growable: false,
+      ),
+    );
+  }
+
+  ChatMessage _withLocalVoiceMemoPreview(
+    ChatMessage message,
+    ChatVoiceMemoAttachment localVoiceMemo,
+  ) {
+    final ChatVoiceMemoAttachment? serverVoiceMemo =
+        message.voiceMemoAttachment;
+
+    if (serverVoiceMemo == null) {
+      return message;
+    }
+
+    return message.copyWith(
+      voiceMemoAttachment: ChatVoiceMemoAttachment(
+        duration: serverVoiceMemo.duration > Duration.zero
+            ? serverVoiceMemo.duration
+            : localVoiceMemo.duration,
+        audioBytes: serverVoiceMemo.audioBytes ?? localVoiceMemo.audioBytes,
+        mimeType: serverVoiceMemo.mimeType ?? localVoiceMemo.mimeType,
+        fileName: serverVoiceMemo.fileName ?? localVoiceMemo.fileName,
+        sizeBytes: serverVoiceMemo.sizeBytes ?? localVoiceMemo.sizeBytes,
+        localPath: localVoiceMemo.localPath ?? serverVoiceMemo.localPath,
+        mediaAssetId:
+            serverVoiceMemo.mediaAssetId ?? localVoiceMemo.mediaAssetId,
+        waveformSamples: serverVoiceMemo.waveformSamples.isNotEmpty
+            ? serverVoiceMemo.waveformSamples
+            : localVoiceMemo.waveformSamples,
+      ),
+    );
   }
 
   Future<ChatMessage> sendCallMessage({
@@ -531,6 +611,10 @@ final class ChatApi {
       translatedContent: translates
           ? json['translated_content'] as String?
           : null,
+      sourceLanguage: translates ? json['source_language'] as String? : null,
+      translatedLanguage: translates
+          ? json['translated_language'] as String?
+          : null,
       translationStatus: translates
           ? _translationStatusFromApi(translationStatus)
           : ChatTranslationStatus.none,
@@ -638,7 +722,8 @@ final class ChatApi {
   ) {
     final int durationMs = metadata['duration_ms'] as int;
     final Object? audioBase64 = metadata['audio_base64'];
-    final Uint8List? audioBytes = audioBase64 is String && audioBase64.isNotEmpty
+    final Uint8List? audioBytes =
+        audioBase64 is String && audioBase64.isNotEmpty
         ? base64Decode(audioBase64)
         : null;
 
@@ -649,7 +734,24 @@ final class ChatApi {
       fileName: metadata['file_name'] as String?,
       sizeBytes: metadata['size_bytes'] as int?,
       mediaAssetId: metadata['media_asset_id'] as String?,
+      waveformSamples: _waveformSamplesFromJson(metadata['waveform_samples']),
     );
+  }
+
+  List<double> _waveformSamplesFromJson(Object? json) {
+    if (json is! List) {
+      return const <double>[];
+    }
+
+    final List<double> samples = <double>[];
+
+    for (final Object? sample in json) {
+      if (sample is num) {
+        samples.add(sample.toDouble().clamp(0, 1).toDouble());
+      }
+    }
+
+    return List<double>.unmodifiable(samples);
   }
 
   ChatCallAttachment _callFromMetadata(Map<String, dynamic> metadata) {

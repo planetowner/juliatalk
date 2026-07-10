@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:juliatalk/features/chat/domain/chat_message.dart';
+import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
 import '../../../support/juliatalk_preview_app.dart';
 
@@ -23,6 +25,138 @@ Future<void> _scrollConversationToStart(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('target-language incoming text does not request translation', (
+    WidgetTester tester,
+  ) async {
+    int translationRequests = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatConversationView(
+          initialMessages: <ChatMessage>[
+            ChatMessage(
+              id: 'target-language',
+              senderId: '2',
+              recipientId: '1',
+              content: '앞으로 너에게도 내 진심을 자주 말해 줄게',
+              createdAt: DateTime(2026, 7, 10, 19, 21),
+              sourceLanguage: 'zh-CN',
+              translatedLanguage: 'ko',
+            ),
+          ],
+          currentUserPreferredLanguage: 'ko',
+          onTranslateMessage: (ChatMessage message) async {
+            translationRequests++;
+            return 'translated';
+          },
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('앞으로 너에게도 내 진심을 자주 말해 줄게'));
+    await tester.pumpAndSettle();
+
+    expect(translationRequests, 0);
+    expect(find.text('Translating…'), findsNothing);
+  });
+
+  testWidgets('target-language failed translation status is hidden', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatConversationView(
+          initialMessages: <ChatMessage>[
+            ChatMessage(
+              id: 'target-language-failed',
+              senderId: '2',
+              recipientId: '1',
+              content: '너는나를존중해야한다나는발롱도르5개와수많은개인트로피를들어올렸으며',
+              createdAt: DateTime(2026, 7, 10, 19, 21),
+              translationStatus: ChatTranslationStatus.failed,
+              translationFailureReason: 'Server translation failed',
+              sourceLanguage: 'zh-CN',
+              translatedLanguage: 'ko',
+            ),
+          ],
+          currentUserPreferredLanguage: 'ko',
+          onTranslateMessage: (ChatMessage message) async {
+            return 'translated';
+          },
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('너는나를존중해야한다'), findsOneWidget);
+    expect(find.textContaining('Translation failed:'), findsNothing);
+    expect(find.text('Retry'), findsNothing);
+  });
+
+  testWidgets('failed translation status does not widen text bubble', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    const String content = '欧巴我快要登机了但是我还想再跟你说很多很多话';
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatConversationView(
+          initialMessages: <ChatMessage>[
+            ChatMessage(
+              id: 'normal-width',
+              senderId: '2',
+              recipientId: '1',
+              content: content,
+              createdAt: DateTime(2026, 7, 10, 19, 21),
+              sourceLanguage: 'zh-CN',
+              translatedLanguage: 'ko',
+            ),
+            ChatMessage(
+              id: 'failed-width',
+              senderId: '2',
+              recipientId: '1',
+              content: content,
+              createdAt: DateTime(2026, 7, 10, 19, 22),
+              translationStatus: ChatTranslationStatus.failed,
+              translationFailureReason: 'Server translation failed',
+              sourceLanguage: 'zh-CN',
+              translatedLanguage: 'ko',
+            ),
+          ],
+          currentUserPreferredLanguage: 'ko',
+          onTranslateMessage: (ChatMessage message) async {
+            return 'translated';
+          },
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    final double normalWidth = tester
+        .getSize(
+          find.byKey(const ValueKey<String>('incoming-bubble-normal-width')),
+        )
+        .width;
+    final double failedWidth = tester
+        .getSize(
+          find.byKey(const ValueKey<String>('incoming-bubble-failed-width')),
+        )
+        .width;
+
+    expect(find.textContaining('Translation failed:'), findsOneWidget);
+    expect(failedWidth, closeTo(normalWidth, 0.5));
+  });
+
   testWidgets('first tap shows translating state for five seconds', (
     WidgetTester tester,
   ) async {

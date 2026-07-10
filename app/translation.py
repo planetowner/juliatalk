@@ -82,6 +82,80 @@ def language_name(language_code: str) -> str:
     return name
 
 
+def normalize_language_code(
+    language_code: str | None,
+) -> str | None:
+    normalized = (language_code or "").strip().replace(
+        "_",
+        "-",
+    ).lower()
+
+    if not normalized:
+        return None
+
+    if normalized == "ko" or normalized.startswith("ko-"):
+        return "ko"
+
+    if normalized == "zh" or normalized.startswith("zh-"):
+        return "zh-CN"
+
+    return normalized
+
+
+def infer_text_language(text: str) -> str | None:
+    korean_count = 0
+    chinese_count = 0
+
+    for character in text:
+        codepoint = ord(character)
+
+        if (
+            0xAC00 <= codepoint <= 0xD7AF
+            or 0x1100 <= codepoint <= 0x11FF
+            or 0x3130 <= codepoint <= 0x318F
+        ):
+            korean_count += 1
+        elif (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+        ):
+            chinese_count += 1
+
+    if korean_count == 0 and chinese_count == 0:
+        return None
+
+    if korean_count >= chinese_count:
+        return "ko"
+
+    return "zh-CN"
+
+
+def should_translate_text(
+    text: str,
+    *,
+    source_language: str | None,
+    target_language: str | None,
+) -> bool:
+    cleaned_text = text.strip()
+
+    if not cleaned_text:
+        return False
+
+    normalized_target = normalize_language_code(target_language)
+    inferred_language = infer_text_language(cleaned_text)
+
+    if normalized_target is not None and inferred_language is not None:
+        return inferred_language != normalized_target
+
+    normalized_source = normalize_language_code(source_language)
+
+    if normalized_source is not None and normalized_target is not None:
+        return normalized_source != normalized_target
+
+    return inferred_language is not None
+
+
 def build_context_text(
     context_messages: Sequence[str],
 ) -> str:

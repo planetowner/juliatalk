@@ -79,6 +79,7 @@ final class ChatVoiceMemoAttachment {
     this.sizeBytes,
     this.localPath,
     this.mediaAssetId,
+    this.waveformSamples = const <double>[],
   });
 
   final Duration duration;
@@ -88,6 +89,7 @@ final class ChatVoiceMemoAttachment {
   final int? sizeBytes;
   final String? localPath;
   final String? mediaAssetId;
+  final List<double> waveformSamples;
 
   bool get hasPlayableAudio {
     return localPath != null ||
@@ -107,6 +109,8 @@ final class ChatMessage {
     this.editedAt,
     this.translationStatus = ChatTranslationStatus.none,
     this.translatedContent,
+    this.sourceLanguage,
+    this.translatedLanguage,
     this.translationFailureReason,
     this.replyTo,
     this.photoAttachments = const <ChatPhotoAttachment>[],
@@ -125,6 +129,8 @@ final class ChatMessage {
 
   final ChatTranslationStatus translationStatus;
   final String? translatedContent;
+  final String? sourceLanguage;
+  final String? translatedLanguage;
   final String? translationFailureReason;
   final ChatReplyReference? replyTo;
   final List<ChatPhotoAttachment> photoAttachments;
@@ -184,6 +190,8 @@ final class ChatMessage {
     DateTime? editedAt,
     ChatTranslationStatus? translationStatus,
     String? translatedContent,
+    String? sourceLanguage,
+    String? translatedLanguage,
     String? translationFailureReason,
     ChatReplyReference? replyTo,
     List<ChatPhotoAttachment>? photoAttachments,
@@ -212,6 +220,8 @@ final class ChatMessage {
       translatedContent: clearTranslatedContent
           ? null
           : translatedContent ?? this.translatedContent,
+      sourceLanguage: sourceLanguage ?? this.sourceLanguage,
+      translatedLanguage: translatedLanguage ?? this.translatedLanguage,
       translationFailureReason: clearTranslationFailureReason
           ? null
           : translationFailureReason ?? this.translationFailureReason,

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import mimetypes
 from pathlib import PurePosixPath
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -66,6 +67,47 @@ def _storage_key(
     file_name: str,
 ) -> str:
     return f"users/{user_id}/media/{media_asset_id}/{file_name}"
+
+
+def _normalized_waveform_samples(metadata: dict[str, Any] | None) -> list[float]:
+    if metadata is None:
+        return []
+
+    value = metadata.get("waveform_samples")
+
+    if not isinstance(value, list):
+        return []
+
+    samples: list[float] = []
+
+    for item in value[:80]:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+
+        sample = float(item)
+
+        if not math.isfinite(sample):
+            continue
+
+        samples.append(max(0.0, min(1.0, sample)))
+
+    return samples
+
+
+def _metadata_for_storage(
+    *,
+    kind: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if kind != "voice_memo":
+        return {}
+
+    waveform_samples = _normalized_waveform_samples(metadata)
+
+    if not waveform_samples:
+        return {}
+
+    return {"waveform_samples": waveform_samples}
 
 
 async def _user_can_access_media_asset(
@@ -139,6 +181,10 @@ async def create_media_asset_upload(
         width=media_data.width,
         height=media_data.height,
         duration_ms=media_data.duration_ms,
+        metadata_json=_metadata_for_storage(
+            kind=media_data.kind,
+            metadata=media_data.metadata,
+        ),
         upload_status="pending",
     )
     session.add(media_asset)

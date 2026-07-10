@@ -131,6 +131,8 @@ class MediaAssetUploadCreate(BaseModel):
         ge=0,
     )
 
+    metadata: dict[str, Any] | None = None
+
 
 class MediaAssetUploadRead(BaseModel):
     media_asset_id: UUID

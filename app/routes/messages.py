@@ -1,5 +1,6 @@
 import base64
 import logging
+import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
@@ -49,6 +50,7 @@ from app.schemas import (
 from app.translation import (
     DEEPSEEK_MODEL,
     TRANSLATION_PROVIDER_NAME,
+    should_translate_text,
     translate_message,
 )
 from app.websocket_manager import connection_manager
@@ -242,6 +244,47 @@ def require_media_asset_ids(
     return media_asset_ids
 
 
+def normalized_waveform_samples(metadata: dict[str, Any] | None) -> list[float]:
+    if metadata is None:
+        return []
+
+    value = metadata.get("waveform_samples")
+
+    if not isinstance(value, list):
+        return []
+
+    samples: list[float] = []
+
+    for item in value[:80]:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+
+        sample = float(item)
+
+        if not math.isfinite(sample):
+            continue
+
+        samples.append(max(0.0, min(1.0, sample)))
+
+    return samples
+
+
+def message_metadata_for_storage(
+    message_type: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if message_type == "link" and metadata is not None:
+        return metadata
+
+    if message_type == "voice_memo":
+        waveform_samples = normalized_waveform_samples(metadata)
+
+        if waveform_samples:
+            return {"waveform_samples": waveform_samples}
+
+    return {}
+
+
 def validate_message_metadata(
     message_type: str,
     metadata: dict[str, Any] | None,
@@ -396,6 +439,13 @@ def build_metadata(
 
         _, media_asset = attachments[0]
         metadata = media_asset_metadata(media_asset)
+        waveform_samples = normalized_waveform_samples(message.metadata_json)
+
+        if not waveform_samples:
+            waveform_samples = normalized_waveform_samples(media_asset.metadata_json)
+
+        if waveform_samples:
+            metadata["waveform_samples"] = waveform_samples
 
         if (
             media_asset.storage_key is None
@@ -545,8 +595,19 @@ async def build_message_reads(
             (message.id, recipient.preferred_language)
         )
         read_receipt = reads.get((message.id, recipient_id))
+        source_language = (
+            message.source_language or sender.preferred_language
+        )
+        needs_translation = (
+            message.kind == MessageKind.TEXT
+            and should_translate_text(
+                message.body,
+                source_language=source_language,
+                target_language=recipient.preferred_language,
+            )
+        )
 
-        if message.kind == MessageKind.TEXT:
+        if message.kind == MessageKind.TEXT and needs_translation:
             translation_status = (
                 translation.status.value
                 if translation is not None
@@ -567,6 +628,11 @@ async def build_message_reads(
                 if translation is not None
                 else None
             )
+        elif message.kind == MessageKind.TEXT:
+            translation_status = TranslationStatus.COMPLETED.value
+            translated_content = None
+            translation_provider = None
+            translation_model = None
         else:
             translation_status = TranslationStatus.COMPLETED.value
             translated_content = None
@@ -596,9 +662,7 @@ async def build_message_reads(
                     if read_receipt is not None
                     else None
                 ),
-                source_language=(
-                    message.source_language or sender.preferred_language
-                ),
+                source_language=source_language,
                 translated_content=translated_content,
                 translated_language=recipient.preferred_language,
                 translation_status=translation_status,
@@ -656,6 +720,10 @@ async def translate_and_publish_message(message_id: UUID) -> None:
         if sender is None or recipient is None:
             return
 
+        source_language = (
+            message.source_language or sender.preferred_language
+        )
+
         translation = await session.scalar(
             select(MessageTranslation).where(
                 MessageTranslation.message_id == message.id,
@@ -664,12 +732,42 @@ async def translate_and_publish_message(message_id: UUID) -> None:
             )
         )
 
+        if not should_translate_text(
+            message.body,
+            source_language=source_language,
+            target_language=recipient.preferred_language,
+        ):
+            if translation is not None:
+                translation.translated_body = message.body
+                translation.status = TranslationStatus.COMPLETED
+                translation.provider = None
+                translation.model = None
+                translation.error_message = None
+                translation.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+                await session.refresh(message)
+
+                message_read = await build_single_message_read(
+                    session,
+                    message,
+                    direct_conversation=direct_conversation,
+                )
+                websocket_event = {
+                    "type": "message.translation.updated",
+                    "message": message_read.model_dump(mode="json"),
+                }
+
+                await send_to_direct_participants(
+                    direct_conversation,
+                    websocket_event,
+                )
+
+            return
+
         if translation is None:
             translation = MessageTranslation(
                 message_id=message.id,
-                source_language=(
-                    message.source_language or sender.preferred_language
-                ),
+                source_language=source_language,
                 target_language=recipient.preferred_language,
                 status=TranslationStatus.PENDING,
             )
@@ -706,9 +804,7 @@ async def translate_and_publish_message(message_id: UUID) -> None:
         try:
             translation_result = await translate_message(
                 text=message.body,
-                source_language=(
-                    message.source_language or sender.preferred_language
-                ),
+                source_language=source_language,
                 target_language=recipient.preferred_language,
                 context_messages=context_messages,
             )
@@ -818,11 +914,9 @@ async def create_message(
         sender_id=current_user.id,
         kind=MessageKind(message_data.message_type),
         body=content,
-        metadata_json=(
-            message_data.metadata
-            if message_data.message_type == "link"
-            and message_data.metadata is not None
-            else {}
+        metadata_json=message_metadata_for_storage(
+            message_data.message_type,
+            message_data.metadata,
         ),
         reply_to_message_id=message_data.reply_to_message_id,
         source_language=current_user.preferred_language,
@@ -847,7 +941,16 @@ async def create_message(
         metadata=message_data.metadata,
     )
 
-    if message.kind == MessageKind.TEXT:
+    should_translate_created_message = (
+        message.kind == MessageKind.TEXT
+        and should_translate_text(
+            content,
+            source_language=current_user.preferred_language,
+            target_language=recipient.preferred_language,
+        )
+    )
+
+    if should_translate_created_message:
         session.add(
             MessageTranslation(
                 message_id=message.id,
@@ -885,7 +988,7 @@ async def create_message(
         message_created_event,
     )
 
-    if message.kind == MessageKind.TEXT:
+    if should_translate_created_message:
         background_tasks.add_task(translate_and_publish_message, message.id)
 
     return message_read
@@ -1188,8 +1291,18 @@ async def update_message(
         message.sender_id,
     )
     recipient = await session.get(User, recipient_id)
+    should_translate_updated_message = False
 
     if recipient is not None:
+        source_language = (
+            message.source_language
+            or current_user.preferred_language
+        )
+        should_translate_updated_message = should_translate_text(
+            content,
+            source_language=source_language,
+            target_language=recipient.preferred_language,
+        )
         translation = await session.scalar(
             select(MessageTranslation).where(
                 MessageTranslation.message_id == message.id,
@@ -1198,23 +1311,27 @@ async def update_message(
             )
         )
 
-        if translation is None:
+        if translation is None and should_translate_updated_message:
             translation = MessageTranslation(
                 message_id=message.id,
-                source_language=(
-                    message.source_language
-                    or current_user.preferred_language
-                ),
+                source_language=source_language,
                 target_language=recipient.preferred_language,
             )
             session.add(translation)
 
-        translation.translated_body = None
-        translation.status = TranslationStatus.PENDING
-        translation.provider = None
-        translation.model = None
-        translation.error_message = None
-        translation.updated_at = now
+        if translation is not None:
+            translation.translated_body = (
+                None if should_translate_updated_message else content
+            )
+            translation.status = (
+                TranslationStatus.PENDING
+                if should_translate_updated_message
+                else TranslationStatus.COMPLETED
+            )
+            translation.provider = None
+            translation.model = None
+            translation.error_message = None
+            translation.updated_at = now
 
     await session.commit()
     await session.refresh(message)
@@ -1233,7 +1350,8 @@ async def update_message(
         },
     )
 
-    background_tasks.add_task(translate_and_publish_message, message.id)
+    if should_translate_updated_message:
+        background_tasks.add_task(translate_and_publish_message, message.id)
 
     return message_read
 

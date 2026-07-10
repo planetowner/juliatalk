@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -200,6 +199,7 @@ final class ChatConversationView extends StatefulWidget {
     this.initialMessages,
     this.currentUserId = _currentUserId,
     this.currentUserName = _currentUserName,
+    this.currentUserPreferredLanguage = _currentUserPreferredLanguage,
     this.otherParticipantId = _otherParticipantId,
     this.otherParticipantName = _otherParticipantName,
     this.onSendTextMessage,
@@ -220,6 +220,7 @@ final class ChatConversationView extends StatefulWidget {
   final List<ChatMessage>? initialMessages;
   final String currentUserId;
   final String currentUserName;
+  final String currentUserPreferredLanguage;
   final String otherParticipantId;
   final String otherParticipantName;
   final ChatTextMessageSender? onSendTextMessage;
@@ -237,6 +238,7 @@ final class ChatConversationView extends StatefulWidget {
 
   static const String _currentUserId = '1';
   static const String _currentUserName = 'Me';
+  static const String _currentUserPreferredLanguage = 'ko';
   static const String _otherParticipantId = '2';
   static const String _otherParticipantName = 'Lia';
   static const Color _chatBackgroundColor = AppColors.white;
@@ -258,6 +260,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   final FocusNode _searchFocusNode = FocusNode();
   final GlobalKey _messageInputHostKey = GlobalKey();
   final GlobalKey _composerMeasureKey = GlobalKey();
+  final Map<String, Future<Uri>> _mediaAssetAccessUrlFutures =
+      <String, Future<Uri>>{};
+  late final ChatMediaAssetAccessUrlCreator _mediaAssetAccessUrlCreator =
+      _createCachedMediaAssetAccessUrl;
 
   late final ChatPhotoLibrary _photoLibrary;
 
@@ -316,6 +322,16 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   @override
+  void didUpdateWidget(covariant ChatConversationView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.onCreateMediaAssetAccessUrl !=
+        widget.onCreateMediaAssetAccessUrl) {
+      _mediaAssetAccessUrlFutures.clear();
+    }
+  }
+
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
 
@@ -334,6 +350,36 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _searchFocusNode.dispose();
 
     super.dispose();
+  }
+
+  ChatMediaAssetAccessUrlCreator? get _cachedMediaAssetAccessUrlCreator {
+    if (widget.onCreateMediaAssetAccessUrl == null) {
+      return null;
+    }
+
+    return _mediaAssetAccessUrlCreator;
+  }
+
+  Future<Uri> _createCachedMediaAssetAccessUrl({required String mediaAssetId}) {
+    return _mediaAssetAccessUrlFutures.putIfAbsent(mediaAssetId, () {
+      return _loadMediaAssetAccessUrl(mediaAssetId);
+    });
+  }
+
+  Future<Uri> _loadMediaAssetAccessUrl(String mediaAssetId) async {
+    try {
+      final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+          widget.onCreateMediaAssetAccessUrl;
+
+      if (createAccessUrl == null) {
+        throw StateError('Media asset access URL creator is unavailable.');
+      }
+
+      return await createAccessUrl(mediaAssetId: mediaAssetId);
+    } catch (_) {
+      _mediaAssetAccessUrlFutures.remove(mediaAssetId);
+      rethrow;
+    }
   }
 
   double _currentKeyboardHeight() {
@@ -635,8 +681,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
               return null;
             }
 
-            final Uint8List? previewBytes =
-                await _photoLibrary.loadMessagePreview(assetId: asset.id);
+            final Uint8List? previewBytes = await _photoLibrary
+                .loadMessagePreview(assetId: asset.id);
 
             return ChatPhotoAttachment(
               assetId: asset.id,
@@ -732,7 +778,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
             initialIndex: resolvedInitialIndex,
             senderName: senderName,
             sentAt: message.createdAt,
-            onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
+            onCreateMediaAssetAccessUrl: _cachedMediaAssetAccessUrlCreator,
           );
         },
       ),
@@ -870,6 +916,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
+    final ScaffoldMessengerState scaffoldMessenger = ScaffoldMessenger.of(
+      context,
+    );
     final PlatformFile file = result.files.first;
     Uint8List? fileBytes = file.bytes;
 
@@ -878,7 +927,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     if (!mounted || fileBytes == null || fileBytes.isEmpty) {
-      ScaffoldMessenger.of(context)
+      scaffoldMessenger
         ..hideCurrentSnackBar()
         ..showSnackBar(
           const SnackBar(content: Text('The selected file could not be read.')),
@@ -933,14 +982,14 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     final ChatVoiceMemoAttachment? voiceMemo =
         await showModalBottomSheet<ChatVoiceMemoAttachment>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      barrierColor: AppColors.black.withAlpha(112),
-      isScrollControlled: true,
-      builder: (BuildContext context) {
-        return const _VoiceMemoSheet();
-      },
-    );
+          context: context,
+          backgroundColor: Colors.transparent,
+          barrierColor: AppColors.black.withAlpha(112),
+          isScrollControlled: true,
+          builder: (BuildContext context) {
+            return const _VoiceMemoSheet();
+          },
+        );
 
     if (!mounted || voiceMemo == null) {
       return;
@@ -2167,13 +2216,15 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       key: _messageListKey,
                       initialMessages: widget.initialMessages,
                       currentUserId: widget.currentUserId,
+                      currentUserPreferredLanguage:
+                          widget.currentUserPreferredLanguage,
                       otherParticipantId: widget.otherParticipantId,
                       otherParticipantName: widget.otherParticipantName,
                       onTranslateMessage: widget.onTranslateMessage,
                       onDeleteMessage: widget.onDeleteMessage,
                       onPhotoMessageTap: _openPhotoViewer,
                       onCreateMediaAssetAccessUrl:
-                          widget.onCreateMediaAssetAccessUrl,
+                          _cachedMediaAssetAccessUrlCreator,
                       translationDelay: widget.translationDelay,
                       initialClock: widget.initialClock,
                       nextLocalMessageId: widget.nextLocalMessageId,
@@ -3354,6 +3405,291 @@ String _formatVoiceMemoBubbleDuration(Duration duration) {
   return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }
 
+const int _voiceMemoWaveformSampleCount = 42;
+const int _voiceMemoWaveformRawSampleLimit = 1800;
+final ValueNotifier<String?> _activeVoiceMemoPlaybackMessageId =
+    ValueNotifier<String?>(null);
+final Map<String, List<double>> _voiceMemoWaveformSamplesByCacheKey =
+    <String, List<double>>{};
+final Map<String, Duration> _voiceMemoPlaybackPositionsByCacheKey =
+    <String, Duration>{};
+
+double _voiceMemoSampleFromAmplitude(double dbfs) {
+  if (!dbfs.isFinite) {
+    return 0.03;
+  }
+
+  if (dbfs <= -58) {
+    return 0.03;
+  }
+
+  final double normalized = ((dbfs.clamp(-55.0, -8.0) + 55) / 47)
+      .clamp(0.0, 1.0)
+      .toDouble();
+
+  return math.pow(normalized, 1.08).toDouble().clamp(0.03, 1).toDouble();
+}
+
+double _clampVoiceMemoWaveformSample(num sample) {
+  return sample.toDouble().clamp(0, 1).toDouble();
+}
+
+List<double> _resampleVoiceMemoWaveformSamples(List<double> samples) {
+  if (samples.isEmpty) {
+    return const <double>[];
+  }
+
+  if (samples.length == _voiceMemoWaveformSampleCount) {
+    return List<double>.unmodifiable(
+      samples.map(_clampVoiceMemoWaveformSample),
+    );
+  }
+
+  final List<double> resampled = <double>[];
+
+  for (int index = 0; index < _voiceMemoWaveformSampleCount; index++) {
+    final double bucketStart =
+        samples.length * index / _voiceMemoWaveformSampleCount;
+    final double bucketEnd =
+        samples.length * (index + 1) / _voiceMemoWaveformSampleCount;
+    final int start = bucketStart.floor().clamp(0, samples.length - 1).toInt();
+    final int end = bucketEnd.ceil().clamp(start + 1, samples.length).toInt();
+
+    double peak = 0;
+    double total = 0;
+
+    for (int sampleIndex = start; sampleIndex < end; sampleIndex++) {
+      final double sample = _clampVoiceMemoWaveformSample(samples[sampleIndex]);
+      peak = math.max(peak, sample);
+      total += sample;
+    }
+
+    final double average = total / (end - start);
+    resampled.add((peak * 0.7) + (average * 0.3));
+  }
+
+  return List<double>.unmodifiable(resampled);
+}
+
+List<double> _normalizeVoiceMemoWaveformSamples(List<double> samples) {
+  if (samples.isEmpty) {
+    return const <double>[];
+  }
+
+  final List<double> normalizedInput = samples
+      .map(_clampVoiceMemoWaveformSample)
+      .toList(growable: false);
+  final List<double> sortedSamples = List<double>.of(normalizedInput)..sort();
+  final double low =
+      sortedSamples[(sortedSamples.length * 0.12).floor().clamp(
+        0,
+        sortedSamples.length - 1,
+      )];
+  final double high =
+      sortedSamples[(sortedSamples.length * 0.92).floor().clamp(
+        0,
+        sortedSamples.length - 1,
+      )];
+  final double range = high - low;
+  final double peak = sortedSamples.last;
+
+  if (peak <= 0.08) {
+    return List<double>.unmodifiable(List<double>.filled(samples.length, 0.04));
+  }
+
+  final List<double> shapedSamples = <double>[];
+
+  for (final double sample in normalizedInput) {
+    final double relative = range > 0.025
+        ? ((sample - low) / range).clamp(0.0, 1.0).toDouble()
+        : sample.clamp(0.0, 1.0).toDouble();
+    final double shaped = math.pow(relative, 0.76).toDouble();
+    final double displayed = shaped < 0.1
+        ? 0.04 + (shaped * 0.45)
+        : 0.12 + (shaped * 0.84);
+
+    shapedSamples.add(displayed.clamp(0.04, 1).toDouble());
+  }
+
+  return List<double>.unmodifiable(
+    List<double>.generate(shapedSamples.length, (int index) {
+      final double previous = shapedSamples[math.max(0, index - 1)];
+      final double current = shapedSamples[index];
+      final double next =
+          shapedSamples[math.min(shapedSamples.length - 1, index + 1)];
+
+      return ((current * 0.72) + (previous * 0.14) + (next * 0.14))
+          .clamp(0.04, 1)
+          .toDouble();
+    }, growable: false),
+  );
+}
+
+List<double> _finalizeVoiceMemoWaveformSamples(List<double> samples) {
+  return _normalizeVoiceMemoWaveformSamples(
+    _resampleVoiceMemoWaveformSamples(samples),
+  );
+}
+
+List<double> _voiceMemoWaveformSamplesForStorage(
+  List<double> samples, {
+  Uint8List? fallbackAudioBytes,
+}) {
+  if (samples.length == _voiceMemoWaveformSampleCount) {
+    return List<double>.unmodifiable(
+      samples.map(_clampVoiceMemoWaveformSample),
+    );
+  }
+
+  if (samples.isNotEmpty) {
+    return _finalizeVoiceMemoWaveformSamples(samples);
+  }
+
+  if (fallbackAudioBytes == null || fallbackAudioBytes.isEmpty) {
+    return const <double>[];
+  }
+
+  return _voiceMemoWaveformSamplesFromBytes(fallbackAudioBytes);
+}
+
+List<double> _appendVoiceMemoWaveformSample(
+  List<double> samples,
+  double sample,
+) {
+  final List<double> nextSamples = List<double>.of(samples)
+    ..add(_clampVoiceMemoWaveformSample(sample));
+
+  if (nextSamples.length <= _voiceMemoWaveformRawSampleLimit) {
+    return List<double>.unmodifiable(nextSamples);
+  }
+
+  return List<double>.unmodifiable(
+    nextSamples.sublist(nextSamples.length - _voiceMemoWaveformRawSampleLimit),
+  );
+}
+
+List<double> _voiceMemoWaveformSamplesFromBytes(Uint8List bytes) {
+  if (bytes.isEmpty) {
+    return const <double>[];
+  }
+
+  final int offset = bytes.length > 1400 ? 1024 : 0;
+  final int usableLength = bytes.length - offset;
+
+  if (usableLength <= 0) {
+    return const <double>[];
+  }
+
+  final List<double> samples = <double>[];
+
+  for (int index = 0; index < _voiceMemoWaveformSampleCount; index++) {
+    final int start =
+        offset +
+        ((usableLength * index) / _voiceMemoWaveformSampleCount).floor();
+    final int end =
+        offset +
+        ((usableLength * (index + 1)) / _voiceMemoWaveformSampleCount).floor();
+
+    if (end <= start) {
+      samples.add(0.04);
+      continue;
+    }
+
+    double totalDeviation = 0;
+    double totalDelta = 0;
+    int minByte = 255;
+    int maxByte = 0;
+    int previousByte = bytes[math.max(0, start - 1)];
+
+    for (int byteIndex = start; byteIndex < end; byteIndex++) {
+      final int byte = bytes[byteIndex];
+      totalDeviation += (byte - 128).abs();
+      totalDelta += (byte - previousByte).abs();
+      minByte = math.min(minByte, byte);
+      maxByte = math.max(maxByte, byte);
+      previousByte = byte;
+    }
+
+    final double averageDeviation = totalDeviation / ((end - start) * 128);
+    final double averageDelta = totalDelta / ((end - start) * 255);
+    final double byteRange = (maxByte - minByte) / 255;
+    final double normalized =
+        (averageDeviation * 0.2) + (averageDelta * 0.48) + (byteRange * 0.32);
+
+    samples.add(normalized);
+  }
+
+  return _finalizeVoiceMemoWaveformSamples(samples);
+}
+
+String _safeVoiceMemoCacheKey(String value) {
+  return value.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+}
+
+int _stableVoiceMemoWaveformSeed(String value) {
+  int hash = 0x811c9dc5;
+
+  for (final int codeUnit in value.codeUnits) {
+    hash ^= codeUnit;
+    hash = (hash * 0x01000193) & 0xffffffff;
+  }
+
+  return hash == 0 ? 0x9e3779b9 : hash;
+}
+
+List<double> _voiceMemoFallbackWaveformSamples({
+  required ChatVoiceMemoAttachment attachment,
+  required String messageId,
+}) {
+  final String seedSource = [
+    attachment.mediaAssetId,
+    attachment.localPath,
+    messageId,
+    attachment.duration.inMilliseconds.toString(),
+    attachment.sizeBytes?.toString(),
+  ].whereType<String>().join(':');
+  int state = _stableVoiceMemoWaveformSeed(seedSource);
+
+  double nextUnit() {
+    state = ((state * 1664525) + 1013904223) & 0xffffffff;
+    return state / 0xffffffff;
+  }
+
+  final int peakCount = 2 + (nextUnit() * 2).floor();
+  final List<double> centers = <double>[];
+  final List<double> widths = <double>[];
+  final List<double> heights = <double>[];
+
+  for (int index = 0; index < peakCount; index++) {
+    centers.add(0.14 + (nextUnit() * 0.72));
+    widths.add(0.045 + (nextUnit() * 0.13));
+    heights.add(0.34 + (nextUnit() * 0.58));
+  }
+
+  final List<double> samples = <double>[];
+
+  for (int index = 0; index < _voiceMemoWaveformSampleCount; index++) {
+    final double position = _voiceMemoWaveformSampleCount == 1
+        ? 0
+        : index / (_voiceMemoWaveformSampleCount - 1);
+    double sample = 0.035 + (nextUnit() * 0.035);
+
+    for (int peakIndex = 0; peakIndex < peakCount; peakIndex++) {
+      final double distance = (position - centers[peakIndex]).abs();
+      final double influence = math.max(0, 1 - (distance / widths[peakIndex]));
+
+      sample = math.max(
+        sample,
+        (math.pow(influence, 1.8) * heights[peakIndex]).toDouble(),
+      );
+    }
+
+    samples.add(sample.clamp(0.04, 0.92).toDouble());
+  }
+
+  return _finalizeVoiceMemoWaveformSamples(samples);
+}
+
 final class _CallNowSheet extends StatelessWidget {
   const _CallNowSheet();
 
@@ -3475,6 +3811,7 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
   final AudioPlayer _previewPlayer = AudioPlayer();
 
   Timer? _timer;
+  StreamSubscription<Amplitude>? _amplitudeSubscription;
   StreamSubscription<Duration>? _previewPositionSubscription;
   StreamSubscription<PlayerState>? _previewStateSubscription;
 
@@ -3482,10 +3819,13 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
   Duration _elapsed = Duration.zero;
   Duration _playbackPosition = Duration.zero;
   String? _recordingPath;
+  List<double> _waveformSamples = const <double>[];
 
   @override
   void initState() {
     super.initState();
+
+    unawaited(_previewPlayer.setLoopMode(LoopMode.off));
 
     _previewPositionSubscription = _previewPlayer.positionStream.listen((
       Duration position,
@@ -3508,15 +3848,16 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
 
       setState(() {
         _mode = _VoiceMemoSheetMode.recorded;
-        _playbackPosition = Duration.zero;
+        _playbackPosition = _elapsed;
       });
-      unawaited(_previewPlayer.seek(Duration.zero));
+      unawaited(_finishPreviewPlayback());
     });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _amplitudeSubscription?.cancel();
     _previewPositionSubscription?.cancel();
     _previewStateSubscription?.cancel();
     unawaited(_previewPlayer.dispose());
@@ -3536,9 +3877,18 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
       return;
     }
 
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _finishPreviewPlayback() async {
+    try {
+      await _previewPlayer.pause();
+      await _previewPlayer.seek(Duration.zero);
+    } catch (_) {
+      return;
+    }
   }
 
   Future<void> _deleteRecordingFile(String? path) async {
@@ -3553,10 +3903,28 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
     }
   }
 
+  void _handleRecordingAmplitude(Amplitude amplitude) {
+    if (!mounted || _mode != _VoiceMemoSheetMode.recording) {
+      return;
+    }
+
+    final double sample = _voiceMemoSampleFromAmplitude(amplitude.current);
+
+    setState(() {
+      _waveformSamples = _appendVoiceMemoWaveformSample(
+        _waveformSamples,
+        sample,
+      );
+    });
+  }
+
   Future<void> _startRecording() async {
     _timer?.cancel();
+    await _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
 
     try {
+      _activeVoiceMemoPlaybackMessageId.value = null;
       await _previewPlayer.stop();
 
       if (!await _recorder.hasPermission()) {
@@ -3586,7 +3954,12 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
         _elapsed = Duration.zero;
         _playbackPosition = Duration.zero;
         _recordingPath = recordingPath;
+        _waveformSamples = const <double>[];
       });
+
+      _amplitudeSubscription = _recorder
+          .onAmplitudeChanged(const Duration(milliseconds: 80))
+          .listen(_handleRecordingAmplitude);
 
       _timer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted) {
@@ -3600,6 +3973,8 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
     } catch (_) {
       _timer?.cancel();
       _timer = null;
+      await _amplitudeSubscription?.cancel();
+      _amplitudeSubscription = null;
       _showVoiceMemoFailure('Voice memo recording failed.');
     }
   }
@@ -3611,9 +3986,22 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
 
     _timer?.cancel();
     _timer = null;
+    await _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
 
     try {
       final String? stoppedPath = await _recorder.stop();
+      final String? waveformPath = stoppedPath ?? _recordingPath;
+      Uint8List? fallbackAudioBytes;
+
+      if (_waveformSamples.isEmpty && waveformPath != null) {
+        fallbackAudioBytes = await File(waveformPath).readAsBytes();
+      }
+
+      final List<double> waveformSamples = _voiceMemoWaveformSamplesForStorage(
+        _waveformSamples,
+        fallbackAudioBytes: fallbackAudioBytes,
+      );
 
       if (!mounted) {
         return;
@@ -3626,6 +4014,7 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
         }
         _playbackPosition = Duration.zero;
         _recordingPath = stoppedPath ?? _recordingPath;
+        _waveformSamples = waveformSamples;
       });
     } catch (_) {
       _showVoiceMemoFailure('Voice memo recording failed.');
@@ -3635,6 +4024,8 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
   Future<void> _resetRecording() async {
     _timer?.cancel();
     _timer = null;
+    await _amplitudeSubscription?.cancel();
+    _amplitudeSubscription = null;
 
     try {
       await _previewPlayer.stop();
@@ -3653,6 +4044,7 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
       _elapsed = Duration.zero;
       _playbackPosition = Duration.zero;
       _recordingPath = null;
+      _waveformSamples = const <double>[];
     });
   }
 
@@ -3678,7 +4070,9 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
     }
 
     try {
+      _activeVoiceMemoPlaybackMessageId.value = null;
       await _previewPlayer.stop();
+      await _previewPlayer.setLoopMode(LoopMode.off);
       await _previewPlayer.setUrl(Uri.file(recordingPath).toString());
       await _previewPlayer.seek(Duration.zero);
 
@@ -3717,6 +4111,11 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
         return;
       }
 
+      final List<double> waveformSamples = _voiceMemoWaveformSamplesForStorage(
+        _waveformSamples,
+        fallbackAudioBytes: audioBytes,
+      );
+
       if (!mounted) {
         return;
       }
@@ -3729,6 +4128,7 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
           fileName: 'voice-memo.m4a',
           sizeBytes: audioBytes.length,
           localPath: recordingPath,
+          waveformSamples: waveformSamples,
         ),
       );
     } catch (_) {
@@ -3770,6 +4170,7 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
                   mode: _mode,
                   elapsed: _elapsed,
                   playbackPosition: _playbackPosition,
+                  waveformSamples: _waveformSamples,
                   onPlayPressed: _togglePlayback,
                 ),
               ),
@@ -3797,12 +4198,14 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
     required this.mode,
     required this.elapsed,
     required this.playbackPosition,
+    required this.waveformSamples,
     required this.onPlayPressed,
   });
 
   final _VoiceMemoSheetMode mode;
   final Duration elapsed;
   final Duration playbackPosition;
+  final List<double> waveformSamples;
   final VoidCallback onPlayPressed;
 
   bool get _hasRecording {
@@ -3827,6 +4230,9 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
     final double progress = elapsed.inMilliseconds == 0
         ? 0
         : playbackPosition.inMilliseconds / elapsed.inMilliseconds;
+    final double waveformProgress = mode == _VoiceMemoSheetMode.recording
+        ? 1
+        : progress.clamp(0, 1).toDouble();
 
     return SizedBox(
       height: 64,
@@ -3850,11 +4256,14 @@ final class _VoiceMemoRecorderBar extends StatelessWidget {
               Expanded(
                 child: _hasRecording
                     ? _VoiceMemoWaveform(
-                        color: foregroundColor,
-                        progress: progress.clamp(0, 1).toDouble(),
-                        emphasized:
+                        color: foregroundColor.withAlpha(126),
+                        playedColor: foregroundColor,
+                        samples: waveformSamples,
+                        progress: waveformProgress,
+                        showProgress:
                             mode == _VoiceMemoSheetMode.recording ||
-                            mode == _VoiceMemoSheetMode.playing,
+                            mode == _VoiceMemoSheetMode.playing ||
+                            playbackPosition > Duration.zero,
                       )
                     : const SizedBox.shrink(),
               ),
@@ -4018,21 +4427,27 @@ final class _VoiceMemoRoundButton extends StatelessWidget {
 final class _VoiceMemoWaveform extends StatelessWidget {
   const _VoiceMemoWaveform({
     required this.color,
+    this.playedColor,
+    this.samples = const <double>[],
     this.progress = 0,
-    this.emphasized = false,
+    this.showProgress = false,
   });
 
   final Color color;
+  final Color? playedColor;
+  final List<double> samples;
   final double progress;
-  final bool emphasized;
+  final bool showProgress;
 
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
       painter: _VoiceMemoWaveformPainter(
         color: color,
+        playedColor: playedColor ?? color,
+        samples: samples,
         progress: progress,
-        emphasized: emphasized,
+        showProgress: showProgress,
       ),
       child: const SizedBox.expand(),
     );
@@ -4042,13 +4457,17 @@ final class _VoiceMemoWaveform extends StatelessWidget {
 final class _VoiceMemoWaveformPainter extends CustomPainter {
   const _VoiceMemoWaveformPainter({
     required this.color,
+    required this.playedColor,
+    required this.samples,
     required this.progress,
-    required this.emphasized,
+    required this.showProgress,
   });
 
   final Color color;
+  final Color playedColor;
+  final List<double> samples;
   final double progress;
-  final bool emphasized;
+  final bool showProgress;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -4057,24 +4476,49 @@ final class _VoiceMemoWaveformPainter extends CustomPainter {
     }
 
     final Paint paint = Paint()
-      ..color = color
       ..style = PaintingStyle.fill
       ..strokeCap = StrokeCap.round;
 
-    const int count = 42;
-    final double step = size.width / (count - 1);
+    if (samples.isEmpty) {
+      return;
+    }
+
+    final List<double> displaySamples;
+
+    if (samples.length >= _voiceMemoWaveformSampleCount) {
+      displaySamples = samples.sublist(
+        samples.length - _voiceMemoWaveformSampleCount,
+      );
+    } else {
+      displaySamples = <double>[
+        ...samples,
+        ...List<double>.filled(
+          _voiceMemoWaveformSampleCount - samples.length,
+          0.04,
+        ),
+      ];
+    }
+
+    final int count = displaySamples.length;
+
+    if (count == 0) {
+      return;
+    }
+
+    final double step = count == 1 ? 0 : size.width / (count - 1);
     final double centerY = size.height / 2;
     final double clampedProgress = progress.clamp(0, 1).toDouble();
-    final int activeIndex = emphasized
-        ? (clampedProgress * (count - 1)).round().clamp(8, count - 9).toInt()
-        : count ~/ 2;
+    final double playedIndex = clampedProgress * (count - 1);
+    final bool progressVisible = showProgress && clampedProgress > 0;
 
     for (int index = 0; index < count; index++) {
-      final double x = index * step;
-      final int distanceFromActive = (index - activeIndex).abs();
-      final bool isBar = distanceFromActive <= 3;
+      final double x = count == 1 ? size.width / 2 : index * step;
+      final double sample = displaySamples[index].clamp(0, 1).toDouble();
+      final bool isPlayed = progressVisible && index <= playedIndex;
 
-      if (!isBar) {
+      paint.color = isPlayed ? playedColor : color;
+
+      if (sample <= 0.12) {
         final double dotRadius = math.min(
           1.7,
           math.max(1.1, size.height * 0.07),
@@ -4083,15 +4527,14 @@ final class _VoiceMemoWaveformPainter extends CustomPainter {
         continue;
       }
 
-      final double normalized = 1 - distanceFromActive / 4;
-      final double minBarHeight = math.min(10, size.height * 0.28);
-      final double maxBarHeight = math.min(28, size.height * 0.78);
+      final double minBarHeight = math.min(6, size.height * 0.2);
+      final double maxBarHeight = math.min(28, size.height * 0.94);
       final double barHeight =
-          minBarHeight + normalized * (maxBarHeight - minBarHeight);
+          minBarHeight + sample * (maxBarHeight - minBarHeight);
       final RRect bar = RRect.fromRectAndRadius(
         Rect.fromCenter(
           center: Offset(x, centerY),
-          width: math.min(3.2, math.max(2.2, size.height * 0.1)),
+          width: math.min(2.8, math.max(1.8, size.height * 0.09)),
           height: barHeight,
         ),
         const Radius.circular(2),
@@ -4104,8 +4547,10 @@ final class _VoiceMemoWaveformPainter extends CustomPainter {
   @override
   bool shouldRepaint(_VoiceMemoWaveformPainter oldDelegate) {
     return oldDelegate.color != color ||
+        oldDelegate.playedColor != playedColor ||
+        oldDelegate.samples != samples ||
         oldDelegate.progress != progress ||
-        oldDelegate.emphasized != emphasized;
+        oldDelegate.showProgress != showProgress;
   }
 }
 
@@ -4659,6 +5104,122 @@ bool _messageMatchesSearchQuery(ChatMessage message, String normalizedQuery) {
   return false;
 }
 
+bool _messageNeedsTranslation(
+  ChatMessage message, {
+  required String currentUserPreferredLanguage,
+}) {
+  if (message.isPhotoMessage ||
+      message.isFileMessage ||
+      message.isCallMessage ||
+      message.isVoiceMemoMessage) {
+    return false;
+  }
+
+  final String content = message.content.trim();
+
+  if (content.isEmpty) {
+    return false;
+  }
+
+  final String? targetLanguage =
+      _normalizeChatLanguageCode(message.translatedLanguage) ??
+      _normalizeChatLanguageCode(currentUserPreferredLanguage);
+  final String? contentLanguage = _inferMessageContentLanguage(content);
+
+  if (targetLanguage != null && contentLanguage != null) {
+    return contentLanguage != targetLanguage;
+  }
+
+  final String? sourceLanguage = _normalizeChatLanguageCode(
+    message.sourceLanguage,
+  );
+
+  if (sourceLanguage != null && targetLanguage != null) {
+    return sourceLanguage != targetLanguage;
+  }
+
+  return contentLanguage != null;
+}
+
+String? _normalizeChatLanguageCode(String? languageCode) {
+  final String normalized = (languageCode ?? '')
+      .trim()
+      .replaceAll('_', '-')
+      .toLowerCase();
+
+  if (normalized.isEmpty) {
+    return null;
+  }
+
+  if (normalized == 'ko' || normalized.startsWith('ko-')) {
+    return 'ko';
+  }
+
+  if (normalized == 'zh' || normalized.startsWith('zh-')) {
+    return 'zh-CN';
+  }
+
+  return normalized;
+}
+
+String? _inferMessageContentLanguage(String text) {
+  int koreanCount = 0;
+  int chineseCount = 0;
+
+  for (final int rune in text.runes) {
+    if (_isHangulRune(rune)) {
+      koreanCount++;
+    } else if (_isCjkIdeographRune(rune)) {
+      chineseCount++;
+    }
+  }
+
+  if (koreanCount == 0 && chineseCount == 0) {
+    return null;
+  }
+
+  return koreanCount >= chineseCount ? 'ko' : 'zh-CN';
+}
+
+bool _isHangulRune(int rune) {
+  return (rune >= 0xAC00 && rune <= 0xD7AF) ||
+      (rune >= 0x1100 && rune <= 0x11FF) ||
+      (rune >= 0x3130 && rune <= 0x318F);
+}
+
+bool _isCjkIdeographRune(int rune) {
+  return (rune >= 0x3400 && rune <= 0x4DBF) ||
+      (rune >= 0x4E00 && rune <= 0x9FFF) ||
+      (rune >= 0xF900 && rune <= 0xFAFF);
+}
+
+double _measureMessageTextWidth({
+  required BuildContext context,
+  required String text,
+  required TextStyle style,
+  required double maxWidth,
+}) {
+  if (text.isEmpty) {
+    return 0;
+  }
+
+  final double effectiveMaxWidth = maxWidth.isFinite
+      ? maxWidth
+      : double.infinity;
+  final TextPainter textPainter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: Directionality.maybeOf(context) ?? TextDirection.ltr,
+    textWidthBasis: TextWidthBasis.longestLine,
+    strutStyle: _buildMessageStrutStyle(style),
+  )..layout(maxWidth: effectiveMaxWidth);
+
+  if (!maxWidth.isFinite) {
+    return textPainter.width;
+  }
+
+  return textPainter.width.clamp(0, maxWidth).toDouble();
+}
+
 List<_SearchMatch> _searchMatchesIn(String text, String query) {
   final String normalizedQuery = _normalizeSearchQuery(query);
 
@@ -4690,6 +5251,7 @@ final class _MessageList extends StatefulWidget {
   const _MessageList({
     required this.initialMessages,
     required this.currentUserId,
+    required this.currentUserPreferredLanguage,
     required this.otherParticipantId,
     required this.otherParticipantName,
     required this.onTranslateMessage,
@@ -4713,6 +5275,7 @@ final class _MessageList extends StatefulWidget {
 
   final List<ChatMessage>? initialMessages;
   final String currentUserId;
+  final String currentUserPreferredLanguage;
   final String otherParticipantId;
   final String otherParticipantName;
   final ChatMessageTranslator? onTranslateMessage;
@@ -5543,6 +6106,13 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
+    if (!_messageNeedsTranslation(
+      message,
+      currentUserPreferredLanguage: widget.currentUserPreferredLanguage,
+    )) {
+      return;
+    }
+
     switch (message.translationStatus) {
       case ChatTranslationStatus.none:
         unawaited(_startTranslation(messageId));
@@ -5573,6 +6143,11 @@ final class _MessageListState extends State<_MessageList> {
         widget.onCreateMediaAssetAccessUrl;
 
     if (mediaAssetId == null || createAccessUrl == null) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('File preview is not available yet.')),
+        );
       return;
     }
 
@@ -5823,6 +6398,13 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
+    if (!_messageNeedsTranslation(
+      currentMessage,
+      currentUserPreferredLanguage: widget.currentUserPreferredLanguage,
+    )) {
+      return;
+    }
+
     setState(() {
       _showTranslatedMessageIds.remove(messageId);
 
@@ -5973,6 +6555,7 @@ final class _MessageListState extends State<_MessageList> {
         _MessageGroup(
           group: group,
           currentUserId: widget.currentUserId,
+          currentUserPreferredLanguage: widget.currentUserPreferredLanguage,
           otherParticipantName: widget.otherParticipantName,
           latestReadMessageId: latestReadMessageId,
           now: _messageClock,
@@ -6423,6 +7006,7 @@ final class _MessageGroup extends StatelessWidget {
   const _MessageGroup({
     required this.group,
     required this.currentUserId,
+    required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
     required this.latestReadMessageId,
     required this.now,
@@ -6442,6 +7026,7 @@ final class _MessageGroup extends StatelessWidget {
 
   final ChatMessageGroup group;
   final String currentUserId;
+  final String currentUserPreferredLanguage;
   final String otherParticipantName;
   final String? latestReadMessageId;
   final DateTime now;
@@ -6481,6 +7066,7 @@ final class _MessageGroup extends StatelessWidget {
     return _IncomingMessageGroup(
       messages: group.messages,
       currentUserId: currentUserId,
+      currentUserPreferredLanguage: currentUserPreferredLanguage,
       otherParticipantName: otherParticipantName,
       shownTranslatedMessageIds: shownTranslatedMessageIds,
       highlightedMessageId: highlightedMessageId,
@@ -6502,6 +7088,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
   const _IncomingMessageGroup({
     required this.messages,
     required this.currentUserId,
+    required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
     required this.shownTranslatedMessageIds,
     required this.highlightedMessageId,
@@ -6519,6 +7106,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
 
   final List<ChatMessage> messages;
   final String currentUserId;
+  final String currentUserPreferredLanguage;
   final String otherParticipantName;
   final Set<String> shownTranslatedMessageIds;
   final String? highlightedMessageId;
@@ -6548,6 +7136,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
                 _IncomingMessageRow(
                   message: messages[index],
                   currentUserId: currentUserId,
+                  currentUserPreferredLanguage: currentUserPreferredLanguage,
                   otherParticipantName: otherParticipantName,
                   showTail: index == 0,
                   showTime: index == messages.length - 1,
@@ -6584,6 +7173,7 @@ final class _IncomingMessageRow extends StatelessWidget {
   const _IncomingMessageRow({
     required this.message,
     required this.currentUserId,
+    required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
     required this.showTail,
     required this.showTime,
@@ -6603,6 +7193,7 @@ final class _IncomingMessageRow extends StatelessWidget {
 
   final ChatMessage message;
   final String currentUserId;
+  final String currentUserPreferredLanguage;
   final String otherParticipantName;
   final bool showTail;
   final bool showTime;
@@ -6625,11 +7216,16 @@ final class _IncomingMessageRow extends StatelessWidget {
     final bool isPhotoMessage = message.isPhotoMessage;
     final bool isCallMessage = message.isCallMessage;
     final bool isVoiceMemoMessage = message.isVoiceMemoMessage;
+    final bool canUseTranslation = _messageNeedsTranslation(
+      message,
+      currentUserPreferredLanguage: currentUserPreferredLanguage,
+    );
     final bool canTapBubble =
         isFileMessage ||
         (!isPhotoMessage &&
             !isCallMessage &&
             !isVoiceMemoMessage &&
+            canUseTranslation &&
             (message.translationStatus == ChatTranslationStatus.translated ||
                 (canRequestTranslation &&
                     message.translationStatus == ChatTranslationStatus.none)));
@@ -6684,6 +7280,7 @@ final class _IncomingMessageRow extends StatelessWidget {
                 showTranslation: showTranslation,
                 searchQuery: searchQuery,
                 canRequestTranslation: canRequestTranslation,
+                canUseTranslation: canUseTranslation,
                 onRetryTranslation: onRetryTranslation,
                 onReplyQuoteTap: onReplyQuoteTap,
               ),
@@ -6707,7 +7304,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         child: content,
       ),
     );
-    final Widget rowBubble = isCallMessage
+    final Widget rowBubble = isCallMessage || isVoiceMemoMessage
         ? bubble
         : Flexible(fit: FlexFit.loose, child: bubble);
 
@@ -6735,6 +7332,7 @@ final class _IncomingMessageContent extends StatelessWidget {
     required this.showTranslation,
     required this.searchQuery,
     required this.canRequestTranslation,
+    required this.canUseTranslation,
     required this.onRetryTranslation,
     required this.onReplyQuoteTap,
   });
@@ -6745,6 +7343,7 @@ final class _IncomingMessageContent extends StatelessWidget {
   final bool showTranslation;
   final String searchQuery;
   final bool canRequestTranslation;
+  final bool canUseTranslation;
   final VoidCallback onRetryTranslation;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
 
@@ -6756,6 +7355,7 @@ final class _IncomingMessageContent extends StatelessWidget {
     );
 
     final bool hasCompletedTranslation =
+        canUseTranslation &&
         message.translationStatus == ChatTranslationStatus.translated &&
         message.translatedContent != null;
 
@@ -6792,21 +7392,32 @@ final class _IncomingMessageContent extends StatelessWidget {
       );
     }
 
-    final Widget messageBody = Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        messageText,
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 160),
-          switchInCurve: Curves.easeOut,
-          switchOutCurve: Curves.easeIn,
-          transitionBuilder: (Widget child, Animation<double> animation) {
-            return FadeTransition(opacity: animation, child: child);
-          },
-          child: _buildTranslationStatus(context),
-        ),
-      ],
+    final Widget messageBody = LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double statusMaxWidth = _measureMessageTextWidth(
+          context: context,
+          text: message.content,
+          style: messageTextStyle,
+          maxWidth: constraints.maxWidth,
+        );
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            messageText,
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 160),
+              switchInCurve: Curves.easeOut,
+              switchOutCurve: Curves.easeIn,
+              transitionBuilder: (Widget child, Animation<double> animation) {
+                return FadeTransition(opacity: animation, child: child);
+              },
+              child: _buildTranslationStatus(context, maxWidth: statusMaxWidth),
+            ),
+          ],
+        );
+      },
     );
 
     return AnimatedSize(
@@ -6825,7 +7436,16 @@ final class _IncomingMessageContent extends StatelessWidget {
     );
   }
 
-  Widget _buildTranslationStatus(BuildContext context) {
+  Widget _buildTranslationStatus(
+    BuildContext context, {
+    required double maxWidth,
+  }) {
+    if (!canUseTranslation) {
+      return SizedBox.shrink(
+        key: ValueKey<String>('translation-skipped-${message.id}'),
+      );
+    }
+
     switch (message.translationStatus) {
       case ChatTranslationStatus.translating:
         return Padding(
@@ -6857,38 +7477,41 @@ final class _IncomingMessageContent extends StatelessWidget {
         return Padding(
           key: ValueKey<String>('translation-failed-${message.id}'),
           padding: const EdgeInsets.only(top: 3),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Translation failed: '
-                '${message.translationFailureReason ?? 'Unknown error'}',
-                style: AppTypography.subTypography12.copyWith(
-                  color: AppColors.grey600,
-                  fontWeight: AppTypography.regular,
-                ),
-              ),
-              if (canRequestTranslation) ...[
-                const SizedBox(height: 2),
-                TextButton(
-                  onPressed: onRetryTranslation,
-                  style: TextButton.styleFrom(
-                    foregroundColor: AppColors.blue500,
-                    minimumSize: Size.zero,
-                    padding: EdgeInsets.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact,
+          child: SizedBox(
+            width: maxWidth,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Translation failed: '
+                  '${message.translationFailureReason ?? 'Unknown error'}',
+                  style: AppTypography.subTypography12.copyWith(
+                    color: AppColors.grey600,
+                    fontWeight: AppTypography.regular,
                   ),
-                  child: Text(
-                    'Retry',
-                    style: AppTypography.subTypography12.copyWith(
-                      color: AppColors.blue500,
-                      fontWeight: AppTypography.medium,
+                ),
+                if (canRequestTranslation && canUseTranslation) ...[
+                  const SizedBox(height: 2),
+                  TextButton(
+                    onPressed: onRetryTranslation,
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.blue500,
+                      minimumSize: Size.zero,
+                      padding: EdgeInsets.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: Text(
+                      'Retry',
+                      style: AppTypography.subTypography12.copyWith(
+                        color: AppColors.blue500,
+                        fontWeight: AppTypography.medium,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
-            ],
+            ),
           ),
         );
 
@@ -7218,7 +7841,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         child: content,
       ),
     );
-    final Widget rowBubble = message.isCallMessage
+    final Widget rowBubble = message.isCallMessage || message.isVoiceMemoMessage
         ? bubble
         : Flexible(fit: FlexFit.loose, child: bubble);
 
@@ -7651,6 +8274,7 @@ final class _PhotoMessageImage extends StatefulWidget {
     required this.attachment,
     required this.itemIndex,
     required this.onCreateMediaAssetAccessUrl,
+    this.imageKey,
     this.width,
     this.height,
     this.fit = BoxFit.cover,
@@ -7660,6 +8284,7 @@ final class _PhotoMessageImage extends StatefulWidget {
   final ChatPhotoAttachment attachment;
   final int itemIndex;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final String? imageKey;
   final double? width;
   final double? height;
   final BoxFit fit;
@@ -7672,7 +8297,19 @@ final class _PhotoMessageImage extends StatefulWidget {
 }
 
 final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
+  static const Duration _resolvedAccessUrlTtl = Duration(minutes: 4);
+  static final Map<String, _ResolvedPhotoAccessUrl> _resolvedAccessUrls =
+      <String, _ResolvedPhotoAccessUrl>{};
+
   Future<Uri>? _accessUrlFuture;
+  Uri? _resolvedAccessUrl;
+
+  static void rememberAccessUrl(String mediaAssetId, Uri url) {
+    _resolvedAccessUrls[mediaAssetId] = _ResolvedPhotoAccessUrl(
+      url: url,
+      resolvedAt: DateTime.now(),
+    );
+  }
 
   @override
   void initState() {
@@ -7694,6 +8331,7 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   void _syncAccessUrlFuture() {
     if (widget.attachment.previewBytes != null) {
       _accessUrlFuture = null;
+      _resolvedAccessUrl = null;
       return;
     }
 
@@ -7703,10 +8341,33 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
 
     if (mediaAssetId == null || createAccessUrl == null) {
       _accessUrlFuture = null;
+      _resolvedAccessUrl = null;
       return;
     }
 
-    _accessUrlFuture = createAccessUrl(mediaAssetId: mediaAssetId);
+    final _ResolvedPhotoAccessUrl? resolvedAccessUrl =
+        _resolvedAccessUrls[mediaAssetId];
+
+    if (resolvedAccessUrl != null &&
+        DateTime.now().difference(resolvedAccessUrl.resolvedAt) <
+            _resolvedAccessUrlTtl) {
+      _accessUrlFuture = null;
+      _resolvedAccessUrl = resolvedAccessUrl.url;
+      return;
+    }
+
+    _resolvedAccessUrl = null;
+    _accessUrlFuture = createAccessUrl(mediaAssetId: mediaAssetId).then((
+      Uri url,
+    ) {
+      rememberAccessUrl(mediaAssetId, url);
+
+      if (mounted && widget.attachment.mediaAssetId == mediaAssetId) {
+        _resolvedAccessUrl = url;
+      }
+
+      return url;
+    });
   }
 
   @override
@@ -7716,11 +8377,7 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
     if (previewBytes != null) {
       return Image.memory(
         previewBytes,
-        key: ValueKey<String>(
-          'photo-message-'
-          '${widget.attachment.assetId}-'
-          '${widget.itemIndex}',
-        ),
+        key: ValueKey<String>(widget.imageKey ?? _defaultImageKey),
         width: widget.width,
         height: widget.height,
         fit: widget.fit,
@@ -7729,52 +8386,102 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
       );
     }
 
+    final Uri? resolvedAccessUrl = _resolvedAccessUrl;
+
+    if (resolvedAccessUrl != null) {
+      return _buildNetworkImage(resolvedAccessUrl);
+    }
+
     final Future<Uri>? accessUrlFuture = _accessUrlFuture;
 
     if (accessUrlFuture == null) {
-      return const _PhotoMessagePlaceholder();
+      return _buildPlaceholder();
     }
 
     return FutureBuilder<Uri>(
       future: accessUrlFuture,
       builder: (BuildContext context, AsyncSnapshot<Uri> snapshot) {
         if (!snapshot.hasData) {
-          return const _PhotoMessagePlaceholder();
+          return _buildPlaceholder();
         }
 
-        return Image.network(
-          snapshot.data!.toString(),
-          key: ValueKey<String>(
-            'photo-message-remote-'
-            '${widget.attachment.mediaAssetId}-'
-            '${widget.itemIndex}',
-          ),
-          width: widget.width,
-          height: widget.height,
-          fit: widget.fit,
-          gaplessPlayback: true,
-          filterQuality: widget.filterQuality,
-          errorBuilder: (_, __, ___) {
-            return const _PhotoMessagePlaceholder();
-          },
-        );
+        return _buildNetworkImage(snapshot.data!);
       },
     );
   }
+
+  Widget _buildNetworkImage(Uri accessUrl) {
+    return Image.network(
+      accessUrl.toString(),
+      key: ValueKey<String>(widget.imageKey ?? _defaultRemoteImageKey),
+      width: widget.width,
+      height: widget.height,
+      fit: widget.fit,
+      gaplessPlayback: true,
+      filterQuality: widget.filterQuality,
+      loadingBuilder:
+          (
+            BuildContext context,
+            Widget child,
+            ImageChunkEvent? loadingProgress,
+          ) {
+            if (loadingProgress == null) {
+              return child;
+            }
+
+            return _buildPlaceholder();
+          },
+      errorBuilder: (_, _, _) {
+        final String? mediaAssetId = widget.attachment.mediaAssetId;
+
+        if (mediaAssetId != null) {
+          _resolvedAccessUrls.remove(mediaAssetId);
+        }
+
+        _resolvedAccessUrl = null;
+
+        return _buildPlaceholder();
+      },
+    );
+  }
+
+  Widget _buildPlaceholder() {
+    return _PhotoMessagePlaceholder(width: widget.width, height: widget.height);
+  }
+
+  String get _defaultImageKey {
+    return 'photo-message-${widget.attachment.assetId}-${widget.itemIndex}';
+  }
+
+  String get _defaultRemoteImageKey {
+    return 'photo-message-remote-'
+        '${widget.attachment.mediaAssetId}-'
+        '${widget.itemIndex}';
+  }
+}
+
+final class _ResolvedPhotoAccessUrl {
+  const _ResolvedPhotoAccessUrl({required this.url, required this.resolvedAt});
+
+  final Uri url;
+  final DateTime resolvedAt;
 }
 
 final class _PhotoMessagePlaceholder extends StatelessWidget {
-  const _PhotoMessagePlaceholder();
+  const _PhotoMessagePlaceholder({this.width, this.height});
+
+  final double? width;
+  final double? height;
 
   @override
   Widget build(BuildContext context) {
-    return const ColoredBox(
-      color: AppColors.grey100,
-      child: Center(
-        child: Icon(
-          Icons.image_outlined,
-          color: AppColors.grey400,
-          size: 28,
+    return SizedBox(
+      width: width,
+      height: height,
+      child: const ColoredBox(
+        color: AppColors.grey100,
+        child: Center(
+          child: Icon(Icons.image_outlined, color: AppColors.grey400, size: 28),
         ),
       ),
     );
@@ -7848,6 +8555,7 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollCurrentThumbnailIntoView();
+      unawaited(_warmNearbyPhotos(_currentIndex));
     });
   }
 
@@ -7876,6 +8584,59 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollCurrentThumbnailIntoView();
     });
+
+    unawaited(_warmNearbyPhotos(index));
+  }
+
+  Future<void> _warmNearbyPhotos(int centerIndex) async {
+    final Set<int> indices = <int>{
+      centerIndex,
+      centerIndex - 1,
+      centerIndex + 1,
+    };
+
+    for (final int index in indices) {
+      if (index < 0 || index >= widget.attachments.length || !mounted) {
+        continue;
+      }
+
+      await _warmPhoto(widget.attachments[index]);
+    }
+  }
+
+  Future<void> _warmPhoto(ChatPhotoAttachment attachment) async {
+    final ImageProvider imageProvider;
+    final Uint8List? previewBytes = attachment.previewBytes;
+
+    if (previewBytes != null) {
+      return;
+    } else {
+      final String? mediaAssetId = attachment.mediaAssetId;
+      final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+          widget.onCreateMediaAssetAccessUrl;
+
+      if (mediaAssetId == null || createAccessUrl == null) {
+        return;
+      }
+
+      try {
+        final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
+        _PhotoMessageImageState.rememberAccessUrl(mediaAssetId, accessUrl);
+        imageProvider = NetworkImage(accessUrl.toString());
+      } catch (_) {
+        return;
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    try {
+      await precacheImage(imageProvider, context);
+    } catch (_) {
+      return;
+    }
   }
 
   void _scrollCurrentThumbnailIntoView() {
@@ -8015,8 +8776,7 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                 attachments: widget.attachments,
                 currentIndex: _currentIndex,
                 thumbnailKeys: _thumbnailKeys,
-                onCreateMediaAssetAccessUrl:
-                    widget.onCreateMediaAssetAccessUrl,
+                onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
                 onThumbnailPressed: (int index) {
                   _pageController.animateToPage(
                     index,
@@ -8054,6 +8814,7 @@ final class _PhotoViewerPage extends StatelessWidget {
             attachment: attachment,
             itemIndex: 0,
             onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+            imageKey: 'photo-viewer-image-${attachment.assetId}',
             width: constraints.maxWidth,
             height: constraints.maxHeight,
             fit: _photoViewerFit(
@@ -8276,8 +9037,7 @@ final class _PhotoViewerThumbnailBar extends StatelessWidget {
                       key: thumbnailKeys[index],
                       attachment: attachments[index],
                       selected: index == currentIndex,
-                      onCreateMediaAssetAccessUrl:
-                          onCreateMediaAssetAccessUrl,
+                      onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
                       onPressed: () {
                         onThumbnailPressed(index);
                       },
@@ -8693,6 +9453,13 @@ final class _VoiceMemoMessageBubbleState
   Duration _playbackPosition = Duration.zero;
   bool _playing = false;
   String? _cachedAudioPath;
+  String? _loadedAudioPath;
+  List<double> _waveformSamples = const <double>[];
+  Future<String?>? _audioPathFuture;
+
+  String get _waveformCacheKey {
+    return _waveformCacheKeyFor(widget.attachment, widget.messageId);
+  }
 
   double get _progress {
     final int durationMs = widget.attachment.duration.inMilliseconds;
@@ -8707,22 +9474,210 @@ final class _VoiceMemoMessageBubbleState
   }
 
   @override
+  void initState() {
+    super.initState();
+
+    _waveformSamples = _initialWaveformSamples();
+    _playbackPosition = _initialPlaybackPosition();
+    _activeVoiceMemoPlaybackMessageId.addListener(
+      _handleActiveVoiceMemoPlaybackChanged,
+    );
+  }
+
+  @override
   void didUpdateWidget(_VoiceMemoMessageBubble oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (oldWidget.attachment != widget.attachment ||
-        oldWidget.messageId != widget.messageId) {
-      unawaited(_stopPlayback(resetPosition: true));
+    final bool messageChanged = oldWidget.messageId != widget.messageId;
+    final bool sourceChanged =
+        messageChanged ||
+        _voiceMemoAudioSourceChanged(oldWidget.attachment, widget.attachment);
+
+    if (messageChanged) {
+      _cachePlaybackPosition(
+        _playbackPosition,
+        cacheKey: _waveformCacheKeyFor(
+          oldWidget.attachment,
+          oldWidget.messageId,
+        ),
+        duration: oldWidget.attachment.duration,
+      );
+
+      if (_activeVoiceMemoPlaybackMessageId.value == oldWidget.messageId) {
+        _activeVoiceMemoPlaybackMessageId.value = null;
+      }
+      unawaited(_stopPlayerSilently());
+      _playing = false;
       _cachedAudioPath = null;
+      _loadedAudioPath = null;
+      _audioPathFuture = null;
+      _waveformSamples = _initialWaveformSamples();
+      _playbackPosition = _initialPlaybackPosition();
+    } else {
+      _syncWaveformSamplesFromAttachment(clearExisting: sourceChanged);
+    }
+
+    if (sourceChanged) {
+      if (!messageChanged) {
+        unawaited(_stopPlayback(resetPosition: true));
+      }
+      _cachedAudioPath = null;
+      _loadedAudioPath = null;
+      _audioPathFuture = null;
+    } else if (oldWidget.onCreateMediaAssetAccessUrl !=
+        widget.onCreateMediaAssetAccessUrl) {
+      _audioPathFuture = null;
     }
   }
 
   @override
   void dispose() {
+    _activeVoiceMemoPlaybackMessageId.removeListener(
+      _handleActiveVoiceMemoPlaybackChanged,
+    );
+    if (_activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
+      _activeVoiceMemoPlaybackMessageId.value = null;
+    }
     _positionSubscription?.cancel();
     _playerStateSubscription?.cancel();
+    _cachePlaybackPosition(_currentPlaybackPositionForCaching());
     unawaited(_player?.dispose());
     super.dispose();
+  }
+
+  String _waveformCacheKeyFor(
+    ChatVoiceMemoAttachment attachment,
+    String messageId,
+  ) {
+    return attachment.mediaAssetId ?? attachment.localPath ?? messageId;
+  }
+
+  void _handleActiveVoiceMemoPlaybackChanged() {
+    if (!mounted || !_playing) {
+      return;
+    }
+
+    if (_activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
+      return;
+    }
+
+    unawaited(
+      _pausePlayback(resetPosition: false, clearActivePlaybackId: false),
+    );
+  }
+
+  List<double> _initialWaveformSamples() {
+    final List<double> attachmentSamples = widget.attachment.waveformSamples;
+
+    if (attachmentSamples.isNotEmpty) {
+      _cacheWaveformSamples(attachmentSamples);
+      return attachmentSamples;
+    }
+
+    final List<double>? cachedSamples =
+        _voiceMemoWaveformSamplesByCacheKey[_waveformCacheKey];
+
+    if (cachedSamples != null && cachedSamples.isNotEmpty) {
+      return cachedSamples;
+    }
+
+    final List<double> fallbackSamples = _voiceMemoFallbackWaveformSamples(
+      attachment: widget.attachment,
+      messageId: widget.messageId,
+    );
+    _cacheWaveformSamples(fallbackSamples);
+
+    return fallbackSamples;
+  }
+
+  Duration _initialPlaybackPosition() {
+    final Duration? cachedPosition =
+        _voiceMemoPlaybackPositionsByCacheKey[_waveformCacheKey];
+
+    if (cachedPosition == null) {
+      return Duration.zero;
+    }
+
+    return _clampedPlaybackPosition(cachedPosition);
+  }
+
+  bool _voiceMemoAudioSourceChanged(
+    ChatVoiceMemoAttachment previous,
+    ChatVoiceMemoAttachment current,
+  ) {
+    return previous.duration != current.duration ||
+        previous.mediaAssetId != current.mediaAssetId ||
+        previous.localPath != current.localPath ||
+        previous.sizeBytes != current.sizeBytes ||
+        previous.audioBytes?.length != current.audioBytes?.length;
+  }
+
+  void _syncWaveformSamplesFromAttachment({required bool clearExisting}) {
+    final List<double> attachmentSamples = widget.attachment.waveformSamples;
+
+    if (attachmentSamples.isNotEmpty) {
+      _cacheWaveformSamples(attachmentSamples);
+      _waveformSamples = attachmentSamples;
+      return;
+    }
+
+    final List<double>? cachedSamples =
+        _voiceMemoWaveformSamplesByCacheKey[_waveformCacheKey];
+
+    if (cachedSamples != null && cachedSamples.isNotEmpty) {
+      _waveformSamples = cachedSamples;
+      return;
+    }
+
+    if (clearExisting) {
+      final List<double> fallbackSamples = _voiceMemoFallbackWaveformSamples(
+        attachment: widget.attachment,
+        messageId: widget.messageId,
+      );
+      _cacheWaveformSamples(fallbackSamples);
+      _waveformSamples = fallbackSamples;
+    }
+  }
+
+  void _cacheWaveformSamples(List<double> samples) {
+    if (samples.isEmpty) {
+      return;
+    }
+
+    if (_voiceMemoWaveformSamplesByCacheKey.length > 240) {
+      _voiceMemoWaveformSamplesByCacheKey.remove(
+        _voiceMemoWaveformSamplesByCacheKey.keys.first,
+      );
+    }
+
+    _voiceMemoWaveformSamplesByCacheKey[_waveformCacheKey] =
+        List<double>.unmodifiable(samples);
+  }
+
+  void _cachePlaybackPosition(
+    Duration position, {
+    String? cacheKey,
+    Duration? duration,
+  }) {
+    final String resolvedCacheKey = cacheKey ?? _waveformCacheKey;
+    final Duration clampedPosition = _clampedPlaybackPosition(
+      position,
+      duration: duration,
+    );
+
+    if (clampedPosition <= Duration.zero ||
+        clampedPosition >= (duration ?? widget.attachment.duration)) {
+      _voiceMemoPlaybackPositionsByCacheKey.remove(resolvedCacheKey);
+      return;
+    }
+
+    if (_voiceMemoPlaybackPositionsByCacheKey.length > 240) {
+      _voiceMemoPlaybackPositionsByCacheKey.remove(
+        _voiceMemoPlaybackPositionsByCacheKey.keys.first,
+      );
+    }
+
+    _voiceMemoPlaybackPositionsByCacheKey[resolvedCacheKey] = clampedPosition;
   }
 
   Future<AudioPlayer> _ensurePlayer() async {
@@ -8732,26 +9687,33 @@ final class _VoiceMemoMessageBubbleState
       existingPlayer = player;
     } else {
       existingPlayer = AudioPlayer();
+      await existingPlayer.setLoopMode(LoopMode.off);
       _player = existingPlayer;
 
       _positionSubscription = existingPlayer.positionStream.listen((
         Duration position,
       ) {
-        if (!mounted || !_playing) {
+        if (!mounted ||
+            !_playing ||
+            _activeVoiceMemoPlaybackMessageId.value != widget.messageId) {
           return;
         }
 
+        final Duration clampedPosition = _clampedPlaybackPosition(position);
+        _cachePlaybackPosition(clampedPosition);
+
         setState(() {
-          _playbackPosition = position > widget.attachment.duration
-              ? widget.attachment.duration
-              : position;
+          _playbackPosition = clampedPosition;
         });
       });
 
       _playerStateSubscription = existingPlayer.playerStateStream.listen((
         PlayerState state,
       ) {
-        if (!mounted || state.processingState != ProcessingState.completed) {
+        if (!mounted ||
+            !_playing ||
+            _activeVoiceMemoPlaybackMessageId.value != widget.messageId ||
+            state.processingState != ProcessingState.completed) {
           return;
         }
 
@@ -8759,7 +9721,11 @@ final class _VoiceMemoMessageBubbleState
           _playing = false;
           _playbackPosition = Duration.zero;
         });
-        unawaited(existingPlayer.seek(Duration.zero));
+        _cachePlaybackPosition(Duration.zero);
+        if (_activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
+          _activeVoiceMemoPlaybackMessageId.value = null;
+        }
+        unawaited(_finishCompletedPlayback(existingPlayer));
       });
     }
 
@@ -8767,6 +9733,18 @@ final class _VoiceMemoMessageBubbleState
   }
 
   Future<String?> _audioPathForPlayback() async {
+    final Future<String?>? existingFuture = _audioPathFuture;
+
+    if (existingFuture != null) {
+      return existingFuture;
+    }
+
+    _audioPathFuture = _resolveAudioPathForPlayback();
+
+    return _audioPathFuture;
+  }
+
+  Future<String?> _resolveAudioPathForPlayback() async {
     final String? localPath = widget.attachment.localPath;
 
     if (localPath != null && await File(localPath).exists()) {
@@ -8781,19 +9759,155 @@ final class _VoiceMemoMessageBubbleState
 
     final Uint8List? audioBytes = widget.attachment.audioBytes;
 
-    if (audioBytes == null || audioBytes.isEmpty) {
+    if (audioBytes != null && audioBytes.isNotEmpty) {
+      final Directory temporaryDirectory = await getTemporaryDirectory();
+      final File audioFile = File(
+        '${temporaryDirectory.path}/juliatalk_voice_${widget.messageId}.m4a',
+      );
+
+      await audioFile.writeAsBytes(audioBytes, flush: true);
+      _cachedAudioPath = audioFile.path;
+
+      return audioFile.path;
+    }
+
+    return _downloadRemoteAudioToCache();
+  }
+
+  Future<String?> _downloadRemoteAudioToCache() async {
+    final String? mediaAssetId = widget.attachment.mediaAssetId;
+    final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+        widget.onCreateMediaAssetAccessUrl;
+
+    if (mediaAssetId == null || createAccessUrl == null) {
       return null;
     }
 
-    final Directory temporaryDirectory = await getTemporaryDirectory();
-    final File audioFile = File(
-      '${temporaryDirectory.path}/juliatalk_voice_${widget.messageId}.m4a',
-    );
+    final Uri audioUri;
 
-    await audioFile.writeAsBytes(audioBytes, flush: true);
-    _cachedAudioPath = audioFile.path;
+    try {
+      audioUri = await createAccessUrl(mediaAssetId: mediaAssetId);
+    } catch (_) {
+      _audioPathFuture = null;
+      return null;
+    }
 
-    return audioFile.path;
+    try {
+      final http.Response response = await http.get(audioUri);
+
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300 ||
+          response.bodyBytes.isEmpty) {
+        _audioPathFuture = null;
+        return null;
+      }
+
+      final Directory temporaryDirectory = await getTemporaryDirectory();
+      final File audioFile = File(
+        '${temporaryDirectory.path}/juliatalk_voice_'
+        '${_safeVoiceMemoCacheKey(mediaAssetId)}.m4a',
+      );
+
+      await audioFile.writeAsBytes(response.bodyBytes, flush: true);
+      _cachedAudioPath = audioFile.path;
+
+      return audioFile.path;
+    } catch (_) {
+      _audioPathFuture = null;
+      return null;
+    }
+  }
+
+  Future<void> _finishCompletedPlayback(AudioPlayer player) async {
+    try {
+      await player.pause();
+      await player.seek(Duration.zero);
+    } catch (_) {
+      return;
+    }
+  }
+
+  Future<void> _stopPlayerSilently() async {
+    final AudioPlayer? player = _player;
+
+    if (player == null) {
+      return;
+    }
+
+    try {
+      await player.stop();
+    } catch (_) {
+      return;
+    } finally {
+      _loadedAudioPath = null;
+    }
+  }
+
+  Duration _clampedPlaybackPosition(Duration position, {Duration? duration}) {
+    if (position <= Duration.zero) {
+      return Duration.zero;
+    }
+
+    final Duration resolvedDuration = duration ?? widget.attachment.duration;
+
+    if (resolvedDuration <= Duration.zero || position >= resolvedDuration) {
+      return resolvedDuration;
+    }
+
+    return position;
+  }
+
+  bool get _hasPausedPlaybackPosition {
+    return _playbackPosition > Duration.zero &&
+        _playbackPosition < widget.attachment.duration;
+  }
+
+  Duration _currentPlaybackPositionForCaching() {
+    final AudioPlayer? player = _player;
+
+    if (player == null) {
+      return _clampedPlaybackPosition(_playbackPosition);
+    }
+
+    final Duration playerPosition = _clampedPlaybackPosition(player.position);
+
+    if (playerPosition > Duration.zero &&
+        playerPosition < widget.attachment.duration) {
+      return playerPosition;
+    }
+
+    return _clampedPlaybackPosition(_playbackPosition);
+  }
+
+  Future<void> _pausePlayback({
+    required bool resetPosition,
+    required bool clearActivePlaybackId,
+  }) async {
+    final AudioPlayer? player = _player;
+    final Duration pausedPosition = _currentPlaybackPositionForCaching();
+
+    if (player != null) {
+      await player.pause();
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _playing = false;
+      if (resetPosition) {
+        _playbackPosition = Duration.zero;
+      } else {
+        _playbackPosition = pausedPosition;
+      }
+    });
+    _cachePlaybackPosition(resetPosition ? Duration.zero : pausedPosition);
+
+    if (clearActivePlaybackId &&
+        _activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
+      _activeVoiceMemoPlaybackMessageId.value = null;
+    }
   }
 
   Future<void> _stopPlayback({required bool resetPosition}) async {
@@ -8802,6 +9916,7 @@ final class _VoiceMemoMessageBubbleState
     if (player != null) {
       await player.stop();
     }
+    _loadedAudioPath = null;
 
     if (!mounted) {
       return;
@@ -8813,62 +9928,92 @@ final class _VoiceMemoMessageBubbleState
         _playbackPosition = Duration.zero;
       }
     });
+    if (resetPosition) {
+      _cachePlaybackPosition(Duration.zero);
+    } else {
+      _cachePlaybackPosition(_currentPlaybackPositionForCaching());
+    }
+
+    if (_activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
+      _activeVoiceMemoPlaybackMessageId.value = null;
+    }
   }
 
   Future<void> _togglePlayback() async {
     if (_playing) {
-      await _stopPlayback(resetPosition: false);
+      await _pausePlayback(resetPosition: false, clearActivePlaybackId: true);
       return;
     }
 
+    _activeVoiceMemoPlaybackMessageId.value = widget.messageId;
+
     final String? audioPath = await _audioPathForPlayback();
-    Uri? audioUri;
 
-    if (audioPath != null) {
-      audioUri = Uri.file(audioPath);
-    } else {
-      final String? mediaAssetId = widget.attachment.mediaAssetId;
-      final ChatMediaAssetAccessUrlCreator? createAccessUrl =
-          widget.onCreateMediaAssetAccessUrl;
-
-      if (mediaAssetId == null || createAccessUrl == null) {
-        return;
+    if (audioPath == null) {
+      if (_activeVoiceMemoPlaybackMessageId.value == widget.messageId) {
+        _activeVoiceMemoPlaybackMessageId.value = null;
       }
+      return;
+    }
 
-      try {
-        audioUri = await createAccessUrl(mediaAssetId: mediaAssetId);
-      } catch (_) {
-        return;
-      }
+    if (!mounted ||
+        _activeVoiceMemoPlaybackMessageId.value != widget.messageId) {
+      return;
     }
 
     final AudioPlayer player = await _ensurePlayer();
 
     try {
-      await player.stop();
-      await player.setUrl(audioUri.toString());
-      await player.seek(Duration.zero);
+      if (_activeVoiceMemoPlaybackMessageId.value != widget.messageId) {
+        return;
+      }
 
-      if (!mounted) {
+      final Duration startPosition = _hasPausedPlaybackPosition
+          ? _playbackPosition
+          : Duration.zero;
+
+      if (_loadedAudioPath != audioPath) {
+        await player.stop();
+        await player.setLoopMode(LoopMode.off);
+        await player.setUrl(Uri.file(audioPath).toString());
+        _loadedAudioPath = audioPath;
+      } else {
+        await player.pause();
+        await player.setLoopMode(LoopMode.off);
+      }
+
+      await player.seek(startPosition);
+
+      if (!mounted ||
+          _activeVoiceMemoPlaybackMessageId.value != widget.messageId) {
         return;
       }
 
       setState(() {
         _playing = true;
-        _playbackPosition = Duration.zero;
+        _playbackPosition = startPosition;
       });
+      _cachePlaybackPosition(startPosition);
 
       unawaited(player.play());
     } catch (_) {
+      _cachedAudioPath = null;
+      _audioPathFuture = null;
       await _stopPlayback(resetPosition: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final double maxWidth = MediaQuery.sizeOf(context).width * 0.72;
-    final double width = math.min(304, maxWidth);
-    final bool canPlay = widget.attachment.hasPlayableAudio;
+    final double width = math.min(
+      304,
+      math.max(196, MediaQuery.sizeOf(context).width - 128),
+    );
+    final bool canPlay =
+        widget.attachment.localPath != null ||
+        (widget.attachment.audioBytes?.isNotEmpty ?? false) ||
+        (widget.attachment.mediaAssetId != null &&
+            widget.onCreateMediaAssetAccessUrl != null);
 
     return Transform.scale(
       key: ValueKey<String>('message-pulse-${widget.messageId}'),
@@ -8916,8 +10061,12 @@ final class _VoiceMemoMessageBubbleState
                         height: 22,
                         child: _VoiceMemoWaveform(
                           color: AppColors.grey300,
+                          playedColor: AppColors.grey900,
+                          samples: _waveformSamples,
                           progress: _progress,
-                          emphasized: _playing,
+                          showProgress:
+                              _playbackPosition > Duration.zero &&
+                              _playbackPosition < widget.attachment.duration,
                         ),
                       ),
                     ),

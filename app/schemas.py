@@ -42,6 +42,7 @@ class UserRead(BaseModel):
     id: UUID
     username: str
     display_name: str
+    profile_image_url: str | None = None
     preferred_language: LanguageCode
 
 

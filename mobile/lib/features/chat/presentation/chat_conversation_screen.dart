@@ -43,9 +43,15 @@ final class _ChatConversationHomeScreenState
     extends State<ChatConversationHomeScreen> {
   static const Map<String, List<String>> _chatOrderByUsername =
       <String, List<String>>{
-        'liababo': <String>['lia', 'yun'],
-        'junebabo': <String>['june', 'yun'],
-        'yunjung5437': <String>['lia', 'june'],
+        'liababo': <String>['junebabo', 'yunjung5437'],
+        'junebabo': <String>['liababo', 'yunjung5437'],
+        'yunjung5437': <String>['junebabo', 'liababo'],
+      };
+  static const Map<String, Map<String, String>> _displayNameByViewerUsername =
+      <String, Map<String, String>>{
+        'liababo': <String, String>{'junebabo': '애기🤍', 'yunjung5437': '엄마'},
+        'junebabo': <String, String>{'liababo': '오빠💙', 'yunjung5437': '阿姨'},
+        'yunjung5437': <String, String>{'junebabo': '리아', 'liababo': '준'},
       };
 
   late final ChatApi _chatApi;
@@ -108,12 +114,12 @@ final class _ChatConversationHomeScreenState
 
     users.sort((AppUser first, AppUser second) {
       final int firstPriority =
-          priorityByName[_normalizeUserKey(first.displayName)] ??
           priorityByName[_normalizeUserKey(first.username)] ??
+          priorityByName[_normalizeUserKey(first.displayName)] ??
           chatOrder.length;
       final int secondPriority =
-          priorityByName[_normalizeUserKey(second.displayName)] ??
           priorityByName[_normalizeUserKey(second.username)] ??
+          priorityByName[_normalizeUserKey(second.displayName)] ??
           chatOrder.length;
 
       final int priorityComparison = firstPriority.compareTo(secondPriority);
@@ -130,6 +136,13 @@ final class _ChatConversationHomeScreenState
 
   String _normalizeUserKey(String value) {
     return value.trim().toLowerCase();
+  }
+
+  String _displayNameFor(AppUser user) {
+    return _displayNameByViewerUsername[_normalizeUserKey(
+          widget.session.user.username,
+        )]?[_normalizeUserKey(user.username)] ??
+        user.displayName;
   }
 
   void _retryUsers() {
@@ -150,6 +163,7 @@ final class _ChatConversationHomeScreenState
         accessToken: widget.session.accessToken,
         currentUser: widget.session.user,
         otherUser: selectedUser,
+        otherUserDisplayName: _displayNameFor(selectedUser),
         onBack: () {
           setState(() {
             _selectedUser = null;
@@ -164,6 +178,7 @@ final class _ChatConversationHomeScreenState
       appBar: AppBar(
         backgroundColor: AppColors.surface,
         elevation: 0,
+        titleSpacing: _chatListHorizontalPadding,
         title: Text(
           'Chats',
           style: AppTypography.typography5.copyWith(
@@ -228,9 +243,12 @@ final class _ChatConversationHomeScreenState
                     ),
                     horizontalTitleGap: _chatListTitleGap,
                     minLeadingWidth: _chatListAvatarSize,
-                    leading: _ChatUserAvatar(unreadCount: entry.unreadCount),
+                    leading: _ChatUserAvatar(
+                      imageUrl: user.profileImageUrl,
+                      unreadCount: entry.unreadCount,
+                    ),
                     title: Text(
-                      user.displayName,
+                      _displayNameFor(user),
                       style: AppTypography.typography6.copyWith(
                         color: AppColors.grey900,
                         fontWeight: AppTypography.bold,
@@ -271,6 +289,7 @@ final class ChatConversationScreen extends StatefulWidget {
     required this.accessToken,
     required this.currentUser,
     required this.otherUser,
+    required this.otherUserDisplayName,
     required this.onBack,
     super.key,
   });
@@ -280,6 +299,7 @@ final class ChatConversationScreen extends StatefulWidget {
   final String accessToken;
   final AppUser currentUser;
   final AppUser otherUser;
+  final String otherUserDisplayName;
   final VoidCallback onBack;
 
   @override
@@ -907,7 +927,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         currentUserName: widget.currentUser.displayName,
         currentUserPreferredLanguage: widget.currentUser.preferredLanguage,
         otherParticipantId: widget.otherUser.id,
-        otherParticipantName: widget.otherUser.displayName,
+        otherParticipantName: widget.otherUserDisplayName,
+        otherParticipantProfileImageUrl: widget.otherUser.profileImageUrl,
         onSendTextMessage: _sendTextMessage,
         onSendPhotoMessages: _sendPhotoMessages,
         onSendFileMessage: _sendFileMessage,
@@ -925,8 +946,9 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
 }
 
 final class _ChatUserAvatar extends StatelessWidget {
-  const _ChatUserAvatar({required this.unreadCount});
+  const _ChatUserAvatar({required this.imageUrl, required this.unreadCount});
 
+  final String? imageUrl;
   final int unreadCount;
 
   @override
@@ -937,22 +959,16 @@ final class _ChatUserAvatar extends StatelessWidget {
         clipBehavior: Clip.none,
         children: [
           Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: AppColors.blue100,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Icon(
-                Icons.person_rounded,
-                color: AppColors.white,
-                size: 30,
-              ),
+            child: _ProfileImageBox(
+              imageUrl: imageUrl,
+              borderRadius: 16,
+              iconSize: 30,
             ),
           ),
           if (unreadCount > 0)
             Positioned(
-              top: -5,
-              right: -5,
+              top: -4,
+              right: -4,
               child: _ChatUnreadBadge(count: unreadCount),
             ),
         ],
@@ -971,8 +987,8 @@ final class _ChatUnreadBadge extends StatelessWidget {
     final String label = count > 99 ? '99+' : count.toString();
 
     return Container(
-      constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
-      padding: const EdgeInsets.symmetric(horizontal: 6),
+      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 5),
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: AppColors.red500,
@@ -984,8 +1000,72 @@ final class _ChatUnreadBadge extends StatelessWidget {
           color: AppColors.white,
           fontWeight: AppTypography.bold,
           height: 1,
+          fontSize: 11,
         ),
       ),
+    );
+  }
+}
+
+final class _ProfileImageBox extends StatelessWidget {
+  const _ProfileImageBox({
+    required this.imageUrl,
+    required this.borderRadius,
+    required this.iconSize,
+  });
+
+  final String? imageUrl;
+  final double borderRadius;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final String? resolvedImageUrl = imageUrl?.trim();
+    final BorderRadius resolvedBorderRadius = BorderRadius.circular(
+      borderRadius,
+    );
+
+    if (resolvedImageUrl != null && resolvedImageUrl.isNotEmpty) {
+      return ClipRRect(
+        borderRadius: resolvedBorderRadius,
+        child: Image.network(
+          resolvedImageUrl,
+          fit: BoxFit.cover,
+          errorBuilder:
+              (BuildContext context, Object error, StackTrace? stackTrace) {
+                return _DefaultProfileIcon(
+                  borderRadius: resolvedBorderRadius,
+                  iconSize: iconSize,
+                );
+              },
+        ),
+      );
+    }
+
+    return _DefaultProfileIcon(
+      borderRadius: resolvedBorderRadius,
+      iconSize: iconSize,
+    );
+  }
+}
+
+final class _DefaultProfileIcon extends StatelessWidget {
+  const _DefaultProfileIcon({
+    required this.borderRadius,
+    required this.iconSize,
+  });
+
+  final BorderRadius borderRadius;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.blue100,
+        borderRadius: borderRadius,
+      ),
+      child: Icon(Icons.person_rounded, color: AppColors.white, size: iconSize),
     );
   }
 }

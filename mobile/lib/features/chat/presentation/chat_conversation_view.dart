@@ -212,6 +212,7 @@ final class ChatConversationView extends StatefulWidget {
     this.currentUserPreferredLanguage = _currentUserPreferredLanguage,
     this.otherParticipantId = _otherParticipantId,
     this.otherParticipantName = _otherParticipantName,
+    this.otherParticipantProfileImageUrl,
     this.onSendTextMessage,
     this.onSendPhotoMessages,
     this.onSendFileMessage,
@@ -236,6 +237,7 @@ final class ChatConversationView extends StatefulWidget {
   final String currentUserPreferredLanguage;
   final String otherParticipantId;
   final String otherParticipantName;
+  final String? otherParticipantProfileImageUrl;
   final ChatTextMessageSender? onSendTextMessage;
   final ChatPhotoMessageSender? onSendPhotoMessages;
   final ChatFileMessageSender? onSendFileMessage;
@@ -2236,6 +2238,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                           widget.currentUserPreferredLanguage,
                       otherParticipantId: widget.otherParticipantId,
                       otherParticipantName: widget.otherParticipantName,
+                      otherParticipantProfileImageUrl:
+                          widget.otherParticipantProfileImageUrl,
                       onTranslateMessage: widget.onTranslateMessage,
                       onRetryTranslation: widget.onRetryTranslation,
                       onDeleteMessage: widget.onDeleteMessage,
@@ -2384,6 +2388,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                 Positioned.fill(
                   child: _VoiceCallScreen(
                     participantName: widget.otherParticipantName,
+                    participantProfileImageUrl:
+                        widget.otherParticipantProfileImageUrl,
                     connected: _voiceCallConnected,
                     elapsed: _voiceCallElapsed,
                     muted: _voiceCallMuted,
@@ -4689,6 +4695,7 @@ final class _ActiveCallDot extends StatelessWidget {
 final class _VoiceCallScreen extends StatelessWidget {
   const _VoiceCallScreen({
     required this.participantName,
+    required this.participantProfileImageUrl,
     required this.connected,
     required this.elapsed,
     required this.muted,
@@ -4700,6 +4707,7 @@ final class _VoiceCallScreen extends StatelessWidget {
   });
 
   final String participantName;
+  final String? participantProfileImageUrl;
   final bool connected;
   final Duration elapsed;
   final bool muted;
@@ -4778,19 +4786,12 @@ final class _VoiceCallScreen extends StatelessWidget {
                               )
                             : const _ConnectingDots(),
                         SizedBox(height: constraints.maxHeight * 0.08),
-                        Container(
-                          width: 112,
-                          height: 112,
-                          alignment: Alignment.center,
-                          decoration: const BoxDecoration(
-                            color: AppColors.blue100,
-                            borderRadius: BorderRadius.all(Radius.circular(32)),
-                          ),
-                          child: const Icon(
-                            Icons.person_rounded,
-                            size: 64,
-                            color: AppColors.blue50,
-                          ),
+                        _ProfilePlaceholder(
+                          imageUrl: participantProfileImageUrl,
+                          size: 112,
+                          borderRadius: 32,
+                          iconSize: 64,
+                          iconColor: AppColors.blue50,
                         ),
                       ],
                     );
@@ -5311,6 +5312,7 @@ final class _MessageList extends StatefulWidget {
     required this.currentUserPreferredLanguage,
     required this.otherParticipantId,
     required this.otherParticipantName,
+    required this.otherParticipantProfileImageUrl,
     required this.onTranslateMessage,
     required this.onRetryTranslation,
     required this.onDeleteMessage,
@@ -5336,6 +5338,7 @@ final class _MessageList extends StatefulWidget {
   final String currentUserPreferredLanguage;
   final String otherParticipantId;
   final String otherParticipantName;
+  final String? otherParticipantProfileImageUrl;
   final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageTranslationRetrier? onRetryTranslation;
   final ChatMessageDeleter? onDeleteMessage;
@@ -6750,6 +6753,8 @@ final class _MessageListState extends State<_MessageList> {
           currentUserId: widget.currentUserId,
           currentUserPreferredLanguage: widget.currentUserPreferredLanguage,
           otherParticipantName: widget.otherParticipantName,
+          otherParticipantProfileImageUrl:
+              widget.otherParticipantProfileImageUrl,
           latestReadMessageId: latestReadMessageId,
           now: _messageClock,
           shownTranslatedMessageIds: _showTranslatedMessageIds,
@@ -7204,6 +7209,7 @@ final class _MessageGroup extends StatelessWidget {
     required this.currentUserId,
     required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
+    required this.otherParticipantProfileImageUrl,
     required this.latestReadMessageId,
     required this.now,
     required this.shownTranslatedMessageIds,
@@ -7225,6 +7231,7 @@ final class _MessageGroup extends StatelessWidget {
   final String currentUserId;
   final String currentUserPreferredLanguage;
   final String otherParticipantName;
+  final String? otherParticipantProfileImageUrl;
   final String? latestReadMessageId;
   final DateTime now;
   final Set<String> shownTranslatedMessageIds;
@@ -7266,6 +7273,7 @@ final class _MessageGroup extends StatelessWidget {
       currentUserId: currentUserId,
       currentUserPreferredLanguage: currentUserPreferredLanguage,
       otherParticipantName: otherParticipantName,
+      otherParticipantProfileImageUrl: otherParticipantProfileImageUrl,
       shownTranslatedMessageIds: shownTranslatedMessageIds,
       highlightedMessageId: highlightedMessageId,
       searchQuery: searchQuery,
@@ -7289,6 +7297,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.currentUserId,
     required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
+    required this.otherParticipantProfileImageUrl,
     required this.shownTranslatedMessageIds,
     required this.highlightedMessageId,
     required this.searchQuery,
@@ -7308,6 +7317,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
   final String currentUserId;
   final String currentUserPreferredLanguage;
   final String otherParticipantName;
+  final String? otherParticipantProfileImageUrl;
   final Set<String> shownTranslatedMessageIds;
   final String? highlightedMessageId;
   final String searchQuery;
@@ -7327,7 +7337,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const _ProfilePlaceholder(),
+        _ProfilePlaceholder(imageUrl: otherParticipantProfileImageUrl),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
@@ -11181,19 +11191,77 @@ final class _BubbleTailPainter extends CustomPainter {
 }
 
 final class _ProfilePlaceholder extends StatelessWidget {
-  const _ProfilePlaceholder();
+  const _ProfilePlaceholder({
+    required this.imageUrl,
+    this.size = 36,
+    this.borderRadius = 12,
+    this.iconSize = 22,
+    this.iconColor = AppColors.white,
+  });
+
+  final String? imageUrl;
+  final double size;
+  final double borderRadius;
+  final double iconSize;
+  final Color iconColor;
 
   @override
   Widget build(BuildContext context) {
-    return const DecoratedBox(
+    final String? resolvedImageUrl = imageUrl?.trim();
+    final BorderRadius resolvedBorderRadius = BorderRadius.circular(
+      borderRadius,
+    );
+
+    return SizedBox.square(
+      dimension: size,
+      child: resolvedImageUrl != null && resolvedImageUrl.isNotEmpty
+          ? ClipRRect(
+              borderRadius: resolvedBorderRadius,
+              child: Image.network(
+                resolvedImageUrl,
+                fit: BoxFit.cover,
+                errorBuilder:
+                    (
+                      BuildContext context,
+                      Object error,
+                      StackTrace? stackTrace,
+                    ) {
+                      return _DefaultProfilePlaceholder(
+                        borderRadius: resolvedBorderRadius,
+                        iconSize: iconSize,
+                        iconColor: iconColor,
+                      );
+                    },
+              ),
+            )
+          : _DefaultProfilePlaceholder(
+              borderRadius: resolvedBorderRadius,
+              iconSize: iconSize,
+              iconColor: iconColor,
+            ),
+    );
+  }
+}
+
+final class _DefaultProfilePlaceholder extends StatelessWidget {
+  const _DefaultProfilePlaceholder({
+    required this.borderRadius,
+    required this.iconSize,
+    required this.iconColor,
+  });
+
+  final BorderRadius borderRadius;
+  final double iconSize;
+  final Color iconColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
       decoration: BoxDecoration(
         color: AppColors.blue100,
-        borderRadius: BorderRadius.all(Radius.circular(12)),
+        borderRadius: borderRadius,
       ),
-      child: SizedBox.square(
-        dimension: 36,
-        child: Icon(Icons.person_rounded, color: AppColors.white, size: 22),
-      ),
+      child: Icon(Icons.person_rounded, color: iconColor, size: iconSize),
     );
   }
 }

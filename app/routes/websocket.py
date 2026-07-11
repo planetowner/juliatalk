@@ -74,6 +74,7 @@ async def websocket_endpoint(
                     "id": str(user.id),
                     "username": user.username,
                     "display_name": user.display_name,
+                    "profile_image_url": user.profile_image_url,
                 },
             }
         )

@@ -169,6 +169,8 @@ class User(Base):
         nullable=False,
     )
 
+    profile_image_url: Mapped[str | None] = mapped_column(Text)
+
     password_hash: Mapped[str] = mapped_column(
         Text,
         nullable=False,

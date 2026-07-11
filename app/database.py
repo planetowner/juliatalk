@@ -94,6 +94,12 @@ async def ensure_schema_compatibility(
 ) -> None:
     await connection.execute(
         text(
+            "ALTER TABLE users "
+            "ADD COLUMN IF NOT EXISTS profile_image_url TEXT"
+        )
+    )
+    await connection.execute(
+        text(
             "ALTER TABLE messages "
             "ADD COLUMN IF NOT EXISTS metadata JSONB "
             "NOT NULL DEFAULT '{}'::jsonb"

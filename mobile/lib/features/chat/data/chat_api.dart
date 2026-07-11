@@ -169,13 +169,25 @@ final class ChatApi {
         .toList(growable: false);
   }
 
-  Future<int> countUnreadMessages({String? excludeUserId}) async {
-    final Map<String, String>? queryParameters = excludeUserId == null
-        ? null
-        : <String, String>{'exclude_user_id': excludeUserId};
+  Future<int> countUnreadMessages({
+    String? excludeUserId,
+    String? fromUserId,
+  }) async {
+    final Map<String, String> queryParameters = <String, String>{};
+
+    if (excludeUserId != null) {
+      queryParameters['exclude_user_id'] = excludeUserId;
+    }
+
+    if (fromUserId != null) {
+      queryParameters['from_user_id'] = fromUserId;
+    }
+
     final Uri requestUri = _baseUri
         .resolve('/messages/unread-count')
-        .replace(queryParameters: queryParameters);
+        .replace(
+          queryParameters: queryParameters.isEmpty ? null : queryParameters,
+        );
 
     final http.Response response = await _client.get(
       requestUri,

@@ -1259,6 +1259,7 @@ async def count_unread_messages(
     current_user: CurrentUserDependency,
     session: SessionDependency,
     exclude_user_id: Annotated[UUID | None, Query()] = None,
+    from_user_id: Annotated[UUID | None, Query()] = None,
 ) -> UnreadMessageCountRead:
     member_conversation_ids = select(
         ConversationMember.conversation_id
@@ -1300,6 +1301,11 @@ async def count_unread_messages(
                 Message.conversation_id
                 != excluded_conversation.conversation_id,
             )
+
+    if from_user_id is not None:
+        unread_count_query = unread_count_query.where(
+            Message.sender_id == from_user_id,
+        )
 
     unread_count = await session.scalar(unread_count_query)
 

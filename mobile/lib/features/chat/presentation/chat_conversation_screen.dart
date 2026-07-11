@@ -11,8 +11,15 @@ import '../../../design_system/app_typography.dart';
 import '../../auth/domain/app_user.dart';
 import '../../auth/domain/auth_session.dart';
 import '../data/chat_api.dart';
+import '../data/chat_api_exception.dart';
 import '../domain/chat_message.dart';
 import 'chat_conversation_view.dart';
+
+const double _chatListHorizontalPadding = 20;
+const double _chatListAvatarSize = 48;
+const double _chatListTitleGap = 16;
+const double _chatListTextStartInset =
+    _chatListHorizontalPadding + _chatListAvatarSize + _chatListTitleGap;
 
 final class ChatConversationHomeScreen extends StatefulWidget {
   const ChatConversationHomeScreen({
@@ -42,7 +49,7 @@ final class _ChatConversationHomeScreenState
       };
 
   late final ChatApi _chatApi;
-  late Future<List<AppUser>> _usersFuture;
+  late Future<List<_ChatListEntry>> _chatEntriesFuture;
 
   AppUser? _selectedUser;
 
@@ -56,10 +63,10 @@ final class _ChatConversationHomeScreenState
       accessToken: widget.session.accessToken,
     );
 
-    _usersFuture = _loadChatUsers();
+    _chatEntriesFuture = _loadChatEntries();
   }
 
-  Future<List<AppUser>> _loadChatUsers() async {
+  Future<List<_ChatListEntry>> _loadChatEntries() async {
     final List<AppUser> users = await _chatApi.listUsers();
 
     final List<AppUser> chatUsers = users
@@ -68,7 +75,22 @@ final class _ChatConversationHomeScreenState
 
     _sortChatUsers(chatUsers);
 
-    return chatUsers;
+    return Future.wait(
+      chatUsers.map((AppUser user) async {
+        return _ChatListEntry(
+          user: user,
+          unreadCount: await _loadUnreadCountFor(user),
+        );
+      }),
+    );
+  }
+
+  Future<int> _loadUnreadCountFor(AppUser user) async {
+    try {
+      return await _chatApi.countUnreadMessages(fromUserId: user.id);
+    } on ChatApiException {
+      return 0;
+    }
   }
 
   void _sortChatUsers(List<AppUser> users) {
@@ -112,7 +134,7 @@ final class _ChatConversationHomeScreenState
 
   void _retryUsers() {
     setState(() {
-      _usersFuture = _loadChatUsers();
+      _chatEntriesFuture = _loadChatEntries();
     });
   }
 
@@ -131,6 +153,7 @@ final class _ChatConversationHomeScreenState
         onBack: () {
           setState(() {
             _selectedUser = null;
+            _chatEntriesFuture = _loadChatEntries();
           });
         },
       );
@@ -149,81 +172,96 @@ final class _ChatConversationHomeScreenState
           ),
         ),
       ),
-      body: FutureBuilder<List<AppUser>>(
-        future: _usersFuture,
-        builder: (BuildContext context, AsyncSnapshot<List<AppUser>> snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(
-              child: CircularProgressIndicator(color: AppColors.blue500),
-            );
-          }
+      body: FutureBuilder<List<_ChatListEntry>>(
+        future: _chatEntriesFuture,
+        builder:
+            (
+              BuildContext context,
+              AsyncSnapshot<List<_ChatListEntry>> snapshot,
+            ) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const Center(
+                  child: CircularProgressIndicator(color: AppColors.blue500),
+                );
+              }
 
-          if (snapshot.hasError) {
-            return _ChatLoadingError(
-              message: 'Chat user loading failed.',
-              onRetry: _retryUsers,
-            );
-          }
+              if (snapshot.hasError) {
+                return _ChatLoadingError(
+                  message: 'Chat user loading failed.',
+                  onRetry: _retryUsers,
+                );
+              }
 
-          final List<AppUser> users = snapshot.data ?? const <AppUser>[];
+              final List<_ChatListEntry> entries =
+                  snapshot.data ?? const <_ChatListEntry>[];
 
-          if (users.isEmpty) {
-            return Center(
-              child: Text(
-                'No chat users yet.',
-                style: AppTypography.typography7.copyWith(
-                  color: AppColors.grey600,
-                  fontWeight: AppTypography.medium,
-                ),
-              ),
-            );
-          }
-
-          return ListView.separated(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            itemCount: users.length,
-            separatorBuilder: (BuildContext context, int index) {
-              return const Divider(
-                height: 1,
-                indent: 72,
-                color: AppColors.grey100,
-              );
-            },
-            itemBuilder: (BuildContext context, int index) {
-              final AppUser user = users[index];
-
-              return ListTile(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 6,
-                ),
-                leading: const _ChatUserAvatar(),
-                title: Text(
-                  user.displayName,
-                  style: AppTypography.typography6.copyWith(
-                    color: AppColors.grey900,
-                    fontWeight: AppTypography.bold,
+              if (entries.isEmpty) {
+                return Center(
+                  child: Text(
+                    'No chat users yet.',
+                    style: AppTypography.typography7.copyWith(
+                      color: AppColors.grey600,
+                      fontWeight: AppTypography.medium,
+                    ),
                   ),
-                ),
-                subtitle: Text(
-                  '@${user.username}',
-                  style: AppTypography.subTypography12.copyWith(
-                    color: AppColors.grey500,
-                    fontWeight: AppTypography.regular,
-                  ),
-                ),
-                onTap: () {
-                  setState(() {
-                    _selectedUser = user;
-                  });
+                );
+              }
+
+              return ListView.separated(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: entries.length,
+                separatorBuilder: (BuildContext context, int index) {
+                  return const Divider(
+                    height: 1,
+                    indent: _chatListTextStartInset,
+                    color: AppColors.grey100,
+                  );
+                },
+                itemBuilder: (BuildContext context, int index) {
+                  final _ChatListEntry entry = entries[index];
+                  final AppUser user = entry.user;
+
+                  return ListTile(
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: _chatListHorizontalPadding,
+                      vertical: 6,
+                    ),
+                    horizontalTitleGap: _chatListTitleGap,
+                    minLeadingWidth: _chatListAvatarSize,
+                    leading: _ChatUserAvatar(unreadCount: entry.unreadCount),
+                    title: Text(
+                      user.displayName,
+                      style: AppTypography.typography6.copyWith(
+                        color: AppColors.grey900,
+                        fontWeight: AppTypography.bold,
+                      ),
+                    ),
+                    subtitle: Text(
+                      '@${user.username}',
+                      style: AppTypography.subTypography12.copyWith(
+                        color: AppColors.grey500,
+                        fontWeight: AppTypography.regular,
+                      ),
+                    ),
+                    onTap: () {
+                      setState(() {
+                        _selectedUser = user;
+                      });
+                    },
+                  );
                 },
               );
             },
-          );
-        },
       ),
     );
   }
+}
+
+final class _ChatListEntry {
+  const _ChatListEntry({required this.user, required this.unreadCount});
+
+  final AppUser user;
+  final int unreadCount;
 }
 
 final class ChatConversationScreen extends StatefulWidget {
@@ -887,18 +925,67 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
 }
 
 final class _ChatUserAvatar extends StatelessWidget {
-  const _ChatUserAvatar();
+  const _ChatUserAvatar({required this.unreadCount});
+
+  final int unreadCount;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 48,
-      height: 48,
-      decoration: BoxDecoration(
-        color: AppColors.blue100,
-        borderRadius: BorderRadius.circular(16),
+    return SizedBox.square(
+      dimension: _chatListAvatarSize,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.blue100,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: const Icon(
+                Icons.person_rounded,
+                color: AppColors.white,
+                size: 30,
+              ),
+            ),
+          ),
+          if (unreadCount > 0)
+            Positioned(
+              top: -5,
+              right: -5,
+              child: _ChatUnreadBadge(count: unreadCount),
+            ),
+        ],
       ),
-      child: const Icon(Icons.person_rounded, color: AppColors.white, size: 30),
+    );
+  }
+}
+
+final class _ChatUnreadBadge extends StatelessWidget {
+  const _ChatUnreadBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final String label = count > 99 ? '99+' : count.toString();
+
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.red500,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: AppTypography.subTypography12.copyWith(
+          color: AppColors.white,
+          fontWeight: AppTypography.bold,
+          height: 1,
+        ),
+      ),
     );
   }
 }

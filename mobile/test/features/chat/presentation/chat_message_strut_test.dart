@@ -54,7 +54,7 @@ void main() {
     await tester.tap(originalTextFinder);
     await tester.pump();
 
-    expect(find.text('Translating…'), findsOneWidget);
+    expect(find.text('번역 중...'), findsOneWidget);
 
     await tester.pump(const Duration(seconds: 5));
 

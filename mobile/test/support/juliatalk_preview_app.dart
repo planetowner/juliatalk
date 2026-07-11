@@ -175,7 +175,7 @@ List<ChatMessage> buildPreviewMessages() {
       recipientId: '1',
       content: '我下次会好好说的',
       translationStatus: ChatTranslationStatus.failed,
-      translationFailureReason: 'Network error',
+      translationFailureReason: 'Translation unavailable',
       createdAt: DateTime(2026, 6, 30, 20, 32, 40),
     ),
     ChatMessage(

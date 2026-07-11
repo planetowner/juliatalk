@@ -5277,33 +5277,6 @@ bool _isCjkIdeographRune(int rune) {
       (rune >= 0xF900 && rune <= 0xFAFF);
 }
 
-double _measureMessageTextWidth({
-  required BuildContext context,
-  required String text,
-  required TextStyle style,
-  required double maxWidth,
-}) {
-  if (text.isEmpty) {
-    return 0;
-  }
-
-  final double effectiveMaxWidth = maxWidth.isFinite
-      ? maxWidth
-      : double.infinity;
-  final TextPainter textPainter = TextPainter(
-    text: TextSpan(text: text, style: style),
-    textDirection: Directionality.maybeOf(context) ?? TextDirection.ltr,
-    textWidthBasis: TextWidthBasis.longestLine,
-    strutStyle: _buildMessageStrutStyle(style),
-  )..layout(maxWidth: effectiveMaxWidth);
-
-  if (!maxWidth.isFinite) {
-    return textPainter.width;
-  }
-
-  return textPainter.width.clamp(0, maxWidth).toDouble();
-}
-
 List<_SearchMatch> _searchMatchesIn(String text, String query) {
   final String normalizedQuery = _normalizeSearchQuery(query);
 
@@ -5394,7 +5367,9 @@ final class _MessageListState extends State<_MessageList> {
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
   final ScrollController _scrollController = ScrollController();
   bool _didResolveInitialScrollPosition = false;
+  bool _pinBottomDuringContentResize = false;
 
+  Timer? _contentResizeBottomPinTimer;
   Timer? _messageHighlightTimer;
 
   String? _highlightedMessageId;
@@ -5474,6 +5449,7 @@ final class _MessageListState extends State<_MessageList> {
 
   @override
   void dispose() {
+    _contentResizeBottomPinTimer?.cancel();
     _messageHighlightTimer?.cancel();
     _scrollController.dispose();
 
@@ -5851,8 +5827,22 @@ final class _MessageListState extends State<_MessageList> {
     );
   }
 
+  void _pinBottomDuringNextContentResize() {
+    if (!mounted || !isNearBottom) {
+      return;
+    }
+
+    _pinBottomDuringContentResize = true;
+    _contentResizeBottomPinTimer?.cancel();
+    _contentResizeBottomPinTimer = Timer(const Duration(milliseconds: 260), () {
+      _contentResizeBottomPinTimer = null;
+      _pinBottomDuringContentResize = false;
+    });
+  }
+
   bool _handleScrollMetricsChanged(ScrollMetricsNotification notification) {
-    if (!widget.pinToBottom || !_scrollController.hasClients) {
+    if ((!widget.pinToBottom && !_pinBottomDuringContentResize) ||
+        !_scrollController.hasClients) {
       return false;
     }
 
@@ -6329,6 +6319,8 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
+    _pinBottomDuringNextContentResize();
+
     setState(() {
       _showTranslatedMessageIds.remove(messageId);
       _messages[messageIndex] = currentMessage.copyWith(
@@ -6354,6 +6346,8 @@ final class _MessageListState extends State<_MessageList> {
         return;
       }
 
+      _pinBottomDuringNextContentResize();
+
       setState(() {
         _messages[failedIndex] = _messages[failedIndex].copyWith(
           translationStatus: ChatTranslationStatus.failed,
@@ -6367,6 +6361,8 @@ final class _MessageListState extends State<_MessageList> {
     if (!mounted) {
       return;
     }
+
+    _pinBottomDuringNextContentResize();
 
     setState(() {
       final int retriedIndex = _messages.indexWhere(
@@ -6596,6 +6592,8 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
+    _pinBottomDuringNextContentResize();
+
     setState(() {
       _showTranslatedMessageIds.remove(messageId);
 
@@ -6624,6 +6622,8 @@ final class _MessageListState extends State<_MessageList> {
     );
 
     if (translatedContent == null) {
+      _pinBottomDuringNextContentResize();
+
       setState(() {
         _messages[refreshedIndex] = _messages[refreshedIndex].copyWith(
           translationStatus: ChatTranslationStatus.failed,
@@ -6633,6 +6633,8 @@ final class _MessageListState extends State<_MessageList> {
 
       return;
     }
+
+    _pinBottomDuringNextContentResize();
 
     setState(() {
       _messages[refreshedIndex] = _messages[refreshedIndex].copyWith(
@@ -7491,6 +7493,7 @@ final class _IncomingMessageRow extends StatelessWidget {
             : _IncomingMessageContent(
                 message: message,
                 currentUserId: currentUserId,
+                currentUserPreferredLanguage: currentUserPreferredLanguage,
                 otherParticipantName: otherParticipantName,
                 showTranslation: showTranslation,
                 searchQuery: searchQuery,
@@ -7543,6 +7546,7 @@ final class _IncomingMessageContent extends StatelessWidget {
   const _IncomingMessageContent({
     required this.message,
     required this.currentUserId,
+    required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
     required this.showTranslation,
     required this.searchQuery,
@@ -7554,6 +7558,7 @@ final class _IncomingMessageContent extends StatelessWidget {
 
   final ChatMessage message;
   final String currentUserId;
+  final String currentUserPreferredLanguage;
   final String otherParticipantName;
   final bool showTranslation;
   final String searchQuery;
@@ -7607,32 +7612,21 @@ final class _IncomingMessageContent extends StatelessWidget {
       );
     }
 
-    final Widget messageBody = LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final double statusMaxWidth = _measureMessageTextWidth(
-          context: context,
-          text: message.content,
-          style: messageTextStyle,
-          maxWidth: constraints.maxWidth,
-        );
-
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            messageText,
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 160),
-              switchInCurve: Curves.easeOut,
-              switchOutCurve: Curves.easeIn,
-              transitionBuilder: (Widget child, Animation<double> animation) {
-                return FadeTransition(opacity: animation, child: child);
-              },
-              child: _buildTranslationStatus(context, maxWidth: statusMaxWidth),
-            ),
-          ],
-        );
-      },
+    final Widget messageBody = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        messageText,
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 160),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          transitionBuilder: (Widget child, Animation<double> animation) {
+            return FadeTransition(opacity: animation, child: child);
+          },
+          child: _buildTranslationStatus(context),
+        ),
+      ],
     );
 
     return AnimatedSize(
@@ -7651,10 +7645,7 @@ final class _IncomingMessageContent extends StatelessWidget {
     );
   }
 
-  Widget _buildTranslationStatus(
-    BuildContext context, {
-    required double maxWidth,
-  }) {
+  Widget _buildTranslationStatus(BuildContext context) {
     if (!canUseTranslation) {
       return SizedBox.shrink(
         key: ValueKey<String>('translation-skipped-${message.id}'),
@@ -7678,7 +7669,7 @@ final class _IncomingMessageContent extends StatelessWidget {
               ),
               const SizedBox(width: 5),
               Text(
-                'Translating…',
+                _translationLoadingText,
                 style: AppTypography.subTypography12.copyWith(
                   color: AppColors.grey500,
                   fontWeight: AppTypography.regular,
@@ -7689,44 +7680,43 @@ final class _IncomingMessageContent extends StatelessWidget {
         );
 
       case ChatTranslationStatus.failed:
+        final TextStyle failureTextStyle = _translationFailureTextStyle;
+
         return Padding(
           key: ValueKey<String>('translation-failed-${message.id}'),
           padding: const EdgeInsets.only(top: 3),
-          child: SizedBox(
-            width: maxWidth,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Translation failed: '
-                  '${message.translationFailureReason ?? 'Unknown error'}',
-                  style: AppTypography.subTypography12.copyWith(
-                    color: AppColors.grey600,
-                    fontWeight: AppTypography.regular,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _translationFailureText,
+                softWrap: true,
+                strutStyle: _buildMessageStrutStyle(failureTextStyle),
+                style: failureTextStyle,
+                textWidthBasis: TextWidthBasis.longestLine,
+                textHeightBehavior: _messageTextHeightBehavior,
+              ),
+              if (canRetryTranslation && canUseTranslation) ...[
+                const SizedBox(height: 2),
+                TextButton(
+                  onPressed: onRetryTranslation,
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.blue500,
+                    minimumSize: Size.zero,
+                    padding: EdgeInsets.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: Text(
+                    _translationRetryText,
+                    style: AppTypography.subTypography12.copyWith(
+                      color: AppColors.blue500,
+                      fontWeight: AppTypography.medium,
+                    ),
                   ),
                 ),
-                if (canRetryTranslation && canUseTranslation) ...[
-                  const SizedBox(height: 2),
-                  TextButton(
-                    onPressed: onRetryTranslation,
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppColors.blue500,
-                      minimumSize: Size.zero,
-                      padding: EdgeInsets.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    child: Text(
-                      'Retry',
-                      style: AppTypography.subTypography12.copyWith(
-                        color: AppColors.blue500,
-                        fontWeight: AppTypography.medium,
-                      ),
-                    ),
-                  ),
-                ],
               ],
-            ),
+            ],
           ),
         );
 
@@ -7736,6 +7726,46 @@ final class _IncomingMessageContent extends StatelessWidget {
           key: ValueKey<String>('translation-idle-${message.id}'),
         );
     }
+  }
+
+  String get _translationFailureText {
+    switch (_normalizeChatLanguageCode(currentUserPreferredLanguage)) {
+      case 'ko':
+        return '지금은 이 메시지를 번역할 수 없어요.';
+      case 'zh-CN':
+        return '暂时无法翻译这条消息。';
+      default:
+        return "Couldn't translate this message.";
+    }
+  }
+
+  String get _translationRetryText {
+    switch (_normalizeChatLanguageCode(currentUserPreferredLanguage)) {
+      case 'ko':
+        return '다시 해보기';
+      case 'zh-CN':
+        return '重试';
+      default:
+        return 'Retry';
+    }
+  }
+
+  String get _translationLoadingText {
+    switch (_normalizeChatLanguageCode(currentUserPreferredLanguage)) {
+      case 'ko':
+        return '번역 중...';
+      case 'zh-CN':
+        return '正在翻译...';
+      default:
+        return 'Translating...';
+    }
+  }
+
+  TextStyle get _translationFailureTextStyle {
+    return AppTypography.subTypography12.copyWith(
+      color: AppColors.grey600,
+      fontWeight: AppTypography.regular,
+    );
   }
 }
 

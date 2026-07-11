@@ -55,9 +55,15 @@ final class _ChatConversationHomeScreenState
       };
 
   late final ChatApi _chatApi;
-  late Future<List<_ChatListEntry>> _chatEntriesFuture;
+  final Map<String, List<ChatMessage>> _conversationMessagesByUserId =
+      <String, List<ChatMessage>>{};
+  final Set<String> _prefetchingConversationUserIds = <String>{};
 
+  List<_ChatListEntry>? _chatEntries;
   AppUser? _selectedUser;
+  bool _chatEntriesLoading = true;
+  bool _chatEntriesRefreshing = false;
+  String? _chatEntriesErrorMessage;
 
   @override
   void initState() {
@@ -69,26 +75,65 @@ final class _ChatConversationHomeScreenState
       accessToken: widget.session.accessToken,
     );
 
-    _chatEntriesFuture = _loadChatEntries();
+    unawaited(_loadChatEntries(showInitialLoading: true));
   }
 
-  Future<List<_ChatListEntry>> _loadChatEntries() async {
-    final List<AppUser> users = await _chatApi.listUsers();
+  Future<void> _loadChatEntries({required bool showInitialLoading}) async {
+    if (_chatEntriesRefreshing) {
+      return;
+    }
 
-    final List<AppUser> chatUsers = users
-        .where((AppUser user) => user.id != widget.session.user.id)
-        .toList(growable: false);
+    _chatEntriesRefreshing = true;
 
-    _sortChatUsers(chatUsers);
+    if (showInitialLoading && _chatEntries == null) {
+      setState(() {
+        _chatEntriesLoading = true;
+        _chatEntriesErrorMessage = null;
+      });
+    }
 
-    return Future.wait(
-      chatUsers.map((AppUser user) async {
-        return _ChatListEntry(
-          user: user,
-          unreadCount: await _loadUnreadCountFor(user),
-        );
-      }),
-    );
+    try {
+      final List<AppUser> users = await _chatApi.listUsers();
+
+      final List<AppUser> chatUsers = users
+          .where((AppUser user) => user.id != widget.session.user.id)
+          .toList(growable: false);
+
+      _sortChatUsers(chatUsers);
+      _prefetchConversations(chatUsers);
+
+      final List<_ChatListEntry> entries = await Future.wait(
+        chatUsers.map((AppUser user) async {
+          return _ChatListEntry(
+            user: user,
+            unreadCount: await _loadUnreadCountFor(user),
+          );
+        }),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _chatEntries = List<_ChatListEntry>.unmodifiable(entries);
+        _chatEntriesLoading = false;
+        _chatEntriesErrorMessage = null;
+      });
+
+      _precacheProfileImages(entries);
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _chatEntriesLoading = false;
+        _chatEntriesErrorMessage = 'Chat user loading failed.';
+      });
+    } finally {
+      _chatEntriesRefreshing = false;
+    }
   }
 
   Future<int> _loadUnreadCountFor(AppUser user) async {
@@ -134,6 +179,62 @@ final class _ChatConversationHomeScreenState
     });
   }
 
+  void _precacheProfileImages(List<_ChatListEntry> entries) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      for (final _ChatListEntry entry in entries) {
+        final String? imageUrl = entry.user.profileImageUrl?.trim();
+
+        if (imageUrl == null || imageUrl.isEmpty) {
+          continue;
+        }
+
+        unawaited(
+          precacheImage(
+            NetworkImage(imageUrl),
+            context,
+          ).catchError((Object _) {}),
+        );
+      }
+    });
+  }
+
+  void _prefetchConversations(List<AppUser> users) {
+    for (final AppUser user in users) {
+      final String userId = user.id;
+
+      if (_conversationMessagesByUserId.containsKey(userId) ||
+          !_prefetchingConversationUserIds.add(userId)) {
+        continue;
+      }
+
+      unawaited(_prefetchConversation(userId));
+    }
+  }
+
+  Future<void> _prefetchConversation(String userId) async {
+    try {
+      final List<ChatMessage> messages = await _chatApi.listConversation(
+        otherUserId: userId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
+        messages,
+      );
+    } catch (_) {
+      // Prefetching should never block the chat list.
+    } finally {
+      _prefetchingConversationUserIds.remove(userId);
+    }
+  }
+
   String _normalizeUserKey(String value) {
     return value.trim().toLowerCase();
   }
@@ -146,9 +247,34 @@ final class _ChatConversationHomeScreenState
   }
 
   void _retryUsers() {
-    setState(() {
-      _chatEntriesFuture = _loadChatEntries();
-    });
+    unawaited(_loadChatEntries(showInitialLoading: true));
+  }
+
+  void _cacheConversationMessages({
+    required String userId,
+    required List<ChatMessage> messages,
+  }) {
+    _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
+      messages,
+    );
+  }
+
+  void _clearUnreadCountFor(String userId) {
+    final List<_ChatListEntry>? entries = _chatEntries;
+
+    if (entries == null) {
+      return;
+    }
+
+    _chatEntries = List<_ChatListEntry>.unmodifiable(
+      entries.map((_ChatListEntry entry) {
+        if (entry.user.id != userId || entry.unreadCount == 0) {
+          return entry;
+        }
+
+        return entry.copyWith(unreadCount: 0);
+      }),
+    );
   }
 
   @override
@@ -164,14 +290,46 @@ final class _ChatConversationHomeScreenState
         currentUser: widget.session.user,
         otherUser: selectedUser,
         otherUserDisplayName: _displayNameFor(selectedUser),
+        initialMessages: _conversationMessagesByUserId[selectedUser.id],
+        onMessagesChanged: (List<ChatMessage> messages) {
+          _cacheConversationMessages(
+            userId: selectedUser.id,
+            messages: messages,
+          );
+        },
         onBack: () {
           setState(() {
+            _clearUnreadCountFor(selectedUser.id);
             _selectedUser = null;
-            _chatEntriesFuture = _loadChatEntries();
           });
+          unawaited(_loadChatEntries(showInitialLoading: false));
         },
       );
     }
+
+    if (_chatEntriesLoading && _chatEntries == null) {
+      return const Scaffold(
+        backgroundColor: AppColors.surface,
+        body: Center(
+          child: CircularProgressIndicator(color: AppColors.blue500),
+        ),
+      );
+    }
+
+    final String? chatEntriesErrorMessage = _chatEntriesErrorMessage;
+
+    if (chatEntriesErrorMessage != null && _chatEntries == null) {
+      return Scaffold(
+        backgroundColor: AppColors.surface,
+        body: _ChatLoadingError(
+          message: chatEntriesErrorMessage,
+          onRetry: _retryUsers,
+        ),
+      );
+    }
+
+    final List<_ChatListEntry> entries =
+        _chatEntries ?? const <_ChatListEntry>[];
 
     return Scaffold(
       backgroundColor: AppColors.surface,
@@ -187,90 +345,63 @@ final class _ChatConversationHomeScreenState
           ),
         ),
       ),
-      body: FutureBuilder<List<_ChatListEntry>>(
-        future: _chatEntriesFuture,
-        builder:
-            (
-              BuildContext context,
-              AsyncSnapshot<List<_ChatListEntry>> snapshot,
-            ) {
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const Center(
-                  child: CircularProgressIndicator(color: AppColors.blue500),
+      body: entries.isEmpty
+          ? Center(
+              child: Text(
+                'No chat users yet.',
+                style: AppTypography.typography7.copyWith(
+                  color: AppColors.grey600,
+                  fontWeight: AppTypography.medium,
+                ),
+              ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              itemCount: entries.length,
+              separatorBuilder: (BuildContext context, int index) {
+                return const Divider(
+                  height: 1,
+                  indent: _chatListTextStartInset,
+                  color: AppColors.grey100,
                 );
-              }
+              },
+              itemBuilder: (BuildContext context, int index) {
+                final _ChatListEntry entry = entries[index];
+                final AppUser user = entry.user;
 
-              if (snapshot.hasError) {
-                return _ChatLoadingError(
-                  message: 'Chat user loading failed.',
-                  onRetry: _retryUsers,
-                );
-              }
-
-              final List<_ChatListEntry> entries =
-                  snapshot.data ?? const <_ChatListEntry>[];
-
-              if (entries.isEmpty) {
-                return Center(
-                  child: Text(
-                    'No chat users yet.',
-                    style: AppTypography.typography7.copyWith(
-                      color: AppColors.grey600,
-                      fontWeight: AppTypography.medium,
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: _chatListHorizontalPadding,
+                    vertical: 6,
+                  ),
+                  horizontalTitleGap: _chatListTitleGap,
+                  minLeadingWidth: _chatListAvatarSize,
+                  leading: _ChatUserAvatar(
+                    imageUrl: user.profileImageUrl,
+                    unreadCount: entry.unreadCount,
+                  ),
+                  title: Text(
+                    _displayNameFor(user),
+                    style: AppTypography.typography6.copyWith(
+                      color: AppColors.grey900,
+                      fontWeight: AppTypography.bold,
                     ),
                   ),
+                  subtitle: Text(
+                    '@${user.username}',
+                    style: AppTypography.subTypography12.copyWith(
+                      color: AppColors.grey500,
+                      fontWeight: AppTypography.regular,
+                    ),
+                  ),
+                  onTap: () {
+                    setState(() {
+                      _selectedUser = user;
+                    });
+                  },
                 );
-              }
-
-              return ListView.separated(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: entries.length,
-                separatorBuilder: (BuildContext context, int index) {
-                  return const Divider(
-                    height: 1,
-                    indent: _chatListTextStartInset,
-                    color: AppColors.grey100,
-                  );
-                },
-                itemBuilder: (BuildContext context, int index) {
-                  final _ChatListEntry entry = entries[index];
-                  final AppUser user = entry.user;
-
-                  return ListTile(
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: _chatListHorizontalPadding,
-                      vertical: 6,
-                    ),
-                    horizontalTitleGap: _chatListTitleGap,
-                    minLeadingWidth: _chatListAvatarSize,
-                    leading: _ChatUserAvatar(
-                      imageUrl: user.profileImageUrl,
-                      unreadCount: entry.unreadCount,
-                    ),
-                    title: Text(
-                      _displayNameFor(user),
-                      style: AppTypography.typography6.copyWith(
-                        color: AppColors.grey900,
-                        fontWeight: AppTypography.bold,
-                      ),
-                    ),
-                    subtitle: Text(
-                      '@${user.username}',
-                      style: AppTypography.subTypography12.copyWith(
-                        color: AppColors.grey500,
-                        fontWeight: AppTypography.regular,
-                      ),
-                    ),
-                    onTap: () {
-                      setState(() {
-                        _selectedUser = user;
-                      });
-                    },
-                  );
-                },
-              );
-            },
-      ),
+              },
+            ),
     );
   }
 }
@@ -280,6 +411,13 @@ final class _ChatListEntry {
 
   final AppUser user;
   final int unreadCount;
+
+  _ChatListEntry copyWith({int? unreadCount}) {
+    return _ChatListEntry(
+      user: user,
+      unreadCount: unreadCount ?? this.unreadCount,
+    );
+  }
 }
 
 final class ChatConversationScreen extends StatefulWidget {
@@ -291,6 +429,8 @@ final class ChatConversationScreen extends StatefulWidget {
     required this.otherUser,
     required this.otherUserDisplayName,
     required this.onBack,
+    this.initialMessages,
+    this.onMessagesChanged,
     super.key,
   });
 
@@ -301,6 +441,8 @@ final class ChatConversationScreen extends StatefulWidget {
   final AppUser otherUser;
   final String otherUserDisplayName;
   final VoidCallback onBack;
+  final List<ChatMessage>? initialMessages;
+  final ValueChanged<List<ChatMessage>>? onMessagesChanged;
 
   @override
   State<ChatConversationScreen> createState() {
@@ -318,20 +460,27 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   Timer? _reconnectTimer;
   Timer? _pingTimer;
 
-  bool _loading = true;
+  late bool _loading;
   String? _errorMessage;
   bool _disposed = false;
   bool _connectedOnce = false;
   bool _syncingAfterReconnect = false;
   int _unreadOutsideCurrentConversationCount = 0;
-  List<ChatMessage> _messages = const <ChatMessage>[];
+  late List<ChatMessage> _messages;
 
   @override
   void initState() {
     super.initState();
 
+    final List<ChatMessage>? initialMessages = widget.initialMessages;
+
+    _messages = initialMessages == null
+        ? const <ChatMessage>[]
+        : List<ChatMessage>.unmodifiable(initialMessages);
+    _loading = initialMessages == null;
+
     WidgetsBinding.instance.addObserver(this);
-    unawaited(_loadConversation());
+    unawaited(_loadConversation(showLoading: initialMessages == null));
   }
 
   @override
@@ -353,38 +502,41 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     }
   }
 
-  Future<void> _loadConversation() async {
-    setState(() {
-      _loading = true;
-      _errorMessage = null;
-    });
+  Future<void> _loadConversation({required bool showLoading}) async {
+    if (showLoading) {
+      setState(() {
+        _loading = true;
+        _errorMessage = null;
+      });
+    }
 
     try {
       final List<ChatMessage> messages = await widget.chatApi.listConversation(
         otherUserId: widget.otherUser.id,
       );
 
-      await widget.chatApi.markConversationAsRead(
-        otherUserId: widget.otherUser.id,
-      );
-
-      final int unreadOutsideCurrentConversationCount =
-          await _loadUnreadOutsideCurrentConversationCount();
-
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _messages = messages;
-        _unreadOutsideCurrentConversationCount =
-            unreadOutsideCurrentConversationCount;
+        _messages = List<ChatMessage>.unmodifiable(messages);
         _loading = false;
+        _errorMessage = null;
       });
+      _notifyMessagesChanged();
 
       _connectWebSocket();
+      unawaited(_markCurrentConversationReadAndRefreshUnreadCount());
     } catch (_) {
       if (!mounted) {
+        return;
+      }
+
+      if (_messages.isNotEmpty) {
+        setState(() {
+          _loading = false;
+        });
         return;
       }
 
@@ -407,28 +559,33 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         otherUserId: widget.otherUser.id,
       );
 
-      await widget.chatApi.markConversationAsRead(
-        otherUserId: widget.otherUser.id,
-      );
-
-      final int unreadOutsideCurrentConversationCount =
-          await _loadUnreadOutsideCurrentConversationCount();
-
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _messages = messages;
-        _unreadOutsideCurrentConversationCount =
-            unreadOutsideCurrentConversationCount;
+        _messages = List<ChatMessage>.unmodifiable(messages);
         _errorMessage = null;
       });
+      _notifyMessagesChanged();
+      unawaited(_markCurrentConversationReadAndRefreshUnreadCount());
     } catch (_) {
       // Keep the current conversation visible during transient sync errors.
     } finally {
       _syncingAfterReconnect = false;
     }
+  }
+
+  Future<void> _markCurrentConversationReadAndRefreshUnreadCount() async {
+    try {
+      await widget.chatApi.markConversationAsRead(
+        otherUserId: widget.otherUser.id,
+      );
+    } catch (_) {
+      // The next reconnect/sync will try again.
+    }
+
+    await _refreshUnreadOutsideCurrentConversationCount();
   }
 
   void _connectWebSocket() {
@@ -685,6 +842,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     setState(() {
       _messages = List<ChatMessage>.unmodifiable(nextMessages);
     });
+    _notifyMessagesChanged();
   }
 
   void _upsertMessages(List<ChatMessage> messages) {
@@ -711,6 +869,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     setState(() {
       _messages = List<ChatMessage>.unmodifiable(nextMessages);
     });
+    _notifyMessagesChanged();
   }
 
   void _removeMessage(String messageId) {
@@ -719,6 +878,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         _messages.where((ChatMessage message) => message.id != messageId),
       );
     });
+    _notifyMessagesChanged();
   }
 
   void _markMessagesRead(List<String> messageIds, DateTime readAt) {
@@ -739,6 +899,11 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         }),
       );
     });
+    _notifyMessagesChanged();
+  }
+
+  void _notifyMessagesChanged() {
+    widget.onMessagesChanged?.call(_messages);
   }
 
   int _compareMessages(ChatMessage first, ChatMessage second) {
@@ -908,7 +1073,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         body: _ChatLoadingError(
           message: errorMessage,
           onRetry: () {
-            unawaited(_loadConversation());
+            unawaited(_loadConversation(showLoading: true));
           },
         ),
       );

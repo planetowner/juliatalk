@@ -212,6 +212,34 @@ final class ChatApi {
     );
   }
 
+  Future<ChatMessage> retryMessageTranslation({
+    required String messageId,
+  }) async {
+    final http.Response response = await _client.post(
+      _baseUri.resolve('/messages/$messageId/translation/retry'),
+      headers: _headers,
+    );
+
+    if (response.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          response,
+          fallback:
+              'Translation retry failed with status code '
+              '${response.statusCode}.',
+        ),
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(response.body);
+
+    if (decodedBody is! Map<String, dynamic>) {
+      throw const ChatApiException('The server returned an invalid message.');
+    }
+
+    return messageFromJson(decodedBody);
+  }
+
   Future<ChatMessage> sendTextMessage({
     required String recipientId,
     required String content,

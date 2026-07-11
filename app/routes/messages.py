@@ -921,6 +921,128 @@ async def build_single_message_read(
     )[0]
 
 
+async def execute_message_translation(
+    session: AsyncSession,
+    message: Message,
+    *,
+    direct_conversation: DirectConversation,
+    force: bool = False,
+) -> bool:
+    users_by_id = await load_direct_users(session, direct_conversation)
+    sender = users_by_id.get(message.sender_id)
+    recipient_id = direct_recipient_id(
+        direct_conversation,
+        message.sender_id,
+    )
+    recipient = users_by_id.get(recipient_id)
+
+    if sender is None or recipient is None:
+        return False
+
+    translation = await session.scalar(
+        select(MessageTranslation).where(
+            MessageTranslation.message_id == message.id,
+            MessageTranslation.target_language == recipient.preferred_language,
+        )
+    )
+
+    source_language = (
+        translation.source_language
+        if force and translation is not None
+        else message.source_language or sender.preferred_language
+    )
+
+    should_run_translation = force or should_translate_text(
+        message.body,
+        source_language=source_language,
+        target_language=recipient.preferred_language,
+    )
+
+    if not should_run_translation:
+        if translation is None:
+            return False
+
+        translation.translated_body = message.body
+        translation.status = TranslationStatus.COMPLETED
+        translation.provider = None
+        translation.model = None
+        translation.error_message = None
+        translation.updated_at = datetime.now(timezone.utc)
+        return True
+
+    if translation is None:
+        translation = MessageTranslation(
+            message_id=message.id,
+            source_language=source_language,
+            target_language=recipient.preferred_language,
+            status=TranslationStatus.PENDING,
+        )
+        session.add(translation)
+        await session.flush()
+    elif force:
+        translation.source_language = source_language
+        translation.translated_body = None
+        translation.status = TranslationStatus.PENDING
+        translation.provider = None
+        translation.model = None
+        translation.error_message = None
+        translation.updated_at = datetime.now(timezone.utc)
+
+    if translation.status != TranslationStatus.PENDING:
+        return False
+
+    context_result = await session.scalars(
+        select(Message)
+        .where(
+            Message.conversation_id == message.conversation_id,
+            Message.id != message.id,
+            Message.kind == MessageKind.TEXT,
+            Message.deleted_at.is_(None),
+            Message.created_at <= message.created_at,
+        )
+        .order_by(desc(Message.created_at), desc(Message.id))
+        .limit(8)
+    )
+
+    previous_messages = list(context_result)
+    previous_messages.reverse()
+
+    context_messages = [
+        (
+            f"{users_by_id.get(previous.sender_id, sender).display_name}: "
+            f"{previous.body}"
+        )
+        for previous in previous_messages
+    ]
+
+    try:
+        translation_result = await translate_message(
+            text=message.body,
+            source_language=source_language,
+            target_language=recipient.preferred_language,
+            context_messages=context_messages,
+        )
+    except Exception as error:
+        logger.exception(
+            "Translation failed for message ID %s",
+            message.id,
+        )
+        translation.translated_body = None
+        translation.status = TranslationStatus.FAILED
+        translation.provider = TRANSLATION_PROVIDER_NAME
+        translation.model = DEEPSEEK_MODEL
+        translation.error_message = str(error)
+    else:
+        translation.translated_body = translation_result.translated_text
+        translation.status = TranslationStatus.COMPLETED
+        translation.provider = translation_result.provider
+        translation.model = translation_result.model
+        translation.error_message = None
+
+    translation.updated_at = datetime.now(timezone.utc)
+    return True
+
+
 async def translate_and_publish_message(message_id: UUID) -> None:
     async with SessionLocal() as session:
         message = await session.get(Message, message_id)
@@ -941,123 +1063,14 @@ async def translate_and_publish_message(message_id: UUID) -> None:
         if direct_conversation is None:
             return
 
-        users_by_id = await load_direct_users(session, direct_conversation)
-        sender = users_by_id.get(message.sender_id)
-        recipient_id = direct_recipient_id(
-            direct_conversation,
-            message.sender_id,
+        did_update_translation = await execute_message_translation(
+            session,
+            message,
+            direct_conversation=direct_conversation,
         )
-        recipient = users_by_id.get(recipient_id)
 
-        if sender is None or recipient is None:
+        if not did_update_translation:
             return
-
-        source_language = (
-            message.source_language or sender.preferred_language
-        )
-
-        translation = await session.scalar(
-            select(MessageTranslation).where(
-                MessageTranslation.message_id == message.id,
-                MessageTranslation.target_language
-                == recipient.preferred_language,
-            )
-        )
-
-        if not should_translate_text(
-            message.body,
-            source_language=source_language,
-            target_language=recipient.preferred_language,
-        ):
-            if translation is not None:
-                translation.translated_body = message.body
-                translation.status = TranslationStatus.COMPLETED
-                translation.provider = None
-                translation.model = None
-                translation.error_message = None
-                translation.updated_at = datetime.now(timezone.utc)
-                await session.commit()
-                await session.refresh(message)
-
-                message_read = await build_single_message_read(
-                    session,
-                    message,
-                    direct_conversation=direct_conversation,
-                )
-                websocket_event = {
-                    "type": "message.translation.updated",
-                    "message": message_read.model_dump(mode="json"),
-                }
-
-                await send_to_direct_participants(
-                    direct_conversation,
-                    websocket_event,
-                )
-
-            return
-
-        if translation is None:
-            translation = MessageTranslation(
-                message_id=message.id,
-                source_language=source_language,
-                target_language=recipient.preferred_language,
-                status=TranslationStatus.PENDING,
-            )
-            session.add(translation)
-            await session.flush()
-
-        if translation.status != TranslationStatus.PENDING:
-            return
-
-        context_result = await session.scalars(
-            select(Message)
-            .where(
-                Message.conversation_id == message.conversation_id,
-                Message.id != message.id,
-                Message.kind == MessageKind.TEXT,
-                Message.deleted_at.is_(None),
-                Message.created_at <= message.created_at,
-            )
-            .order_by(desc(Message.created_at), desc(Message.id))
-            .limit(8)
-        )
-
-        previous_messages = list(context_result)
-        previous_messages.reverse()
-
-        context_messages = [
-            (
-                f"{users_by_id.get(previous.sender_id, sender).display_name}: "
-                f"{previous.body}"
-            )
-            for previous in previous_messages
-        ]
-
-        try:
-            translation_result = await translate_message(
-                text=message.body,
-                source_language=source_language,
-                target_language=recipient.preferred_language,
-                context_messages=context_messages,
-            )
-        except Exception as error:
-            logger.exception(
-                "Translation failed for message ID %s",
-                message.id,
-            )
-            translation.translated_body = None
-            translation.status = TranslationStatus.FAILED
-            translation.provider = TRANSLATION_PROVIDER_NAME
-            translation.model = DEEPSEEK_MODEL
-            translation.error_message = str(error)
-        else:
-            translation.translated_body = translation_result.translated_text
-            translation.status = TranslationStatus.COMPLETED
-            translation.provider = translation_result.provider
-            translation.model = translation_result.model
-            translation.error_message = None
-
-        translation.updated_at = datetime.now(timezone.utc)
 
         await session.commit()
         await session.refresh(message)
@@ -1518,6 +1531,81 @@ async def mark_conversation_as_read(
     return MessagesMarkedReadResponse(
         marked_read_count=len(unread_messages),
     )
+
+
+@router.post(
+    "/{message_id}/translation/retry",
+    response_model=MessageRead,
+)
+async def retry_message_translation(
+    message_id: UUID,
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+) -> MessageRead:
+    message = await session.get(Message, message_id)
+
+    if (
+        message is None
+        or message.deleted_at is not None
+        or message.kind != MessageKind.TEXT
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+
+    direct_conversation = await session.scalar(
+        select(DirectConversation).where(
+            DirectConversation.conversation_id == message.conversation_id
+        )
+    )
+
+    if direct_conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
+    participant_ids = direct_participant_ids(direct_conversation)
+
+    if current_user.id not in participant_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a participant in this conversation",
+        )
+
+    recipient_id = direct_recipient_id(direct_conversation, message.sender_id)
+
+    if current_user.id != recipient_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the message recipient can retry translation",
+        )
+
+    await execute_message_translation(
+        session,
+        message,
+        direct_conversation=direct_conversation,
+        force=True,
+    )
+    await session.commit()
+    await session.refresh(message)
+
+    message_read = await build_single_message_read(
+        session,
+        message,
+        direct_conversation=direct_conversation,
+    )
+
+    await send_to_direct_participants(
+        direct_conversation,
+        {
+            "type": "message.translation.updated",
+            "message": message_read.model_dump(mode="json"),
+        },
+    )
+
+    return message_read
 
 
 @router.patch(

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
@@ -245,6 +247,74 @@ void main() {
       expect(find.text('다음에는 제대로 말할게.'), findsOneWidget);
     },
   );
+
+  testWidgets('failed translation retry uses server retry callback', (
+    WidgetTester tester,
+  ) async {
+    int serverRetryRequests = 0;
+    int localTranslationRequests = 0;
+    final Completer<ChatMessage> retryCompleter = Completer<ChatMessage>();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatConversationView(
+          initialMessages: <ChatMessage>[
+            ChatMessage(
+              id: 'server-retry',
+              senderId: '2',
+              recipientId: '1',
+              content: '欧巴我快要登机了但是我还想再跟你说很多很多话',
+              createdAt: DateTime(2026, 7, 10, 19, 21),
+              translationStatus: ChatTranslationStatus.failed,
+              translationFailureReason: 'Server translation failed',
+              sourceLanguage: 'zh-CN',
+              translatedLanguage: 'ko',
+            ),
+          ],
+          currentUserPreferredLanguage: 'ko',
+          onTranslateMessage: (ChatMessage message) async {
+            localTranslationRequests++;
+            return 'local translation';
+          },
+          onRetryTranslation: ({required String messageId}) async {
+            serverRetryRequests++;
+            return retryCompleter.future;
+          },
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(find.text('Retry'), findsOneWidget);
+
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+
+    expect(serverRetryRequests, 1);
+    expect(localTranslationRequests, 0);
+    expect(find.text('Translating…'), findsOneWidget);
+
+    retryCompleter.complete(
+      ChatMessage(
+        id: 'server-retry',
+        senderId: '2',
+        recipientId: '1',
+        content: '欧巴我快要登机了但是我还想再跟你说很多很多话',
+        createdAt: DateTime(2026, 7, 10, 19, 21),
+        translationStatus: ChatTranslationStatus.translated,
+        translatedContent: '오빠, 나 곧 탑승하는데 아직 하고 싶은 말이 많아.',
+        sourceLanguage: 'zh-CN',
+        translatedLanguage: 'ko',
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Translation failed:'), findsNothing);
+    expect(find.text('Retry'), findsNothing);
+    expect(find.text('오빠, 나 곧 탑승하는데 아직 하고 싶은 말이 많아.'), findsOneWidget);
+  });
 
   testWidgets('translated text stays inside the bubble', (
     WidgetTester tester,

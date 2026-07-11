@@ -102,6 +102,9 @@ typedef ChatTextMessageEditor =
 
 typedef ChatMessageTranslator = Future<String?> Function(ChatMessage message);
 
+typedef ChatMessageTranslationRetrier =
+    Future<ChatMessage> Function({required String messageId});
+
 typedef ChatMessageDeleter = Future<void> Function({required String messageId});
 
 enum _CallNowAction { voice, video }
@@ -217,6 +220,7 @@ final class ChatConversationView extends StatefulWidget {
     this.onCreateMediaAssetAccessUrl,
     this.onEditTextMessage,
     this.onTranslateMessage,
+    this.onRetryTranslation,
     this.onDeleteMessage,
     this.onBack,
     this.unreadOtherConversationCount = 0,
@@ -240,6 +244,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatTextMessageEditor? onEditTextMessage;
   final ChatMessageTranslator? onTranslateMessage;
+  final ChatMessageTranslationRetrier? onRetryTranslation;
   final ChatMessageDeleter? onDeleteMessage;
   final VoidCallback? onBack;
   final int unreadOtherConversationCount;
@@ -2232,6 +2237,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       otherParticipantId: widget.otherParticipantId,
                       otherParticipantName: widget.otherParticipantName,
                       onTranslateMessage: widget.onTranslateMessage,
+                      onRetryTranslation: widget.onRetryTranslation,
                       onDeleteMessage: widget.onDeleteMessage,
                       onPhotoMessageTap: _openPhotoViewer,
                       onCreateMediaAssetAccessUrl:
@@ -2462,38 +2468,45 @@ final class _ChatTopBar extends StatelessWidget {
                 Align(
                   alignment: Alignment.centerLeft,
                   child: Padding(
-                    padding: const EdgeInsets.only(left: 2),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: 'Back',
-                          onPressed: onBackPressed,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints.tightFor(
-                            width: 48,
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Tooltip(
+                      message: 'Back',
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: onBackPressed,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minWidth: 48),
+                          child: SizedBox(
                             height: 48,
-                          ),
-                          icon: const Icon(
-                            Icons.chevron_left_rounded,
-                            size: 40,
-                            color: AppColors.grey900,
-                          ),
-                        ),
-                        Transform.translate(
-                          offset: const Offset(-6, 0),
-                          child: Text(
-                            _formatUnreadCount(unreadOtherConversationCount),
-                            maxLines: 1,
-                            overflow: TextOverflow.fade,
-                            softWrap: false,
-                            style: AppTypography.typography5.copyWith(
-                              color: AppColors.grey900,
-                              fontWeight: AppTypography.medium,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.chevron_left_rounded,
+                                  size: 36,
+                                  color: AppColors.grey700,
+                                ),
+                                if (unreadOtherConversationCount > 0) ...[
+                                  const SizedBox(width: 1),
+                                  Text(
+                                    _formatUnreadCount(
+                                      unreadOtherConversationCount,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.fade,
+                                    softWrap: false,
+                                    style: AppTypography.typography5.copyWith(
+                                      color: AppColors.grey700,
+                                      fontWeight: AppTypography.medium,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                ],
+                              ],
                             ),
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -5326,6 +5339,7 @@ final class _MessageList extends StatefulWidget {
     required this.otherParticipantId,
     required this.otherParticipantName,
     required this.onTranslateMessage,
+    required this.onRetryTranslation,
     required this.onDeleteMessage,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
@@ -5350,6 +5364,7 @@ final class _MessageList extends StatefulWidget {
   final String otherParticipantId;
   final String otherParticipantName;
   final ChatMessageTranslator? onTranslateMessage;
+  final ChatMessageTranslationRetrier? onRetryTranslation;
   final ChatMessageDeleter? onDeleteMessage;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
@@ -6285,7 +6300,95 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   void _retryTranslation(String messageId) {
+    final ChatMessageTranslationRetrier? retryTranslation =
+        widget.onRetryTranslation;
+
+    if (retryTranslation != null) {
+      unawaited(_retryServerTranslation(messageId, retryTranslation));
+      return;
+    }
+
     unawaited(_startTranslation(messageId));
+  }
+
+  Future<void> _retryServerTranslation(
+    String messageId,
+    ChatMessageTranslationRetrier retryTranslation,
+  ) async {
+    final int messageIndex = _messages.indexWhere(
+      (ChatMessage message) => message.id == messageId,
+    );
+
+    if (messageIndex == -1) {
+      return;
+    }
+
+    final ChatMessage currentMessage = _messages[messageIndex];
+
+    if (currentMessage.translationStatus == ChatTranslationStatus.translating) {
+      return;
+    }
+
+    setState(() {
+      _showTranslatedMessageIds.remove(messageId);
+      _messages[messageIndex] = currentMessage.copyWith(
+        translationStatus: ChatTranslationStatus.translating,
+        clearTranslationFailureReason: true,
+      );
+    });
+
+    ChatMessage retriedMessage;
+
+    try {
+      retriedMessage = await retryTranslation(messageId: messageId);
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      final int failedIndex = _messages.indexWhere(
+        (ChatMessage message) => message.id == messageId,
+      );
+
+      if (failedIndex == -1) {
+        return;
+      }
+
+      setState(() {
+        _messages[failedIndex] = _messages[failedIndex].copyWith(
+          translationStatus: ChatTranslationStatus.failed,
+          translationFailureReason: 'Translation unavailable',
+        );
+      });
+
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      final int retriedIndex = _messages.indexWhere(
+        (ChatMessage message) => message.id == messageId,
+      );
+
+      if (retriedIndex == -1) {
+        _messages.add(retriedMessage);
+      } else {
+        _messages[retriedIndex] = retriedMessage;
+      }
+
+      _messages.sort(_compareMessages);
+
+      if (retriedMessage.translationStatus ==
+              ChatTranslationStatus.translated &&
+          retriedMessage.translatedContent != null) {
+        _showTranslatedMessageIds.add(messageId);
+      } else {
+        _showTranslatedMessageIds.remove(messageId);
+      }
+    });
   }
 
   String _displayedContentFor(ChatMessage message) {
@@ -6652,6 +6755,9 @@ final class _MessageListState extends State<_MessageList> {
               _highlightedMessageId ?? widget.activeSearchMessageId,
           searchQuery: widget.searchQuery,
           canRequestTranslation: widget.onTranslateMessage != null,
+          canRetryTranslation:
+              widget.onTranslateMessage != null ||
+              widget.onRetryTranslation != null,
           onIncomingMessageTap: _handleIncomingMessageTap,
           onFileMessageTap: _handleFileMessageTap,
           onPhotoMessageTap: widget.onPhotoMessageTap,
@@ -7102,6 +7208,7 @@ final class _MessageGroup extends StatelessWidget {
     required this.highlightedMessageId,
     required this.searchQuery,
     required this.canRequestTranslation,
+    required this.canRetryTranslation,
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
@@ -7122,6 +7229,7 @@ final class _MessageGroup extends StatelessWidget {
   final String? highlightedMessageId;
   final String searchQuery;
   final bool canRequestTranslation;
+  final bool canRetryTranslation;
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
@@ -7160,6 +7268,7 @@ final class _MessageGroup extends StatelessWidget {
       highlightedMessageId: highlightedMessageId,
       searchQuery: searchQuery,
       canRequestTranslation: canRequestTranslation,
+      canRetryTranslation: canRetryTranslation,
       onIncomingMessageTap: onIncomingMessageTap,
       onFileMessageTap: onFileMessageTap,
       onPhotoMessageTap: onPhotoMessageTap,
@@ -7182,6 +7291,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.highlightedMessageId,
     required this.searchQuery,
     required this.canRequestTranslation,
+    required this.canRetryTranslation,
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
@@ -7200,6 +7310,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
   final String? highlightedMessageId;
   final String searchQuery;
   final bool canRequestTranslation;
+  final bool canRetryTranslation;
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
@@ -7234,6 +7345,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   isHighlighted: messages[index].id == highlightedMessageId,
                   searchQuery: searchQuery,
                   canRequestTranslation: canRequestTranslation,
+                  canRetryTranslation: canRetryTranslation,
                   onMessageTap: () {
                     onIncomingMessageTap(messages[index].id);
                   },
@@ -7269,6 +7381,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.isHighlighted,
     required this.searchQuery,
     required this.canRequestTranslation,
+    required this.canRetryTranslation,
     required this.onMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
@@ -7289,6 +7402,7 @@ final class _IncomingMessageRow extends StatelessWidget {
   final bool isHighlighted;
   final String searchQuery;
   final bool canRequestTranslation;
+  final bool canRetryTranslation;
   final VoidCallback onMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
@@ -7380,7 +7494,7 @@ final class _IncomingMessageRow extends StatelessWidget {
                 otherParticipantName: otherParticipantName,
                 showTranslation: showTranslation,
                 searchQuery: searchQuery,
-                canRequestTranslation: canRequestTranslation,
+                canRetryTranslation: canRetryTranslation,
                 canUseTranslation: canUseTranslation,
                 onRetryTranslation: onRetryTranslation,
                 onReplyQuoteTap: onReplyQuoteTap,
@@ -7432,7 +7546,7 @@ final class _IncomingMessageContent extends StatelessWidget {
     required this.otherParticipantName,
     required this.showTranslation,
     required this.searchQuery,
-    required this.canRequestTranslation,
+    required this.canRetryTranslation,
     required this.canUseTranslation,
     required this.onRetryTranslation,
     required this.onReplyQuoteTap,
@@ -7443,7 +7557,7 @@ final class _IncomingMessageContent extends StatelessWidget {
   final String otherParticipantName;
   final bool showTranslation;
   final String searchQuery;
-  final bool canRequestTranslation;
+  final bool canRetryTranslation;
   final bool canUseTranslation;
   final VoidCallback onRetryTranslation;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -7591,7 +7705,7 @@ final class _IncomingMessageContent extends StatelessWidget {
                     fontWeight: AppTypography.regular,
                   ),
                 ),
-                if (canRequestTranslation && canUseTranslation) ...[
+                if (canRetryTranslation && canUseTranslation) ...[
                   const SizedBox(height: 2),
                   TextButton(
                     onPressed: onRetryTranslation,

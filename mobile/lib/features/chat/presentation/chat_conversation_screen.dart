@@ -809,6 +809,20 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     return message;
   }
 
+  Future<ChatMessage> _retryTextMessageTranslation({
+    required String messageId,
+  }) async {
+    final ChatMessage message = await widget.chatApi.retryMessageTranslation(
+      messageId: messageId,
+    );
+
+    if (mounted) {
+      _upsertMessage(message);
+    }
+
+    return message;
+  }
+
   Future<void> _deleteMessage({required String messageId}) async {
     await widget.chatApi.deleteMessage(messageId: messageId);
 
@@ -863,6 +877,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         onSendCallMessage: _sendCallMessage,
         onCreateMediaAssetAccessUrl: widget.chatApi.createMediaAssetAccessUrl,
         onEditTextMessage: _editTextMessage,
+        onRetryTranslation: _retryTextMessageTranslation,
         onDeleteMessage: _deleteMessage,
         onBack: widget.onBack,
         unreadOtherConversationCount: _unreadOutsideCurrentConversationCount,

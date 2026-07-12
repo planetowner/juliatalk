@@ -326,6 +326,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   bool _searchModeActive = false;
   bool _searchDateSheetOpen = false;
+  bool _searchViewportAnchorActive = false;
+  bool _searchViewportAnchorReleasePending = false;
+  bool _searchViewportAnchorReleaseScheduled = false;
+  bool _searchSubmitted = false;
   String _searchQuery = '';
   List<String> _searchResultMessageIds = const <String>[];
   int? _searchResultIndex;
@@ -1192,6 +1196,14 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     required double previousKeyboardHeight,
     required double keyboardHeight,
   }) {
+    if (_searchViewportAnchorActive) {
+      if (_searchViewportAnchorReleasePending && keyboardHeight <= 0.5) {
+        _scheduleSearchViewportAnchorRelease();
+      }
+
+      return;
+    }
+
     final bool keyboardWasVisible = previousKeyboardHeight > 0.5;
 
     final bool keyboardIsClosing =
@@ -1342,16 +1354,20 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     return _searchQuery.trim().isNotEmpty;
   }
 
-  bool get _canMoveToPreviousSearchResult {
-    final int? resultIndex = _searchResultIndex;
-
-    return _hasSearchQuery && resultIndex != null && resultIndex > 0;
+  bool get _hasSubmittedSearch {
+    return _searchSubmitted && _hasSearchQuery;
   }
 
-  bool get _canMoveToNextSearchResult {
+  bool get _canMoveToNewerSearchResult {
     final int? resultIndex = _searchResultIndex;
 
-    return _hasSearchQuery &&
+    return _hasSubmittedSearch && resultIndex != null && resultIndex > 0;
+  }
+
+  bool get _canMoveToOlderSearchResult {
+    final int? resultIndex = _searchResultIndex;
+
+    return _hasSubmittedSearch &&
         resultIndex != null &&
         resultIndex < _searchResultMessageIds.length - 1;
   }
@@ -1362,10 +1378,12 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
+    _beginSearchViewportAnchorPreservation();
     _dismissComposerSurface();
 
     setState(() {
       _searchModeActive = true;
+      _searchSubmitted = false;
       _searchQuery = _searchController.text;
       _searchResultMessageIds = const <String>[];
       _searchResultIndex = null;
@@ -1377,7 +1395,6 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       }
 
       _searchFocusNode.requestFocus();
-      _syncSearchResults();
     });
   }
 
@@ -1393,18 +1410,54 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _searchFocusNode.unfocus();
     _searchController.clear();
+    _searchViewportAnchorReleasePending = true;
 
     setState(() {
       _searchModeActive = false;
+      _searchSubmitted = false;
       _searchQuery = '';
       _searchResultMessageIds = const <String>[];
       _searchResultIndex = null;
       _selectedSearchDate = null;
     });
+
+    _scheduleSearchViewportAnchorRelease();
+  }
+
+  void _beginSearchViewportAnchorPreservation() {
+    _searchViewportAnchorActive = true;
+    _searchViewportAnchorReleasePending = false;
+    _searchViewportAnchorReleaseScheduled = false;
+    _messageListKey.currentState?.beginViewportAnchorPreservation();
+  }
+
+  void _scheduleSearchViewportAnchorRelease() {
+    if (!_searchViewportAnchorActive ||
+        !_searchViewportAnchorReleasePending ||
+        _searchViewportAnchorReleaseScheduled ||
+        _currentKeyboardHeight() > 0.5) {
+      return;
+    }
+
+    _searchViewportAnchorReleaseScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _searchViewportAnchorReleaseScheduled = false;
+
+      if (!mounted ||
+          !_searchViewportAnchorReleasePending ||
+          _currentKeyboardHeight() > 0.5) {
+        return;
+      }
+
+      _messageListKey.currentState?.endViewportAnchorPreservation();
+      _searchViewportAnchorActive = false;
+      _searchViewportAnchorReleasePending = false;
+    });
   }
 
   void _syncSearchResults({bool scrollToFirstResult = false}) {
-    if (!_searchModeActive) {
+    if (!_searchModeActive || !_hasSubmittedSearch) {
       return;
     }
 
@@ -1427,9 +1480,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   void _handleSearchQueryChanged(String value) {
     setState(() {
       _searchQuery = value;
+      _searchSubmitted = false;
+      _searchResultMessageIds = const <String>[];
+      _searchResultIndex = null;
+      _selectedSearchDate = null;
     });
-
-    _syncSearchResults(scrollToFirstResult: value.trim().isNotEmpty);
   }
 
   void _clearSearchQuery() {
@@ -1442,6 +1497,16 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   void _submitSearch(String value) {
+    final bool hasQuery = value.trim().isNotEmpty;
+
+    setState(() {
+      _searchQuery = value;
+      _searchSubmitted = hasQuery;
+      _searchResultMessageIds = const <String>[];
+      _searchResultIndex = null;
+      _selectedSearchDate = null;
+    });
+
     _syncSearchResults(scrollToFirstResult: true);
     _searchFocusNode.unfocus();
   }
@@ -1462,8 +1527,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     unawaited(messageListState.scrollToSearchMessage(messageId));
   }
 
-  void _moveToPreviousSearchResult() {
-    if (!_canMoveToPreviousSearchResult) {
+  void _moveToNewerSearchResult() {
+    if (!_canMoveToNewerSearchResult) {
       return;
     }
 
@@ -1474,8 +1539,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _scrollToCurrentSearchResult();
   }
 
-  void _moveToNextSearchResult() {
-    if (!_canMoveToNextSearchResult) {
+  void _moveToOlderSearchResult() {
+    if (!_canMoveToOlderSearchResult) {
       return;
     }
 
@@ -1561,7 +1626,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _selectedSearchDate = normalizedDate;
     });
 
-    if (_hasSearchQuery && _searchResultMessageIds.isNotEmpty) {
+    if (_hasSubmittedSearch && _searchResultMessageIds.isNotEmpty) {
       final int matchingIndex = _searchResultMessageIds.indexWhere((String id) {
         final ChatMessage? message = messageListState.findMessage(id);
 
@@ -2100,17 +2165,28 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   String _searchCounterText() {
-    if (!_hasSearchQuery) {
+    if (!_hasSubmittedSearch) {
       return '';
     }
 
     final int? resultIndex = _searchResultIndex;
 
     if (resultIndex == null || _searchResultMessageIds.isEmpty) {
-      return '0/0';
+      return _searchNoResultsText;
     }
 
     return '${resultIndex + 1}/${_searchResultMessageIds.length}';
+  }
+
+  String get _searchNoResultsText {
+    switch (_normalizeChatLanguageCode(widget.currentUserPreferredLanguage)) {
+      case 'ko':
+        return '검색 결과 없음';
+      case 'zh-CN':
+        return '查无结果';
+      default:
+        return 'No results';
+    }
   }
 
   @override
@@ -2188,7 +2264,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         !_searchModeActive && _hasActiveVoiceCall && !showingVoiceCallScreen;
 
     final double messageListBottomPadding = _searchModeActive
-        ? searchToolbarBottom + 70
+        ? searchToolbarBottom +
+              _ChatSearchToolbar.height +
+              _messageToComposerGap
         : _messageToComposerGap;
 
     final double messageListHeaderInset = showingVoiceCallScreen
@@ -2257,7 +2335,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                           ? _searchFocusNode.unfocus
                           : _dismissComposerSurface,
                       onPrepareMessageActions: _prepareMessageActions,
-                      searchQuery: _searchModeActive ? _searchQuery : '',
+                      searchQuery: _searchModeActive && _hasSubmittedSearch
+                          ? _searchQuery
+                          : '',
                       activeSearchMessageId: _currentSearchMessageId,
                       topPadding: messageListTopPadding,
                       bottomPadding: messageListBottomPadding,
@@ -2410,12 +2490,12 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                   bottom: searchToolbarBottom,
                   child: _ChatSearchToolbar(
                     counterText: _searchCounterText(),
-                    showCounter: _hasSearchQuery,
-                    canMovePrevious: _canMoveToPreviousSearchResult,
-                    canMoveNext: _canMoveToNextSearchResult,
+                    showCounter: _hasSubmittedSearch,
+                    canMoveOlder: _canMoveToOlderSearchResult,
+                    canMoveNewer: _canMoveToNewerSearchResult,
                     onDateSearchPressed: _openSearchDateSheet,
-                    onMovePrevious: _moveToPreviousSearchResult,
-                    onMoveNext: _moveToNextSearchResult,
+                    onMoveOlder: _moveToOlderSearchResult,
+                    onMoveNewer: _moveToNewerSearchResult,
                   ),
                 ),
             ],
@@ -2805,20 +2885,22 @@ final class _ChatSearchToolbar extends StatelessWidget {
   const _ChatSearchToolbar({
     required this.counterText,
     required this.showCounter,
-    required this.canMovePrevious,
-    required this.canMoveNext,
+    required this.canMoveOlder,
+    required this.canMoveNewer,
     required this.onDateSearchPressed,
-    required this.onMovePrevious,
-    required this.onMoveNext,
+    required this.onMoveOlder,
+    required this.onMoveNewer,
   });
 
   final String counterText;
   final bool showCounter;
-  final bool canMovePrevious;
-  final bool canMoveNext;
+  final bool canMoveOlder;
+  final bool canMoveNewer;
   final VoidCallback onDateSearchPressed;
-  final VoidCallback onMovePrevious;
-  final VoidCallback onMoveNext;
+  final VoidCallback onMoveOlder;
+  final VoidCallback onMoveNewer;
+
+  static const double height = 56;
 
   @override
   Widget build(BuildContext context) {
@@ -2830,43 +2912,48 @@ final class _ChatSearchToolbar extends StatelessWidget {
       borderRadius: AppRadius.borderRadiusFull,
       clipBehavior: Clip.antiAlias,
       child: SizedBox(
-        height: 56,
-        child: Row(
+        height: height,
+        child: Stack(
+          alignment: Alignment.center,
           children: [
-            const SizedBox(width: 14),
-            _SearchToolIconButton(
-              semanticLabel: 'Search by date',
-              onPressed: onDateSearchPressed,
-              child: const _CalendarSearchIcon(),
-            ),
-            Expanded(
-              child: Center(
-                child: showCounter
-                    ? Text(
-                        counterText,
-                        key: const ValueKey<String>('chat-search-counter'),
-                        style: AppTypography.typography5.copyWith(
-                          color: AppColors.grey900,
-                          fontWeight: AppTypography.bold,
-                        ),
-                      )
-                    : const SizedBox.shrink(),
+            Positioned(
+              left: 14,
+              child: _SearchToolIconButton(
+                semanticLabel: 'Search by date',
+                onPressed: onDateSearchPressed,
+                child: const _CalendarSearchIcon(),
               ),
             ),
-            _SearchChevronButton(
-              semanticLabel: 'Previous search result',
-              icon: Icons.keyboard_arrow_up_rounded,
-              enabled: canMovePrevious,
-              onPressed: onMovePrevious,
+            if (showCounter)
+              Text(
+                counterText,
+                key: const ValueKey<String>('chat-search-counter'),
+                style: AppTypography.typography5.copyWith(
+                  color: AppColors.grey900,
+                  fontWeight: AppTypography.bold,
+                ),
+              ),
+            Positioned(
+              right: 10,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _SearchChevronButton(
+                    semanticLabel: 'Older search result',
+                    icon: Icons.keyboard_arrow_up_rounded,
+                    enabled: canMoveOlder,
+                    onPressed: onMoveOlder,
+                  ),
+                  const SizedBox(width: 6),
+                  _SearchChevronButton(
+                    semanticLabel: 'Newer search result',
+                    icon: Icons.keyboard_arrow_down_rounded,
+                    enabled: canMoveNewer,
+                    onPressed: onMoveNewer,
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(width: 6),
-            _SearchChevronButton(
-              semanticLabel: 'Next search result',
-              icon: Icons.keyboard_arrow_down_rounded,
-              enabled: canMoveNext,
-              onPressed: onMoveNext,
-            ),
-            const SizedBox(width: 10),
           ],
         ),
       ),
@@ -5308,6 +5395,110 @@ List<_SearchMatch> _searchMatchesIn(String text, String query) {
   return List<_SearchMatch>.unmodifiable(matches);
 }
 
+final class _ViewportAnchorScrollController extends ScrollController {
+  _ViewportAnchorScrollController({required this.bottomPadding});
+
+  final ValueGetter<double> bottomPadding;
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _ViewportAnchorScrollPosition(
+      physics: physics,
+      context: context,
+      initialPixels: initialScrollOffset,
+      keepScrollOffset: keepScrollOffset,
+      oldPosition: oldPosition,
+      debugLabel: debugLabel,
+      bottomPadding: bottomPadding,
+    );
+  }
+
+  void beginViewportAnchorPreservation() {
+    if (!hasClients) {
+      return;
+    }
+
+    (position as _ViewportAnchorScrollPosition)
+        .beginViewportAnchorPreservation();
+  }
+
+  void endViewportAnchorPreservation() {
+    if (!hasClients) {
+      return;
+    }
+
+    (position as _ViewportAnchorScrollPosition).endViewportAnchorPreservation();
+  }
+}
+
+final class _ViewportAnchorScrollPosition
+    extends ScrollPositionWithSingleContext {
+  _ViewportAnchorScrollPosition({
+    required super.physics,
+    required super.context,
+    required super.initialPixels,
+    required super.keepScrollOffset,
+    required super.oldPosition,
+    required super.debugLabel,
+    required this.bottomPadding,
+  });
+
+  final ValueGetter<double> bottomPadding;
+
+  bool _preserveViewportAnchor = false;
+  double? _lastEffectiveViewportBottom;
+
+  void beginViewportAnchorPreservation() {
+    _preserveViewportAnchor = true;
+    _lastEffectiveViewportBottom = hasViewportDimension
+        ? viewportDimension - bottomPadding()
+        : null;
+  }
+
+  void endViewportAnchorPreservation() {
+    _preserveViewportAnchor = false;
+    _lastEffectiveViewportBottom = null;
+  }
+
+  @override
+  bool correctForNewDimensions(
+    ScrollMetrics oldPosition,
+    ScrollMetrics newPosition,
+  ) {
+    final double currentBottomPadding = bottomPadding();
+    final double currentEffectiveViewportBottom =
+        newPosition.viewportDimension - currentBottomPadding;
+
+    if (!_preserveViewportAnchor) {
+      _lastEffectiveViewportBottom = currentEffectiveViewportBottom;
+      return super.correctForNewDimensions(oldPosition, newPosition);
+    }
+
+    final double previousEffectiveViewportBottom =
+        _lastEffectiveViewportBottom ??
+        oldPosition.viewportDimension - currentBottomPadding;
+    final double targetPixels =
+        (pixels +
+                previousEffectiveViewportBottom -
+                currentEffectiveViewportBottom)
+            .clamp(newPosition.minScrollExtent, newPosition.maxScrollExtent)
+            .toDouble();
+
+    _lastEffectiveViewportBottom = currentEffectiveViewportBottom;
+
+    if ((targetPixels - pixels).abs() < 0.5) {
+      return true;
+    }
+
+    correctPixels(targetPixels);
+    return false;
+  }
+}
+
 final class _MessageList extends StatefulWidget {
   const _MessageList({
     required this.initialMessages,
@@ -5373,7 +5564,7 @@ final class _MessageListState extends State<_MessageList> {
 
   final Set<String> _showTranslatedMessageIds = <String>{};
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
-  final ScrollController _scrollController = ScrollController();
+  late final _ViewportAnchorScrollController _scrollController;
   bool _didResolveInitialScrollPosition = false;
   bool _pinBottomDuringContentResize = false;
 
@@ -5393,6 +5584,10 @@ final class _MessageListState extends State<_MessageList> {
   @override
   void initState() {
     super.initState();
+
+    _scrollController = _ViewportAnchorScrollController(
+      bottomPadding: () => widget.bottomPadding,
+    );
 
     _messageClock = widget.initialClock ?? DateTime.now();
     _messages = List<ChatMessage>.of(
@@ -5512,6 +5707,14 @@ final class _MessageListState extends State<_MessageList> {
         .toDouble();
 
     _scrollController.jumpTo(currentOffset);
+  }
+
+  void beginViewportAnchorPreservation() {
+    _scrollController.beginViewportAnchorPreservation();
+  }
+
+  void endViewportAnchorPreservation() {
+    _scrollController.endViewportAnchorPreservation();
   }
 
   void _syncMessageClockWith(ChatMessage message) {
@@ -5766,15 +5969,15 @@ final class _MessageListState extends State<_MessageList> {
 
     final List<ChatMessage> sortedMessages = List<ChatMessage>.of(_messages)
       ..sort((ChatMessage first, ChatMessage second) {
-        final int createdAtComparison = first.createdAt.compareTo(
-          second.createdAt,
+        final int createdAtComparison = second.createdAt.compareTo(
+          first.createdAt,
         );
 
         if (createdAtComparison != 0) {
           return createdAtComparison;
         }
 
-        return first.id.compareTo(second.id);
+        return second.id.compareTo(first.id);
       });
 
     return <String>[
@@ -7531,6 +7734,7 @@ final class _IncomingMessageRow extends StatelessWidget {
                 currentUserPreferredLanguage: currentUserPreferredLanguage,
                 otherParticipantName: otherParticipantName,
                 showTranslation: showTranslation,
+                isActiveSearchResult: isHighlighted,
                 searchQuery: searchQuery,
                 canRetryTranslation: canRetryTranslation,
                 canUseTranslation: canUseTranslation,
@@ -7584,6 +7788,7 @@ final class _IncomingMessageContent extends StatelessWidget {
     required this.currentUserPreferredLanguage,
     required this.otherParticipantName,
     required this.showTranslation,
+    required this.isActiveSearchResult,
     required this.searchQuery,
     required this.canRetryTranslation,
     required this.canUseTranslation,
@@ -7596,6 +7801,7 @@ final class _IncomingMessageContent extends StatelessWidget {
   final String currentUserPreferredLanguage;
   final String otherParticipantName;
   final bool showTranslation;
+  final bool isActiveSearchResult;
   final String searchQuery;
   final bool canRetryTranslation;
   final bool canUseTranslation;
@@ -7636,6 +7842,7 @@ final class _IncomingMessageContent extends StatelessWidget {
         translatedContent: message.translatedContent!,
         showTranslation: showTranslation || showSearchTranslation,
         searchQuery: searchQuery,
+        isActiveSearchResult: isActiveSearchResult,
         style: messageTextStyle,
       );
     } else {
@@ -7644,6 +7851,7 @@ final class _IncomingMessageContent extends StatelessWidget {
         query: searchQuery,
         key: ValueKey<String>('original-message-${message.id}'),
         style: messageTextStyle,
+        isActiveResult: isActiveSearchResult,
       );
     }
 
@@ -7811,6 +8019,7 @@ final class _AnimatedTranslationText extends StatelessWidget {
     required this.translatedContent,
     required this.showTranslation,
     required this.searchQuery,
+    required this.isActiveSearchResult,
     required this.style,
   });
 
@@ -7819,6 +8028,7 @@ final class _AnimatedTranslationText extends StatelessWidget {
   final String translatedContent;
   final bool showTranslation;
   final String searchQuery;
+  final bool isActiveSearchResult;
   final TextStyle style;
 
   @override
@@ -7849,6 +8059,7 @@ final class _AnimatedTranslationText extends StatelessWidget {
         query: searchQuery,
         key: ValueKey<String>(displayedKey),
         style: style,
+        isActiveResult: isActiveSearchResult,
       ),
     );
   }
@@ -7859,6 +8070,8 @@ final class _SearchHighlightedText extends StatelessWidget {
     required this.text,
     required this.query,
     required this.style,
+    this.isActiveResult = false,
+    this.isOutgoing = false,
     this.maxLines,
     this.overflow,
     super.key,
@@ -7867,6 +8080,8 @@ final class _SearchHighlightedText extends StatelessWidget {
   final String text;
   final String query;
   final TextStyle style;
+  final bool isActiveResult;
+  final bool isOutgoing;
   final int? maxLines;
   final TextOverflow? overflow;
 
@@ -7910,9 +8125,7 @@ final class _SearchHighlightedText extends StatelessWidget {
       children.add(
         TextSpan(
           text: text.substring(match.start, match.end),
-          style: style.copyWith(
-            backgroundColor: AppColors.primary.withAlpha(54),
-          ),
+          style: style.copyWith(backgroundColor: _highlightColor),
         ),
       );
 
@@ -7924,6 +8137,14 @@ final class _SearchHighlightedText extends StatelessWidget {
     }
 
     return TextSpan(style: style, children: children);
+  }
+
+  Color get _highlightColor {
+    if (isOutgoing) {
+      return isActiveResult ? AppColors.blue900 : AppColors.white.withAlpha(76);
+    }
+
+    return isActiveResult ? AppColors.blue200 : AppColors.primary.withAlpha(54);
   }
 }
 
@@ -8435,6 +8656,8 @@ final class _OutgoingMessageRow extends StatelessWidget {
             text: message.content,
             query: searchQuery,
             style: messageTextStyle,
+            isActiveResult: isHighlighted,
+            isOutgoing: true,
             key: ValueKey<String>('original-message-${message.id}'),
           ),
         ),

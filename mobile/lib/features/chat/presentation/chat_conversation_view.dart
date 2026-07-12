@@ -225,6 +225,7 @@ final class ChatConversationView extends StatefulWidget {
     this.onDeleteMessage,
     this.onBack,
     this.unreadOtherConversationCount = 0,
+    this.routeNavigationDragActive = false,
     this.translationDelay = Duration.zero,
     this.initialClock,
     this.nextLocalMessageId = 1,
@@ -250,6 +251,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatMessageDeleter? onDeleteMessage;
   final VoidCallback? onBack;
   final int unreadOtherConversationCount;
+  final bool routeNavigationDragActive;
   final Duration translationDelay;
   final DateTime? initialClock;
   final int nextLocalMessageId;
@@ -2260,6 +2262,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       topPadding: messageListTopPadding,
                       bottomPadding: messageListBottomPadding,
                       pinToBottom: pinMessageListToBottom,
+                      scrollLocked: widget.routeNavigationDragActive,
                     ),
                   ),
                   if (!_searchModeActive)
@@ -5330,6 +5333,7 @@ final class _MessageList extends StatefulWidget {
     required this.topPadding,
     required this.bottomPadding,
     required this.pinToBottom,
+    required this.scrollLocked,
     super.key,
   });
 
@@ -5356,6 +5360,7 @@ final class _MessageList extends StatefulWidget {
   final double topPadding;
   final double bottomPadding;
   final bool pinToBottom;
+  final bool scrollLocked;
 
   @override
   State<_MessageList> createState() {
@@ -5463,6 +5468,10 @@ final class _MessageListState extends State<_MessageList> {
   void didUpdateWidget(covariant _MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    if (widget.scrollLocked && !oldWidget.scrollLocked) {
+      _stopScrollingAtCurrentOffset();
+    }
+
     if (widget.pinToBottom && !oldWidget.pinToBottom) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
@@ -5490,6 +5499,19 @@ final class _MessageListState extends State<_MessageList> {
         }
       });
     }
+  }
+
+  void _stopScrollingAtCurrentOffset() {
+    if (!_scrollController.hasClients) {
+      return;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    final double currentOffset = position.pixels
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+
+    _scrollController.jumpTo(currentOffset);
   }
 
   void _syncMessageClockWith(ChatMessage message) {
@@ -6690,6 +6712,9 @@ final class _MessageListState extends State<_MessageList> {
             child: ListView(
               key: const ValueKey<String>('message-list'),
               controller: _scrollController,
+              physics: widget.scrollLocked
+                  ? const NeverScrollableScrollPhysics()
+                  : null,
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: EdgeInsets.fromLTRB(
                 8,

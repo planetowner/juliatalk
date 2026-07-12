@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/io.dart';
@@ -20,6 +21,11 @@ const double _chatListAvatarSize = 48;
 const double _chatListTitleGap = 16;
 const double _chatListTextStartInset =
     _chatListHorizontalPadding + _chatListAvatarSize + _chatListTitleGap;
+const Duration _chatRouteOpenDuration = Duration(milliseconds: 190);
+const Duration _chatRouteCloseDuration = Duration(milliseconds: 170);
+const double _chatRouteDismissProgress = 0.28;
+const double _chatRouteFlingVelocity = 700;
+const double _chatRouteDragSlop = 8;
 
 final class ChatConversationHomeScreen extends StatefulWidget {
   const ChatConversationHomeScreen({
@@ -40,7 +46,8 @@ final class ChatConversationHomeScreen extends StatefulWidget {
 }
 
 final class _ChatConversationHomeScreenState
-    extends State<ChatConversationHomeScreen> {
+    extends State<ChatConversationHomeScreen>
+    with SingleTickerProviderStateMixin {
   static const Map<String, List<String>> _chatOrderByUsername =
       <String, List<String>>{
         'liababo': <String>['junebabo', 'yunjung5437'],
@@ -55,12 +62,19 @@ final class _ChatConversationHomeScreenState
       };
 
   late final ChatApi _chatApi;
+  late final AnimationController _chatRouteController;
   final Map<String, List<ChatMessage>> _conversationMessagesByUserId =
       <String, List<ChatMessage>>{};
   final Set<String> _prefetchingConversationUserIds = <String>{};
 
   List<_ChatListEntry>? _chatEntries;
   AppUser? _selectedUser;
+  int? _chatRoutePointer;
+  Offset? _chatRoutePointerStart;
+  Offset? _chatRoutePointerLast;
+  VelocityTracker? _chatRouteVelocityTracker;
+  bool _chatRouteDragActive = false;
+  bool _chatRouteClosing = false;
   bool _chatEntriesLoading = true;
   bool _chatEntriesRefreshing = false;
   String? _chatEntriesErrorMessage;
@@ -74,8 +88,19 @@ final class _ChatConversationHomeScreenState
       baseUri: widget.baseUri,
       accessToken: widget.session.accessToken,
     );
+    _chatRouteController = AnimationController(
+      vsync: this,
+      duration: _chatRouteOpenDuration,
+      reverseDuration: _chatRouteCloseDuration,
+    );
 
     unawaited(_loadChatEntries(showInitialLoading: true));
+  }
+
+  @override
+  void dispose() {
+    _chatRouteController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadChatEntries({required bool showInitialLoading}) async {
@@ -277,36 +302,312 @@ final class _ChatConversationHomeScreenState
     );
   }
 
+  void _openChat(AppUser user) {
+    if (_selectedUser?.id == user.id) {
+      return;
+    }
+
+    _chatRouteClosing = false;
+    _chatRouteDragActive = false;
+
+    setState(() {
+      _selectedUser = user;
+    });
+
+    unawaited(
+      _chatRouteController.animateTo(
+        1,
+        duration: _chatRouteOpenDuration,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+  }
+
+  void _requestCloseChat() {
+    final AppUser? selectedUser = _selectedUser;
+
+    if (selectedUser == null || _chatRouteClosing) {
+      return;
+    }
+
+    _resetChatRoutePointer();
+    _chatRouteClosing = true;
+
+    unawaited(
+      _chatRouteController
+          .animateTo(
+            0,
+            duration: _chatRouteCloseDuration,
+            curve: Curves.easeOutCubic,
+          )
+          .then((_) {
+            _finishCloseChat(selectedUser);
+          }),
+    );
+  }
+
+  void _finishCloseChat(AppUser selectedUser) {
+    if (!mounted || _selectedUser?.id != selectedUser.id) {
+      return;
+    }
+
+    setState(() {
+      _clearUnreadCountFor(selectedUser.id);
+      _selectedUser = null;
+      _chatRouteClosing = false;
+      _chatRouteDragActive = false;
+    });
+
+    _chatRouteController.value = 0;
+    unawaited(_loadChatEntries(showInitialLoading: false));
+  }
+
+  void _setChatRouteDragActive(bool active) {
+    if (_chatRouteDragActive == active) {
+      return;
+    }
+
+    setState(() {
+      _chatRouteDragActive = active;
+    });
+  }
+
+  void _resetChatRoutePointer({bool unlockScroll = true}) {
+    final bool shouldNotifyScrollUnlock = unlockScroll && _chatRouteDragActive;
+
+    void resetPointer() {
+      _chatRoutePointer = null;
+      _chatRoutePointerStart = null;
+      _chatRoutePointerLast = null;
+      _chatRouteVelocityTracker = null;
+
+      if (unlockScroll) {
+        _chatRouteDragActive = false;
+      }
+    }
+
+    if (shouldNotifyScrollUnlock) {
+      setState(resetPointer);
+      return;
+    }
+
+    _chatRoutePointer = null;
+    _chatRoutePointerStart = null;
+    _chatRoutePointerLast = null;
+    _chatRouteVelocityTracker = null;
+  }
+
+  void _handleChatRoutePointerDown(PointerDownEvent event) {
+    if (_selectedUser == null ||
+        _chatRouteClosing ||
+        _chatRoutePointer != null) {
+      return;
+    }
+
+    _chatRoutePointer = event.pointer;
+    _chatRoutePointerStart = event.position;
+    _chatRoutePointerLast = event.position;
+    _chatRouteVelocityTracker = VelocityTracker.withKind(event.kind)
+      ..addPosition(event.timeStamp, event.position);
+  }
+
+  void _handleChatRoutePointerMove(PointerMoveEvent event) {
+    if (_chatRoutePointer != event.pointer ||
+        _selectedUser == null ||
+        _chatRouteClosing) {
+      return;
+    }
+
+    _chatRouteVelocityTracker?.addPosition(event.timeStamp, event.position);
+
+    final Offset? pointerStart = _chatRoutePointerStart;
+    final Offset? pointerLast = _chatRoutePointerLast;
+
+    if (pointerStart == null || pointerLast == null) {
+      return;
+    }
+
+    if (!_chatRouteDragActive) {
+      final Offset totalDelta = event.position - pointerStart;
+      final double horizontalDistance = totalDelta.dx.abs();
+      final double verticalDistance = totalDelta.dy.abs();
+
+      if (totalDelta.dx <= 0 ||
+          horizontalDistance < _chatRouteDragSlop ||
+          horizontalDistance <= verticalDistance) {
+        _chatRoutePointerLast = event.position;
+        return;
+      }
+
+      _chatRouteController.stop();
+      _setChatRouteDragActive(true);
+    }
+
+    final double width = MediaQuery.sizeOf(context).width;
+    final double delta = event.position.dx - pointerLast.dx;
+
+    if (width <= 0) {
+      return;
+    }
+
+    final double nextValue = (_chatRouteController.value - delta / width)
+        .clamp(0.0, 1.0)
+        .toDouble();
+
+    _chatRouteController.value = nextValue;
+    _chatRoutePointerLast = event.position;
+  }
+
+  void _handleChatRoutePointerUp(PointerUpEvent event) {
+    if (_chatRoutePointer != event.pointer) {
+      return;
+    }
+
+    final bool wasDragging = _chatRouteDragActive;
+    final double velocity =
+        _chatRouteVelocityTracker?.getVelocity().pixelsPerSecond.dx ?? 0;
+
+    if (!wasDragging) {
+      _resetChatRoutePointer();
+      return;
+    }
+
+    _resetChatRoutePointer(unlockScroll: false);
+
+    final AppUser? selectedUser = _selectedUser;
+
+    if (selectedUser == null) {
+      _setChatRouteDragActive(false);
+      return;
+    }
+
+    final bool shouldClose =
+        velocity > _chatRouteFlingVelocity ||
+        _chatRouteController.value <= 1 - _chatRouteDismissProgress;
+
+    if (shouldClose) {
+      _chatRouteClosing = true;
+      unawaited(
+        _chatRouteController
+            .animateTo(
+              0,
+              duration: _chatRouteCloseDuration,
+              curve: Curves.easeOutCubic,
+            )
+            .then((_) {
+              _finishCloseChat(selectedUser);
+            }),
+      );
+      return;
+    }
+
+    unawaited(
+      _chatRouteController
+          .animateTo(
+            1,
+            duration: _chatRouteOpenDuration,
+            curve: Curves.easeOutCubic,
+          )
+          .then((_) {
+            if (!mounted || _selectedUser?.id != selectedUser.id) {
+              return;
+            }
+
+            _setChatRouteDragActive(false);
+          }),
+    );
+  }
+
+  void _handleChatRoutePointerCancel(PointerCancelEvent event) {
+    if (_chatRoutePointer != event.pointer) {
+      return;
+    }
+
+    final bool wasDragging = _chatRouteDragActive;
+
+    if (!wasDragging) {
+      _resetChatRoutePointer();
+      return;
+    }
+
+    final AppUser? selectedUser = _selectedUser;
+    _resetChatRoutePointer(unlockScroll: false);
+
+    unawaited(
+      _chatRouteController
+          .animateTo(
+            1,
+            duration: _chatRouteOpenDuration,
+            curve: Curves.easeOutCubic,
+          )
+          .then((_) {
+            if (!mounted || _selectedUser?.id != selectedUser?.id) {
+              return;
+            }
+
+            _setChatRouteDragActive(false);
+          }),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final AppUser? selectedUser = _selectedUser;
 
-    if (selectedUser != null) {
-      return ChatConversationScreen(
-        key: ValueKey<String>(selectedUser.id),
-        chatApi: _chatApi,
-        baseUri: widget.baseUri,
-        accessToken: widget.session.accessToken,
-        currentUser: widget.session.user,
-        otherUser: selectedUser,
-        otherUserDisplayName: _displayNameFor(selectedUser),
-        initialMessages: _conversationMessagesByUserId[selectedUser.id],
-        onMessagesChanged: (List<ChatMessage> messages) {
-          _cacheConversationMessages(
-            userId: selectedUser.id,
-            messages: messages,
-          );
-        },
-        onBack: () {
-          setState(() {
-            _clearUnreadCountFor(selectedUser.id);
-            _selectedUser = null;
-          });
-          unawaited(_loadChatEntries(showInitialLoading: false));
-        },
-      );
+    final Widget chatList = _buildChatList();
+
+    if (selectedUser == null) {
+      return chatList;
     }
 
+    return Stack(
+      children: <Widget>[
+        IgnorePointer(ignoring: true, child: chatList),
+        _buildChatRoute(selectedUser),
+      ],
+    );
+  }
+
+  Widget _buildChatRoute(AppUser selectedUser) {
+    return AnimatedBuilder(
+      animation: _chatRouteController,
+      child: SizedBox.expand(
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: _handleChatRoutePointerDown,
+          onPointerMove: _handleChatRoutePointerMove,
+          onPointerUp: _handleChatRoutePointerUp,
+          onPointerCancel: _handleChatRoutePointerCancel,
+          child: ChatConversationScreen(
+            key: ValueKey<String>(selectedUser.id),
+            chatApi: _chatApi,
+            baseUri: widget.baseUri,
+            accessToken: widget.session.accessToken,
+            currentUser: widget.session.user,
+            otherUser: selectedUser,
+            otherUserDisplayName: _displayNameFor(selectedUser),
+            routeNavigationDragActive: _chatRouteDragActive,
+            initialMessages: _conversationMessagesByUserId[selectedUser.id],
+            onMessagesChanged: (List<ChatMessage> messages) {
+              _cacheConversationMessages(
+                userId: selectedUser.id,
+                messages: messages,
+              );
+            },
+            onBack: _requestCloseChat,
+          ),
+        ),
+      ),
+      builder: (BuildContext context, Widget? child) {
+        final double width = MediaQuery.sizeOf(context).width;
+        final double offset = (1 - _chatRouteController.value) * width;
+
+        return Transform.translate(offset: Offset(offset, 0), child: child);
+      },
+    );
+  }
+
+  Widget _buildChatList() {
     if (_chatEntriesLoading && _chatEntries == null) {
       return const Scaffold(
         backgroundColor: AppColors.surface,
@@ -395,9 +696,7 @@ final class _ChatConversationHomeScreenState
                     ),
                   ),
                   onTap: () {
-                    setState(() {
-                      _selectedUser = user;
-                    });
+                    _openChat(user);
                   },
                 );
               },
@@ -429,6 +728,7 @@ final class ChatConversationScreen extends StatefulWidget {
     required this.otherUser,
     required this.otherUserDisplayName,
     required this.onBack,
+    this.routeNavigationDragActive = false,
     this.initialMessages,
     this.onMessagesChanged,
     super.key,
@@ -441,6 +741,7 @@ final class ChatConversationScreen extends StatefulWidget {
   final AppUser otherUser;
   final String otherUserDisplayName;
   final VoidCallback onBack;
+  final bool routeNavigationDragActive;
   final List<ChatMessage>? initialMessages;
   final ValueChanged<List<ChatMessage>>? onMessagesChanged;
 
@@ -1105,6 +1406,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         onDeleteMessage: _deleteMessage,
         onBack: widget.onBack,
         unreadOtherConversationCount: _unreadOutsideCurrentConversationCount,
+        routeNavigationDragActive: widget.routeNavigationDragActive,
       ),
     );
   }

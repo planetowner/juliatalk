@@ -21,7 +21,7 @@ def required_environment_value(name: str) -> str:
 
     if value is None:
         raise RuntimeError(
-            f"{name} is missing from .env."
+            f"{name} is missing from the environment."
         )
 
     value = value.strip()
@@ -34,19 +34,22 @@ def required_environment_value(name: str) -> str:
     return value
 
 
-DEEPSEEK_API_KEY = required_environment_value(
-    "DEEPSEEK_API_KEY"
+OPENAI_API_KEY = required_environment_value(
+    "OPENAI_API_KEY"
 )
 
-DEEPSEEK_BASE_URL = required_environment_value(
-    "DEEPSEEK_BASE_URL"
-)
+OPENAI_MODEL = os.getenv(
+    "OPENAI_MODEL",
+    "gpt-5.6-terra",
+).strip()
 
-DEEPSEEK_MODEL = required_environment_value(
-    "DEEPSEEK_MODEL"
-)
+if not OPENAI_MODEL:
+    raise RuntimeError(
+        "OPENAI_MODEL is empty."
+    )
 
-TRANSLATION_PROVIDER_NAME = "deepseek"
+TRANSLATION_PROVIDER_NAME = "openai"
+TRANSLATION_MODEL = OPENAI_MODEL
 
 SUPPORTED_LANGUAGE_NAMES = {
     "ko": "한국어",
@@ -54,11 +57,10 @@ SUPPORTED_LANGUAGE_NAMES = {
 }
 
 
-deepseek_client = AsyncOpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url=DEEPSEEK_BASE_URL,
+openai_client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
     timeout=60.0,
-    max_retries=1,
+    max_retries=2,
 )
 
 
@@ -145,15 +147,12 @@ def should_translate_text(
     normalized_target = normalize_language_code(target_language)
     inferred_language = infer_text_language(cleaned_text)
 
-    if normalized_target is not None and inferred_language is not None:
-        return inferred_language != normalized_target
+    # Only messages containing Hangul or Han characters are translated.
+    # Latin-only text, numbers, punctuation, and emoji must pass through.
+    if normalized_target is None or inferred_language is None:
+        return False
 
-    normalized_source = normalize_language_code(source_language)
-
-    if normalized_source is not None and normalized_target is not None:
-        return normalized_source != normalized_target
-
-    return inferred_language is not None
+    return inferred_language != normalized_target
 
 
 def build_context_text(
@@ -218,56 +217,47 @@ async def translate_message(
         target_language
     )
 
-    if source_language == target_language:
+    if not should_translate_text(
+        cleaned_text,
+        source_language=source_language,
+        target_language=target_language,
+    ):
         return TranslationResult(
             translated_text=cleaned_text,
             source_language=source_language,
             target_language=target_language,
             provider=TRANSLATION_PROVIDER_NAME,
-            model=DEEPSEEK_MODEL,
+            model=TRANSLATION_MODEL,
         )
 
     context_text = build_context_text(
         context_messages
     )
 
-    response = await deepseek_client.chat.completions.create(
-        model=DEEPSEEK_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": build_system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"원문 언어: {source_language_name}\n"
-                    f"번역 언어: {target_language_name}\n\n"
-                    "최근 대화 맥락:\n"
-                    f"{context_text}\n\n"
-                    "이번에 번역할 메시지:\n"
-                    f"{cleaned_text}"
-                ),
-            },
-        ],
-        max_tokens=1000,
-        extra_body={
-            "thinking": {
-                "type": "enabled",
-            },
-        },
+    response = await openai_client.responses.create(
+        model=TRANSLATION_MODEL,
+        reasoning={"effort": "none"},
+        instructions=build_system_prompt(),
+        input=(
+            f"원문 언어: {source_language_name}\n"
+            f"번역 언어: {target_language_name}\n\n"
+            "최근 대화 맥락:\n"
+            f"{context_text}\n\n"
+            "이번에 번역할 메시지:\n"
+            f"{cleaned_text}"
+        ),
+        max_output_tokens=1000,
+        store=False,
     )
 
-    translated_text = (
-        response.choices[0].message.content
-    )
+    translated_text = response.output_text
 
     if (
         not isinstance(translated_text, str)
         or not translated_text.strip()
     ):
         raise RuntimeError(
-            "DeepSeek returned an empty translation."
+            "OpenAI returned an empty translation."
         )
 
     return TranslationResult(
@@ -275,5 +265,5 @@ async def translate_message(
         source_language=source_language,
         target_language=target_language,
         provider=TRANSLATION_PROVIDER_NAME,
-        model=DEEPSEEK_MODEL,
+        model=TRANSLATION_MODEL,
     )

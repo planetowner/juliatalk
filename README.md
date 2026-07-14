@@ -5,7 +5,7 @@ Flutter client.
 
 It supports real-time direct messaging between Korean- and Simplified
 Chinese-speaking users, with context-aware text translation powered by
-DeepSeek.
+OpenAI.
 
 ## Current Features
 
@@ -37,7 +37,7 @@ DeepSeek.
 - PostgreSQL
 - asyncpg
 - WebSockets
-- DeepSeek API through the OpenAI Python client
+- OpenAI Responses API through the OpenAI Python client
 - PyJWT
 - pwdlib with Argon2
 - python-dotenv
@@ -96,9 +96,8 @@ Configure these in the hosted backend environment:
 
 - `DATABASE_URL`: PostgreSQL connection URL
 - `JWT_SECRET`: long random signing secret for access tokens
-- `DEEPSEEK_API_KEY`: DeepSeek API key
-- `DEEPSEEK_BASE_URL`: DeepSeek-compatible API base URL
-- `DEEPSEEK_MODEL`: DeepSeek model name
+- `OPENAI_API_KEY`: OpenAI API key
+- `OPENAI_MODEL`: OpenAI model name (defaults to `gpt-5.4-mini`)
 
 `DATABASE_URL` must point to PostgreSQL. `postgresql://` and `postgres://`
 URLs are accepted and normalized to SQLAlchemy's asyncpg driver URL
@@ -176,7 +175,7 @@ hashes, and private message history, so they must not be uploaded to GitHub.
 
 1. The original text message is saved immediately.
 2. A `message.created` WebSocket event is sent to both users.
-3. DeepSeek translates the message in the background.
+3. OpenAI translates the message in the background.
 4. The translated text and translation metadata are saved.
 5. A `message.translation.updated` WebSocket event is sent to both users.
 
@@ -218,7 +217,7 @@ If translation fails, the original message remains stored and available.
     "id": "33333333-3333-4333-8333-333333333333",
     "translated_content": "Translated message",
     "translation_status": "completed",
-    "translation_provider": "deepseek"
+    "translation_provider": "openai"
   }
 }
 ```

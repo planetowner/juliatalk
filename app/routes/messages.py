@@ -56,8 +56,8 @@ from app.schemas import (
     UnreadMessageCountRead,
 )
 from app.translation import (
-    DEEPSEEK_MODEL,
     TRANSLATION_PROVIDER_NAME,
+    TRANSLATION_MODEL,
     should_translate_text,
     translate_message,
 )
@@ -952,7 +952,7 @@ async def execute_message_translation(
         else message.source_language or sender.preferred_language
     )
 
-    should_run_translation = force or should_translate_text(
+    should_run_translation = should_translate_text(
         message.body,
         source_language=source_language,
         target_language=recipient.preferred_language,
@@ -1030,7 +1030,7 @@ async def execute_message_translation(
         translation.translated_body = None
         translation.status = TranslationStatus.FAILED
         translation.provider = TRANSLATION_PROVIDER_NAME
-        translation.model = DEEPSEEK_MODEL
+        translation.model = TRANSLATION_MODEL
         translation.error_message = str(error)
     else:
         translation.translated_body = translation_result.translated_text

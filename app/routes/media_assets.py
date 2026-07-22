@@ -4,7 +4,7 @@ import asyncio
 import math
 import mimetypes
 from pathlib import PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -49,7 +49,7 @@ CurrentUserDependency = Annotated[
 ]
 
 
-def _safe_file_name(file_name: str | None, mime_type: str) -> str:
+def _safe_file_name(file_name: Optional[str], mime_type: str) -> str:
     candidate = PurePosixPath(file_name or "").name
 
     if candidate:
@@ -69,7 +69,7 @@ def _storage_key(
     return f"users/{user_id}/media/{media_asset_id}/{file_name}"
 
 
-def _normalized_waveform_samples(metadata: dict[str, Any] | None) -> list[float]:
+def _normalized_waveform_samples(metadata: Optional[dict[str, Any]]) -> list[float]:
     if metadata is None:
         return []
 
@@ -97,7 +97,7 @@ def _normalized_waveform_samples(metadata: dict[str, Any] | None) -> list[float]
 def _metadata_for_storage(
     *,
     kind: str,
-    metadata: dict[str, Any] | None,
+    metadata: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
     if kind != "voice_memo":
         return {}

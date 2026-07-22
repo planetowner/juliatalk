@@ -11,6 +11,7 @@ from app.database import (
     ensure_schema_compatibility,
 )
 from app.routes.auth import router as auth_router
+from app.routes.devices import router as devices_router
 from app.routes.media_assets import router as media_assets_router
 from app.routes.messages import router as messages_router
 from app.routes.users import router as users_router
@@ -33,6 +34,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(devices_router)
 app.include_router(media_assets_router)
 app.include_router(messages_router)
 app.include_router(websocket_router)

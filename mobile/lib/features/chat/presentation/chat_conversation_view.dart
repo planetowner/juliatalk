@@ -91,6 +91,13 @@ typedef ChatVoiceMemoMessageSender =
 typedef ChatCallMessageSender =
     Future<ChatMessage> Function({required ChatCallAttachment call});
 
+typedef ChatCallOutcomeUpdater =
+    Future<ChatMessage> Function({
+      required String messageId,
+      required ChatCallOutcome outcome,
+      required Duration duration,
+    });
+
 typedef ChatMediaAssetAccessUrlCreator =
     Future<Uri> Function({required String mediaAssetId});
 
@@ -218,6 +225,7 @@ final class ChatConversationView extends StatefulWidget {
     this.onSendFileMessage,
     this.onSendVoiceMemoMessage,
     this.onSendCallMessage,
+    this.onUpdateCallOutcome,
     this.onCreateMediaAssetAccessUrl,
     this.onEditTextMessage,
     this.onTranslateMessage,
@@ -244,6 +252,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatFileMessageSender? onSendFileMessage;
   final ChatVoiceMemoMessageSender? onSendVoiceMemoMessage;
   final ChatCallMessageSender? onSendCallMessage;
+  final ChatCallOutcomeUpdater? onUpdateCallOutcome;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatTextMessageEditor? onEditTextMessage;
   final ChatMessageTranslator? onTranslateMessage;
@@ -320,6 +329,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   DateTime? _voiceCallStartedAt;
   DateTime? _voiceCallConnectedAt;
+  Future<ChatMessage?>? _activeVoiceCallMessage;
   bool _voiceCallScreenVisible = false;
   bool _voiceCallMuted = false;
   _AudioOutputRoute _audioOutputRoute = _AudioOutputRoute.speaker;
@@ -1989,12 +1999,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _voiceCallConnectionTimer?.cancel();
     _voiceCallTicker?.cancel();
 
-    unawaited(
-      _addCallMessage(
-        outcome: ChatCallOutcome.started,
-        duration: Duration.zero,
-        advanceClock: true,
-      ),
+    _activeVoiceCallMessage = _addCallMessage(
+      outcome: ChatCallOutcome.started,
+      duration: Duration.zero,
+      advanceClock: true,
     );
 
     setState(() {
@@ -2028,16 +2036,13 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _audioOutputRoute = _AudioOutputRoute.speaker;
     });
 
-    unawaited(
-      _addCallMessage(
-        outcome: ChatCallOutcome.noAnswer,
-        duration: Duration.zero,
-        advanceClock: true,
-      ),
+    _finishActiveCallMessage(
+      outcome: ChatCallOutcome.noAnswer,
+      duration: Duration.zero,
     );
   }
 
-  Future<void> _addCallMessage({
+  Future<ChatMessage?> _addCallMessage({
     required ChatCallOutcome outcome,
     required Duration duration,
     required bool advanceClock,
@@ -2045,17 +2050,19 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final _MessageListState? messageListState = _messageListKey.currentState;
 
     if (messageListState == null) {
-      return;
+      return null;
     }
 
     final ChatCallMessageSender? sender = widget.onSendCallMessage;
 
     if (sender == null) {
-      messageListState.addOutgoingCallMessage(
+      final ChatMessage message = messageListState.addOutgoingCallMessage(
         outcome: outcome,
         duration: duration,
         advanceClock: advanceClock,
       );
+      _scheduleScrollToBottom(animate: true);
+      return message;
     } else {
       try {
         final ChatMessage message = await sender(
@@ -2067,17 +2074,71 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         );
 
         if (!mounted) {
-          return;
+          return message;
         }
 
         messageListState.addMessage(message);
+        _scheduleScrollToBottom(animate: true);
+        return message;
       } catch (_) {
         _showChatOperationFailure('Call record saving failed.');
-        return;
+        return null;
       }
     }
+  }
 
-    _scheduleScrollToBottom(animate: true);
+  void _finishActiveCallMessage({
+    required ChatCallOutcome outcome,
+    required Duration duration,
+  }) {
+    final Future<ChatMessage?>? activeMessage = _activeVoiceCallMessage;
+    _activeVoiceCallMessage = null;
+    if (activeMessage == null) {
+      return;
+    }
+
+    unawaited(_updateActiveCallMessage(activeMessage, outcome, duration));
+  }
+
+  Future<void> _updateActiveCallMessage(
+    Future<ChatMessage?> activeMessage,
+    ChatCallOutcome outcome,
+    Duration duration,
+  ) async {
+    final ChatMessage? startedMessage = await activeMessage;
+    if (startedMessage == null || !mounted) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+    if (messageListState == null) {
+      return;
+    }
+
+    final ChatCallOutcomeUpdater? updater = widget.onUpdateCallOutcome;
+    if (updater == null) {
+      messageListState.updateCallMessage(
+        messageId: startedMessage.id,
+        outcome: outcome,
+        duration: duration,
+      );
+      return;
+    }
+
+    try {
+      final ChatMessage updatedMessage = await updater(
+        messageId: startedMessage.id,
+        outcome: outcome,
+        duration: duration,
+      );
+      if (mounted) {
+        messageListState.addMessage(updatedMessage);
+      }
+    } catch (_) {
+      if (mounted) {
+        _showChatOperationFailure('Call record saving failed.');
+      }
+    }
   }
 
   void _showVoiceCallScreen() {
@@ -2153,14 +2214,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _audioOutputRoute = _AudioOutputRoute.speaker;
     });
 
-    unawaited(
-      _addCallMessage(
-        outcome: wasConnected
-            ? ChatCallOutcome.ended
-            : ChatCallOutcome.cancelled,
-        duration: duration,
-        advanceClock: true,
-      ),
+    _finishActiveCallMessage(
+      outcome: wasConnected
+          ? ChatCallOutcome.ended
+          : ChatCallOutcome.cancelled,
+      duration: duration,
     );
   }
 
@@ -5906,30 +5964,59 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
-  void addOutgoingCallMessage({
+  ChatMessage addOutgoingCallMessage({
     required ChatCallOutcome outcome,
     required Duration duration,
     bool advanceClock = true,
   }) {
-    setState(() {
-      final DateTime createdAt = DateTime.now();
-      _messageClock = createdAt;
+    final DateTime createdAt = DateTime.now();
+    final ChatMessage message = ChatMessage(
+      id: _nextLocalMessageId(),
+      senderId: widget.currentUserId,
+      recipientId: widget.otherParticipantId,
+      content: '',
+      createdAt: createdAt,
+      callAttachment: ChatCallAttachment(
+        kind: ChatCallKind.voice,
+        outcome: outcome,
+        duration: duration,
+      ),
+    );
 
-      _messages.add(
-        ChatMessage(
-          id: _nextLocalMessageId(),
-          senderId: widget.currentUserId,
-          recipientId: widget.otherParticipantId,
-          content: '',
-          createdAt: createdAt,
-          callAttachment: ChatCallAttachment(
-            kind: ChatCallKind.voice,
-            outcome: outcome,
-            duration: duration,
-          ),
+    setState(() {
+      _messageClock = createdAt;
+      _messages.add(message);
+    });
+    return message;
+  }
+
+  bool updateCallMessage({
+    required String messageId,
+    required ChatCallOutcome outcome,
+    required Duration duration,
+  }) {
+    final int messageIndex = _messages.indexWhere(
+      (ChatMessage message) => message.id == messageId,
+    );
+    if (messageIndex == -1) {
+      return false;
+    }
+
+    final ChatCallAttachment? call = _messages[messageIndex].callAttachment;
+    if (call == null) {
+      return false;
+    }
+
+    setState(() {
+      _messages[messageIndex] = _messages[messageIndex].copyWith(
+        callAttachment: ChatCallAttachment(
+          kind: call.kind,
+          outcome: outcome,
+          duration: duration,
         ),
       );
     });
+    return true;
   }
 
   bool updateMessageContent({

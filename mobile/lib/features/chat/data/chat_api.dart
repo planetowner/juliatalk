@@ -583,6 +583,39 @@ final class ChatApi {
     );
   }
 
+  Future<ChatMessage> updateCallOutcome({
+    required String messageId,
+    required ChatCallOutcome outcome,
+    required Duration duration,
+  }) async {
+    final http.Response response = await _client.patch(
+      _baseUri.resolve('/messages/$messageId/call-outcome'),
+      headers: _jsonHeaders,
+      body: jsonEncode(<String, Object?>{
+        'outcome': _callOutcomeToApi(outcome),
+        'duration_ms': duration.inMilliseconds,
+      }),
+    );
+
+    if (response.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          response,
+          fallback:
+              'Call outcome update failed with status code '
+              '${response.statusCode}.',
+        ),
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(response.body);
+    if (decodedBody is! Map<String, dynamic>) {
+      throw const ChatApiException('The server returned an invalid call.');
+    }
+
+    return messageFromJson(decodedBody);
+  }
+
   Future<ChatMessage> editTextMessage({
     required String messageId,
     required String content,

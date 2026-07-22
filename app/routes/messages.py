@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import base64
 import html
@@ -7,7 +9,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
@@ -47,7 +49,9 @@ from app.models import (
     TranslationStatus,
     User,
 )
+from app.notifications import send_message_notification
 from app.schemas import (
+    CallOutcomeUpdate,
     MessageCreate,
     MessageReplyReferenceRead,
     MessageRead,
@@ -146,14 +150,14 @@ class LinkPreviewHTMLParser(HTMLParser):
         self._in_title = False
 
     @property
-    def title(self) -> str | None:
+    def title(self) -> Optional[str]:
         value = clean_preview_text(" ".join(self._title_parts))
         return value or None
 
     def handle_starttag(
         self,
         tag: str,
-        attrs: list[tuple[str, str | None]],
+        attrs: list[tuple[str, Optional[str]]],
     ) -> None:
         normalized_tag = tag.lower()
 
@@ -186,7 +190,7 @@ class LinkPreviewHTMLParser(HTMLParser):
             self._title_parts.append(data)
 
 
-def clean_preview_text(value: str | None, *, max_length: int = 280) -> str | None:
+def clean_preview_text(value: Optional[str], *, max_length: int = 280) -> Optional[str]:
     if value is None:
         return None
 
@@ -202,7 +206,7 @@ def clean_preview_text(value: str | None, *, max_length: int = 280) -> str | Non
     return normalized[: max_length - 1].rstrip() + "…"
 
 
-def first_url_in_text(content: str) -> str | None:
+def first_url_in_text(content: str) -> Optional[str]:
     match = URL_PATTERN.search(content)
 
     if match is None:
@@ -228,7 +232,7 @@ def domain_for_url(url: str) -> str:
 
 def build_fallback_link_preview(
     url: str,
-    metadata: dict[str, Any] | None = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     preview = dict(metadata or {})
     preview_url = clean_preview_text(
@@ -258,8 +262,8 @@ def build_fallback_link_preview(
 
 def build_link_preview_metadata(
     content: str,
-    metadata: dict[str, Any] | None,
-) -> dict[str, Any] | None:
+    metadata: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
     url = first_url_in_text(content)
 
     if url is None:
@@ -375,8 +379,8 @@ async def get_direct_conversation(
     second_user_id: UUID,
     *,
     create: bool = False,
-    created_by_user_id: UUID | None = None,
-) -> DirectConversation | None:
+    created_by_user_id: Optional[UUID] = None,
+) -> Optional[DirectConversation]:
     user_one_id, user_two_id = sorted_direct_user_ids(
         first_user_id,
         second_user_id,
@@ -425,7 +429,7 @@ async def get_direct_conversation(
 
 def require_metadata_dict(
     message_type: str,
-    metadata: dict[str, Any] | None,
+    metadata: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
     if metadata is None:
         raise HTTPException(
@@ -476,7 +480,7 @@ def require_media_asset_ids(
     return media_asset_ids
 
 
-def normalized_waveform_samples(metadata: dict[str, Any] | None) -> list[float]:
+def normalized_waveform_samples(metadata: Optional[dict[str, Any]]) -> list[float]:
     if metadata is None:
         return []
 
@@ -503,7 +507,7 @@ def normalized_waveform_samples(metadata: dict[str, Any] | None) -> list[float]:
 
 def message_metadata_for_storage(
     message_type: str,
-    metadata: dict[str, Any] | None,
+    metadata: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
     if message_type == "link" and metadata is not None:
         return metadata
@@ -519,7 +523,7 @@ def message_metadata_for_storage(
 
 def validate_message_metadata(
     message_type: str,
-    metadata: dict[str, Any] | None,
+    metadata: Optional[dict[str, Any]],
 ) -> None:
     if message_type == "text":
         return
@@ -558,7 +562,7 @@ async def add_message_payload_records(
     message: Message,
     sender_id: UUID,
     message_type: str,
-    metadata: dict[str, Any] | None,
+    metadata: Optional[dict[str, Any]],
 ) -> None:
     if message_type in {"photo", "video", "file", "voice_memo"}:
         assert metadata is not None
@@ -609,8 +613,8 @@ async def add_message_payload_records(
 def build_metadata(
     message: Message,
     attachments: list[tuple[MessageAttachment, MediaAsset]],
-    call_event: MessageCallEvent | None,
-) -> dict[str, Any] | None:
+    call_event: Optional[MessageCallEvent],
+) -> Optional[dict[str, Any]]:
     def media_asset_metadata(media_asset: MediaAsset) -> dict[str, Any]:
         return {
             "media_asset_id": str(media_asset.id),
@@ -706,8 +710,8 @@ def build_metadata(
 
 
 def build_reply_reference(
-    message: Message | None,
-) -> MessageReplyReferenceRead | None:
+    message: Optional[Message],
+) -> Optional[MessageReplyReferenceRead]:
     if message is None:
         return None
 
@@ -1248,6 +1252,101 @@ async def create_message(
     if should_translate_created_message:
         background_tasks.add_task(translate_and_publish_message, message.id)
 
+    background_tasks.add_task(send_message_notification, message.id)
+
+    return message_read
+
+
+@router.patch(
+    "/{message_id}/call-outcome",
+    response_model=MessageRead,
+)
+async def update_call_outcome(
+    message_id: UUID,
+    outcome_data: CallOutcomeUpdate,
+    background_tasks: BackgroundTasks,
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+) -> MessageRead:
+    message = await session.get(Message, message_id)
+    call_event = await session.get(MessageCallEvent, message_id)
+
+    if (
+        message is None
+        or message.deleted_at is not None
+        or message.kind != MessageKind.CALL
+        or call_event is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Call not found",
+        )
+
+    direct_conversation = await session.get(
+        DirectConversation,
+        message.conversation_id,
+    )
+    if direct_conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
+    recipient_id = direct_recipient_id(direct_conversation, message.sender_id)
+    is_sender = current_user.id == message.sender_id
+    is_recipient = current_user.id == recipient_id
+    if not is_sender and not is_recipient:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only call participants can update its outcome",
+        )
+
+    requested_outcome = CallOutcome(outcome_data.outcome)
+    sender_outcomes = {
+        CallOutcome.ENDED,
+        CallOutcome.CANCELLED,
+        CallOutcome.NO_ANSWER,
+    }
+    recipient_outcomes = {CallOutcome.ENDED, CallOutcome.MISSED}
+    allowed_outcomes = sender_outcomes if is_sender else recipient_outcomes
+    if requested_outcome not in allowed_outcomes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This participant cannot set the requested call outcome",
+        )
+
+    if (
+        call_event.outcome != CallOutcome.STARTED
+        and call_event.outcome != requested_outcome
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Call already has a different final outcome",
+        )
+
+    call_event.outcome = requested_outcome
+    call_event.duration_ms = outcome_data.duration_ms
+    message.updated_at = datetime.now(timezone.utc)
+
+    await session.commit()
+    await session.refresh(message)
+
+    message_read = await build_single_message_read(
+        session,
+        message,
+        direct_conversation=direct_conversation,
+    )
+    await send_to_direct_participants(
+        direct_conversation,
+        {
+            "type": "message.updated",
+            "message": message_read.model_dump(mode="json"),
+        },
+    )
+
+    if call_event.outcome in {CallOutcome.MISSED, CallOutcome.NO_ANSWER}:
+        background_tasks.add_task(send_message_notification, message.id)
+
     return message_read
 
 
@@ -1258,8 +1357,8 @@ async def create_message(
 async def count_unread_messages(
     current_user: CurrentUserDependency,
     session: SessionDependency,
-    exclude_user_id: Annotated[UUID | None, Query()] = None,
-    from_user_id: Annotated[UUID | None, Query()] = None,
+    exclude_user_id: Annotated[Optional[UUID], Query()] = None,
+    from_user_id: Annotated[Optional[UUID], Query()] = None,
 ) -> UnreadMessageCountRead:
     member_conversation_ids = select(
         ConversationMember.conversation_id

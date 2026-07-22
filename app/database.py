@@ -134,6 +134,47 @@ async def ensure_schema_compatibility(
             "NOT NULL DEFAULT '{}'::jsonb"
         )
     )
+    await connection.execute(
+        text(
+            "ALTER TABLE user_devices "
+            "ADD COLUMN IF NOT EXISTS installation_id VARCHAR(128)"
+        )
+    )
+    await connection.execute(
+        text(
+            "ALTER TABLE user_devices "
+            "ADD COLUMN IF NOT EXISTS voip_push_token TEXT"
+        )
+    )
+    await connection.execute(
+        text(
+            "ALTER TABLE user_devices "
+            "ADD COLUMN IF NOT EXISTS app_bundle_id VARCHAR(255)"
+        )
+    )
+    await connection.execute(
+        text(
+            "ALTER TABLE user_devices "
+            "ADD COLUMN IF NOT EXISTS apns_environment VARCHAR(16) "
+            "NOT NULL DEFAULT 'development'"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "user_devices_active_voip_push_token_idx "
+            "ON user_devices (voip_push_token) "
+            "WHERE voip_push_token IS NOT NULL AND revoked_at IS NULL"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "user_devices_active_installation_idx "
+            "ON user_devices (user_id, installation_id) "
+            "WHERE installation_id IS NOT NULL AND revoked_at IS NULL"
+        )
+    )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 from sqlalchemy import (
@@ -169,7 +169,7 @@ class User(Base):
         nullable=False,
     )
 
-    profile_image_url: Mapped[str | None] = mapped_column(Text)
+    profile_image_url: Mapped[Optional[str]] = mapped_column(Text)
 
     password_hash: Mapped[str] = mapped_column(
         Text,
@@ -202,7 +202,7 @@ class User(Base):
         server_default=func.now(),
     )
 
-    disabled_at: Mapped[datetime | None] = mapped_column(
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
@@ -225,6 +225,23 @@ class UserDevice(Base):
                 "push_token IS NOT NULL AND revoked_at IS NULL"
             ),
         ),
+        Index(
+            "user_devices_active_voip_push_token_idx",
+            "voip_push_token",
+            unique=True,
+            postgresql_where=text(
+                "voip_push_token IS NOT NULL AND revoked_at IS NULL"
+            ),
+        ),
+        Index(
+            "user_devices_active_installation_idx",
+            "user_id",
+            "installation_id",
+            unique=True,
+            postgresql_where=text(
+                "installation_id IS NOT NULL AND revoked_at IS NULL"
+            ),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -244,11 +261,24 @@ class UserDevice(Base):
         nullable=False,
     )
 
-    push_token: Mapped[str | None] = mapped_column(Text)
+    installation_id: Mapped[Optional[str]] = mapped_column(String(128))
 
-    device_name: Mapped[str | None] = mapped_column(Text)
+    push_token: Mapped[Optional[str]] = mapped_column(Text)
 
-    last_seen_at: Mapped[datetime | None] = mapped_column(
+    voip_push_token: Mapped[Optional[str]] = mapped_column(Text)
+
+    app_bundle_id: Mapped[Optional[str]] = mapped_column(String(255))
+
+    apns_environment: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="development",
+        server_default="development",
+    )
+
+    device_name: Mapped[Optional[str]] = mapped_column(Text)
+
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
@@ -258,7 +288,7 @@ class UserDevice(Base):
         server_default=func.now(),
     )
 
-    revoked_at: Mapped[datetime | None] = mapped_column(
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
@@ -287,9 +317,9 @@ class Conversation(Base):
         nullable=False,
     )
 
-    title: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[Optional[str]] = mapped_column(Text)
 
-    created_by_user_id: Mapped[UUID | None] = mapped_column(
+    created_by_user_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
     )
@@ -306,7 +336,7 @@ class Conversation(Base):
         server_default=func.now(),
     )
 
-    last_message_id: Mapped[UUID | None] = mapped_column(
+    last_message_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey(
             "messages.id",
@@ -316,11 +346,11 @@ class Conversation(Base):
         ),
     )
 
-    last_message_at: Mapped[datetime | None] = mapped_column(
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
-    archived_at: Mapped[datetime | None] = mapped_column(
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
@@ -401,19 +431,19 @@ class ConversationMember(Base):
         server_default=func.now(),
     )
 
-    left_at: Mapped[datetime | None] = mapped_column(
+    left_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
-    muted_until: Mapped[datetime | None] = mapped_column(
+    muted_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
-    archived_at: Mapped[datetime | None] = mapped_column(
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
-    last_read_message_id: Mapped[UUID | None] = mapped_column(
+    last_read_message_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey(
             "messages.id",
@@ -423,7 +453,7 @@ class ConversationMember(Base):
         ),
     )
 
-    last_read_at: Mapped[datetime | None] = mapped_column(
+    last_read_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
@@ -495,7 +525,7 @@ class Message(Base):
         nullable=False,
     )
 
-    client_message_id: Mapped[UUID | None] = mapped_column(
+    client_message_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True)
     )
 
@@ -519,14 +549,14 @@ class Message(Base):
         server_default=text("'{}'::jsonb"),
     )
 
-    reply_to_message_id: Mapped[UUID | None] = mapped_column(
+    reply_to_message_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("messages.id", ondelete="SET NULL"),
     )
 
-    source_language: Mapped[str | None] = mapped_column(String(16))
+    source_language: Mapped[Optional[str]] = mapped_column(String(16))
 
-    client_created_at: Mapped[datetime | None] = mapped_column(
+    client_created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
@@ -542,15 +572,15 @@ class Message(Base):
         server_default=func.now(),
     )
 
-    edited_at: Mapped[datetime | None] = mapped_column(
+    edited_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
-    deleted_at: Mapped[datetime | None] = mapped_column(
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
     )
 
-    deleted_by_user_id: Mapped[UUID | None] = mapped_column(
+    deleted_by_user_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
     )
@@ -595,7 +625,7 @@ class MediaAsset(Base):
         server_default=text("gen_random_uuid()"),
     )
 
-    owner_user_id: Mapped[UUID | None] = mapped_column(
+    owner_user_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
     )
@@ -605,9 +635,9 @@ class MediaAsset(Base):
         nullable=False,
     )
 
-    storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    storage_key: Mapped[Optional[str]] = mapped_column(Text, unique=True)
 
-    thumbnail_storage_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    thumbnail_storage_key: Mapped[Optional[str]] = mapped_column(Text, unique=True)
 
     upload_status: Mapped[str] = mapped_column(
         Text,
@@ -616,21 +646,21 @@ class MediaAsset(Base):
         server_default="complete",
     )
 
-    original_asset_id: Mapped[str | None] = mapped_column(Text)
+    original_asset_id: Mapped[Optional[str]] = mapped_column(Text)
 
-    file_name: Mapped[str | None] = mapped_column(Text)
+    file_name: Mapped[Optional[str]] = mapped_column(Text)
 
-    mime_type: Mapped[str | None] = mapped_column(Text)
+    mime_type: Mapped[Optional[str]] = mapped_column(Text)
 
-    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
 
-    width: Mapped[int | None] = mapped_column(Integer)
+    width: Mapped[Optional[int]] = mapped_column(Integer)
 
-    height: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[Optional[int]] = mapped_column(Integer)
 
-    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
 
-    preview_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    preview_bytes: Mapped[Optional[bytes]] = mapped_column(LargeBinary)
 
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -778,7 +808,7 @@ class MessageTranslation(Base):
         nullable=False,
     )
 
-    translated_body: Mapped[str | None] = mapped_column(Text)
+    translated_body: Mapped[Optional[str]] = mapped_column(Text)
 
     status: Mapped[TranslationStatus] = mapped_column(
         translation_status_enum,
@@ -787,11 +817,11 @@ class MessageTranslation(Base):
         server_default=TranslationStatus.PENDING.value,
     )
 
-    provider: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[Optional[str]] = mapped_column(Text)
 
-    model: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[Optional[str]] = mapped_column(Text)
 
-    error_message: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -917,7 +947,7 @@ class MessageEdit(Base):
         nullable=False,
     )
 
-    editor_user_id: Mapped[UUID | None] = mapped_column(
+    editor_user_id: Mapped[Optional[UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
     )

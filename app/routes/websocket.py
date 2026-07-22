@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.database import SessionLocal
@@ -13,7 +17,7 @@ router = APIRouter(
 
 async def authenticate_websocket(
     websocket: WebSocket,
-) -> User | None:
+) -> Optional[User]:
     authorization = websocket.headers.get(
         "authorization"
     )

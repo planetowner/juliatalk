@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'core/config/app_config.dart';
+import 'core/notifications/notification_service.dart';
 import 'design_system/app_theme.dart';
 import 'features/auth/data/auth_api.dart';
 import 'features/auth/domain/auth_session.dart';
@@ -28,6 +32,9 @@ final class JuliaTalkApp extends StatefulWidget {
 final class _JuliaTalkAppState extends State<JuliaTalkApp> {
   late final http.Client _httpClient;
   late final AuthApi _authApi;
+  late final NotificationService _notificationService;
+  late final ChatConversationHomeController _chatController;
+  StreamSubscription<Map<String, dynamic>>? _notificationEventSubscription;
 
   AuthSession? _session;
 
@@ -36,6 +43,11 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
     super.initState();
 
     _httpClient = http.Client();
+    _notificationService = NotificationService();
+    _chatController = ChatConversationHomeController();
+    _notificationEventSubscription = _notificationService.events.listen(
+      _handleNotificationEvent,
+    );
 
     _authApi = AuthApi(
       client: _httpClient,
@@ -45,8 +57,27 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
 
   @override
   void dispose() {
+    unawaited(_notificationEventSubscription?.cancel());
+    _chatController.dispose();
     _httpClient.close();
     super.dispose();
+  }
+
+  void _handleNotificationEvent(Map<String, dynamic> event) {
+    if (event['type'] != 'notification.opened') {
+      return;
+    }
+
+    final dynamic rawPayload = event['payload'];
+    if (rawPayload is! Map) {
+      return;
+    }
+
+    final Map<String, dynamic> payload = Map<String, dynamic>.from(rawPayload);
+    final String? senderId = payload['sender_id'] as String?;
+    if (senderId != null && senderId.isNotEmpty) {
+      _chatController.openConversation(senderId);
+    }
   }
 
   Future<void> _login({
@@ -65,6 +96,21 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
     setState(() {
       _session = session;
     });
+
+    unawaited(_configureNotifications(session));
+  }
+
+  Future<void> _configureNotifications(AuthSession session) async {
+    try {
+      await _notificationService.configure(
+        apiBaseUri: widget.appConfig.apiBaseUri,
+        session: session,
+      );
+    } on PlatformException catch (error) {
+      debugPrint('Notification configuration failed: ${error.message}');
+    } on MissingPluginException {
+      debugPrint('Notification bridge is unavailable on this platform.');
+    }
   }
 
   @override
@@ -81,6 +127,7 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
               client: _httpClient,
               baseUri: widget.appConfig.apiBaseUri,
               session: session,
+              controller: _chatController,
             ),
     );
   }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import boto3
 from botocore.client import Config
@@ -14,14 +15,14 @@ DEFAULT_PRESIGNED_URL_EXPIRES_SECONDS = 900
 @dataclass(frozen=True)
 class ObjectStorageSettings:
     bucket: str
-    endpoint_url: str | None
+    endpoint_url: Optional[str]
     region_name: str
     addressing_style: str
     access_key_id: str
     secret_access_key: str
 
 
-def _first_env(*names: str) -> str | None:
+def _first_env(*names: str) -> Optional[str]:
     for name in names:
         value = os.getenv(name)
 
@@ -167,7 +168,7 @@ class ObjectStorageClient:
             raise
 
 
-_object_storage_client: ObjectStorageClient | None = None
+_object_storage_client: Optional[ObjectStorageClient] = None
 
 
 def get_object_storage_client() -> ObjectStorageClient:

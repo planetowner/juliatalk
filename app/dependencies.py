@@ -1,4 +1,6 @@
-from typing import Annotated
+from __future__ import annotations
+
+from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import (
@@ -20,7 +22,7 @@ SessionDependency = Annotated[
 ]
 
 CredentialsDependency = Annotated[
-    HTTPAuthorizationCredentials | None,
+    Optional[HTTPAuthorizationCredentials],
     Depends(bearer_scheme),
 ]
 

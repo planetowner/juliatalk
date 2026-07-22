@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -85,8 +87,8 @@ def language_name(language_code: str) -> str:
 
 
 def normalize_language_code(
-    language_code: str | None,
-) -> str | None:
+    language_code: Optional[str],
+) -> Optional[str]:
     normalized = (language_code or "").strip().replace(
         "_",
         "-",
@@ -104,7 +106,7 @@ def normalize_language_code(
     return normalized
 
 
-def infer_text_language(text: str) -> str | None:
+def infer_text_language(text: str) -> Optional[str]:
     korean_count = 0
     chinese_count = 0
 
@@ -136,8 +138,8 @@ def infer_text_language(text: str) -> str | None:
 def should_translate_text(
     text: str,
     *,
-    source_language: str | None,
-    target_language: str | None,
+    source_language: Optional[str],
+    target_language: Optional[str],
 ) -> bool:
     cleaned_text = text.strip()
 

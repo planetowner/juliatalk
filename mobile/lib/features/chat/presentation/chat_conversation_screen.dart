@@ -27,17 +27,40 @@ const double _chatRouteDismissProgress = 0.28;
 const double _chatRouteFlingVelocity = 700;
 const double _chatRouteDragSlop = 8;
 
+final class ChatConversationHomeController extends ChangeNotifier {
+  String? _pendingUserId;
+
+  String? get pendingUserId => _pendingUserId;
+
+  void openConversation(String userId) {
+    if (userId.isEmpty || _pendingUserId == userId) {
+      return;
+    }
+
+    _pendingUserId = userId;
+    notifyListeners();
+  }
+
+  void consume(String userId) {
+    if (_pendingUserId == userId) {
+      _pendingUserId = null;
+    }
+  }
+}
+
 final class ChatConversationHomeScreen extends StatefulWidget {
   const ChatConversationHomeScreen({
     required this.client,
     required this.baseUri,
     required this.session,
+    required this.controller,
     super.key,
   });
 
   final http.Client client;
   final Uri baseUri;
   final AuthSession session;
+  final ChatConversationHomeController controller;
 
   @override
   State<ChatConversationHomeScreen> createState() {
@@ -94,13 +117,27 @@ final class _ChatConversationHomeScreenState
       reverseDuration: _chatRouteCloseDuration,
     );
 
+    widget.controller.addListener(_openPendingConversation);
+
     unawaited(_loadChatEntries(showInitialLoading: true));
   }
 
   @override
   void dispose() {
+    widget.controller.removeListener(_openPendingConversation);
     _chatRouteController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(ChatConversationHomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_openPendingConversation);
+      widget.controller.addListener(_openPendingConversation);
+      _openPendingConversation();
+    }
   }
 
   Future<void> _loadChatEntries({required bool showInitialLoading}) async {
@@ -147,6 +184,7 @@ final class _ChatConversationHomeScreenState
       });
 
       _precacheProfileImages(entries);
+      _openPendingConversation();
     } catch (_) {
       if (!mounted) {
         return;
@@ -273,6 +311,32 @@ final class _ChatConversationHomeScreenState
 
   void _retryUsers() {
     unawaited(_loadChatEntries(showInitialLoading: true));
+  }
+
+  void _openPendingConversation() {
+    if (!mounted) {
+      return;
+    }
+
+    final String? userId = widget.controller.pendingUserId;
+    final List<_ChatListEntry>? entries = _chatEntries;
+    if (userId == null || entries == null) {
+      return;
+    }
+
+    _ChatListEntry? entry;
+    for (final _ChatListEntry candidate in entries) {
+      if (candidate.user.id == userId) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (entry == null) {
+      return;
+    }
+
+    widget.controller.consume(userId);
+    _openChat(entry.user);
   }
 
   void _cacheConversationMessages({
@@ -1317,6 +1381,24 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     return message;
   }
 
+  Future<ChatMessage> _updateCallOutcome({
+    required String messageId,
+    required ChatCallOutcome outcome,
+    required Duration duration,
+  }) async {
+    final ChatMessage message = await widget.chatApi.updateCallOutcome(
+      messageId: messageId,
+      outcome: outcome,
+      duration: duration,
+    );
+
+    if (mounted) {
+      _upsertMessage(message);
+    }
+
+    return message;
+  }
+
   Future<ChatMessage> _editTextMessage({
     required String messageId,
     required String content,
@@ -1400,6 +1482,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         onSendFileMessage: _sendFileMessage,
         onSendVoiceMemoMessage: _sendVoiceMemoMessage,
         onSendCallMessage: _sendCallMessage,
+        onUpdateCallOutcome: _updateCallOutcome,
         onCreateMediaAssetAccessUrl: widget.chatApi.createMediaAssetAccessUrl,
         onEditTextMessage: _editTextMessage,
         onRetryTranslation: _retryTextMessageTranslation,

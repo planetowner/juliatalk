@@ -28,6 +28,9 @@ OpenAI.
 - Original text preserved alongside translated text
 - Real-time message, read receipt, edit, delete, and translation updates
 - Flutter login and chat client
+- iOS APNs message notifications with profile images, grouping, media previews,
+  localized quick replies, badges, and lock-screen privacy controlled by iOS
+- iOS PushKit and CallKit incoming-call presentation
 
 ## Technology Stack
 
@@ -98,6 +101,10 @@ Configure these in the hosted backend environment:
 - `JWT_SECRET`: long random signing secret for access tokens
 - `OPENAI_API_KEY`: OpenAI API key
 - `OPENAI_MODEL`: OpenAI model name (defaults to `gpt-5.4-mini`)
+- `APNS_KEY_ID`: Apple APNs signing key ID
+- `APNS_TEAM_ID`: Apple Developer team ID
+- `APNS_BUNDLE_ID`: `com.planetowner.juliatalk`
+- `APNS_PRIVATE_KEY` or `APNS_PRIVATE_KEY_PATH`: APNs `.p8` private key
 
 `DATABASE_URL` must point to PostgreSQL. `postgresql://` and `postgres://`
 URLs are accepted and normalized to SQLAlchemy's asyncpg driver URL
@@ -140,12 +147,16 @@ flutter build ios --dart-define=API_BASE_URL=https://YOUR_BACKEND_DOMAIN
 
 `API_BASE_URL` must be an absolute `http` or `https` URL.
 
+See [docs/ios-notifications.md](docs/ios-notifications.md) for Apple Developer
+capabilities, APNs configuration, payload behavior, and real-device checks.
+
 ## Tests and Checks
 
 Backend:
 
 ```bash
 python -m compileall app scripts
+python -m unittest tests.test_translation tests.test_notifications
 ```
 
 Flutter:

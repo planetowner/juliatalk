@@ -37,6 +37,7 @@ Localized summaries are fixed to the verified reference behavior:
 | --- | --- | --- |
 | Photo | `사진을 보냈습니다.` | `照片` |
 | Video | `동영상을 보냈습니다.` | `视频` |
+| File | `파일: {파일명}` | `文件: {파일명}` |
 | Voice memo | `음성메시지를 보냈습니다.` | `语音备忘录` |
 | Missed call | `부재중 보이스톡` | `未接听语音通话` |
 | Reply | `답장` | `答复` |
@@ -48,8 +49,8 @@ The repository contains the targets and entitlement files, but the matching
 App ID capabilities and provisioning profiles must also exist in the Apple
 Developer account for team `57X5XDTF4Q`.
 
-1. For `com.planetowner.juliatalk`, enable **Push Notifications**,
-   **Communication Notifications**, and **Time Sensitive Notifications**.
+1. For `com.planetowner.juliatalk`, enable **Push Notifications** and
+   **Communication Notifications**.
 2. Keep the Runner background modes for **Voice over IP** and
    **Remote notifications** enabled.
 3. Create or refresh the Runner development and distribution provisioning

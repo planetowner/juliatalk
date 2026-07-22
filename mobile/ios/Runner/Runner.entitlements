@@ -6,7 +6,5 @@
 	<string>$(APNS_ENVIRONMENT)</string>
 	<key>com.apple.developer.usernotifications.communication</key>
 	<true/>
-	<key>com.apple.developer.usernotifications.time-sensitive</key>
-	<true/>
 </dict>
 </plist>

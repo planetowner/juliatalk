@@ -245,6 +245,7 @@ def localized_message_body(
     *,
     recipient_language: str,
     call_event: Optional[MessageCallEvent],
+    file_name: Optional[str] = None,
 ) -> Optional[str]:
     chinese = recipient_language == "zh-CN"
 
@@ -261,6 +262,10 @@ def localized_message_body(
         return "语音备忘录" if chinese else "음성메시지를 보냈습니다."
 
     if message.kind == MessageKind.FILE:
+        if file_name:
+            prefix = "文件" if chinese else "파일"
+            return f"{prefix}: {file_name}"
+
         return "文件" if chinese else "파일을 보냈습니다."
 
     if message.kind == MessageKind.CALL and call_event is not None:
@@ -325,6 +330,22 @@ async def _photo_url(
     except RuntimeError:
         logger.exception("Could not create notification photo URL")
         return None
+
+
+async def _file_name(
+    session: AsyncSession,
+    message_id: UUID,
+) -> Optional[str]:
+    return await session.scalar(
+        select(MediaAsset.file_name)
+        .join(
+            MessageAttachment,
+            MessageAttachment.media_asset_id == MediaAsset.id,
+        )
+        .where(MessageAttachment.message_id == message_id)
+        .order_by(MessageAttachment.position)
+        .limit(1)
+    )
 
 
 async def _revoke_invalid_token(
@@ -444,10 +465,16 @@ async def send_message_notification(message_id: UUID) -> None:
             await session.commit()
             return
 
+        file_name = (
+            await _file_name(session, message.id)
+            if message.kind == MessageKind.FILE
+            else None
+        )
         body = localized_message_body(
             message,
             recipient_language=recipient.preferred_language,
             call_event=call_event,
+            file_name=file_name,
         )
         if body is None:
             return
@@ -486,7 +513,6 @@ async def send_message_notification(message_id: UUID) -> None:
                         if message.kind == MessageKind.PHOTO
                         else "JULIATALK_REPLY"
                     ),
-                    "interruption-level": "time-sensitive",
                 },
                 "juliatalk": custom_data,
             }

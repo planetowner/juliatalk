@@ -46,6 +46,28 @@ class NotificationLocalizationTests(unittest.TestCase):
                     chinese,
                 )
 
+    def test_file_summary_includes_file_name(self) -> None:
+        message = SimpleNamespace(kind=MessageKind.FILE, body="")
+
+        self.assertEqual(
+            localized_message_body(
+                message,
+                recipient_language="ko",
+                call_event=None,
+                file_name="Day 01 관계.pdf",
+            ),
+            "파일: Day 01 관계.pdf",
+        )
+        self.assertEqual(
+            localized_message_body(
+                message,
+                recipient_language="zh-CN",
+                call_event=None,
+                file_name="Day 01 관계.pdf",
+            ),
+            "文件: Day 01 관계.pdf",
+        )
+
     def test_missed_call_summary_is_localized(self) -> None:
         message = SimpleNamespace(kind=MessageKind.CALL, body="")
         call_event = SimpleNamespace(outcome=CallOutcome.MISSED)

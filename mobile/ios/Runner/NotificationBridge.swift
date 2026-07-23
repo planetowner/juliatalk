@@ -282,19 +282,51 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
     return value
   }
 
-  private var apnsEnvironment: String {
-    #if DEBUG
-      return "development"
-    #else
+  private var apnsEnvironment: String? {
+    guard
+      let profileURL = Bundle.main.url(
+        forResource: "embedded",
+        withExtension: "mobileprovision"
+      )
+    else {
+      // App Store and TestFlight builds do not expose an embedded profile at
+      // runtime, and both use the production APNs environment.
       return "production"
-    #endif
+    }
+
+    if
+      let profileData = try? Data(contentsOf: profileURL),
+      let profileText = String(data: profileData, encoding: .isoLatin1),
+      let plistStart = profileText.range(of: "<?xml"),
+      let plistEnd = profileText.range(
+        of: "</plist>",
+        range: plistStart.lowerBound..<profileText.endIndex
+      ),
+      let plistData = String(
+        profileText[plistStart.lowerBound..<plistEnd.upperBound]
+      ).data(using: .utf8),
+      let plist = try? PropertyListSerialization.propertyList(
+        from: plistData,
+        options: [],
+        format: nil
+      ),
+      let profile = plist as? [String: Any],
+      let entitlements = profile["Entitlements"] as? [String: Any],
+      let environment = entitlements["aps-environment"] as? String,
+      environment == "development" || environment == "production"
+    {
+      return environment
+    }
+
+    return nil
   }
 
   private func syncDeviceRegistration(clearVoIPToken: Bool = false) {
     guard
       let credentials = credentials(),
       let baseURL = URL(string: credentials.apiBaseURL),
-      let bundleID = Bundle.main.bundleIdentifier
+      let bundleID = Bundle.main.bundleIdentifier,
+      let apnsEnvironment
     else { return }
 
     let defaults = UserDefaults.standard

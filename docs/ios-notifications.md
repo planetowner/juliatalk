@@ -77,9 +77,11 @@ APNS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 
 `APNS_PRIVATE_KEY_PATH=/secure/path/AuthKey_XXXX.p8` may be used instead of
 `APNS_PRIVATE_KEY`. The production service must be able to read that path.
-Debug app builds register sandbox tokens; profile/release builds register
-production tokens. A token is always sent to the APNs host matching the
-environment stored during registration.
+The app registers the `aps-environment` embedded in its provisioning profile.
+Locally installed builds commonly use `development`, while TestFlight and App
+Store distribution builds use `production`. Distribution builds without an
+embedded profile use `production`. A token is always sent to the APNs host
+matching the environment stored during registration.
 
 On backend startup, the existing compatibility step adds the new installation,
 VoIP-token, bundle-ID, and APNs-environment columns and their indexes to

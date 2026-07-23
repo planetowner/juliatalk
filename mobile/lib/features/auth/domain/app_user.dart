@@ -17,6 +17,16 @@ final class AppUser {
     );
   }
 
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'username': username,
+      'display_name': displayName,
+      'profile_image_url': profileImageUrl,
+      'preferred_language': preferredLanguage,
+    };
+  }
+
   final String id;
   final String username;
   final String displayName;

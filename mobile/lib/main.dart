@@ -8,6 +8,8 @@ import 'core/config/app_config.dart';
 import 'core/notifications/notification_service.dart';
 import 'design_system/app_theme.dart';
 import 'features/auth/data/auth_api.dart';
+import 'features/auth/data/auth_login_exception.dart';
+import 'features/auth/data/auth_session_store.dart';
 import 'features/auth/domain/auth_session.dart';
 import 'features/auth/presentation/login_screen.dart';
 import 'features/chat/presentation/chat_conversation_screen.dart';
@@ -32,11 +34,13 @@ final class JuliaTalkApp extends StatefulWidget {
 final class _JuliaTalkAppState extends State<JuliaTalkApp> {
   late final http.Client _httpClient;
   late final AuthApi _authApi;
+  late final AuthSessionStore _authSessionStore;
   late final NotificationService _notificationService;
   late final ChatConversationHomeController _chatController;
   StreamSubscription<Map<String, dynamic>>? _notificationEventSubscription;
 
   AuthSession? _session;
+  bool _isRestoringSession = true;
 
   @override
   void initState() {
@@ -53,6 +57,9 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
       client: _httpClient,
       baseUri: widget.appConfig.apiBaseUri,
     );
+    _authSessionStore = const AuthSessionStore();
+
+    unawaited(_restoreSession());
   }
 
   @override
@@ -80,6 +87,29 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
     }
   }
 
+  Future<void> _restoreSession() async {
+    AuthSession? session;
+
+    try {
+      session = await _authSessionStore.load();
+    } on Exception catch (error) {
+      debugPrint('Session restoration failed: $error');
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _session = session;
+      _isRestoringSession = false;
+    });
+
+    if (session != null) {
+      unawaited(_configureNotifications(session));
+    }
+  }
+
   Future<void> _login({
     required String username,
     required String password,
@@ -88,6 +118,15 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
       username: username,
       password: password,
     );
+
+    try {
+      await _authSessionStore.save(session);
+    } on Exception catch (error) {
+      debugPrint('Session persistence failed: $error');
+      throw const AuthLoginException(
+        'Login succeeded, but the session could not be saved securely.',
+      );
+    }
 
     if (!mounted) {
       return;
@@ -113,22 +152,32 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildHome() {
+    if (_isRestoringSession) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     final AuthSession? session = _session;
 
+    if (session == null) {
+      return LoginScreen(onLogin: _login);
+    }
+
+    return ChatConversationHomeScreen(
+      client: _httpClient,
+      baseUri: widget.appConfig.apiBaseUri,
+      session: session,
+      controller: _chatController,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return MaterialApp(
       title: 'JuliaTalk',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
-      home: session == null
-          ? LoginScreen(onLogin: _login)
-          : ChatConversationHomeScreen(
-              client: _httpClient,
-              baseUri: widget.appConfig.apiBaseUri,
-              session: session,
-              controller: _chatController,
-            ),
+      home: _buildHome(),
     );
   }
 }

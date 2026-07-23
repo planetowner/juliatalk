@@ -15,6 +15,14 @@ final class AuthSession {
     );
   }
 
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'access_token': accessToken,
+      'token_type': tokenType,
+      'user': user.toJson(),
+    };
+  }
+
   final String accessToken;
   final String tokenType;
   final AppUser user;

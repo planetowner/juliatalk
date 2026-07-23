@@ -224,6 +224,73 @@ final class ChatApi {
     );
   }
 
+  Future<Map<String, int>> listUnreadMessageCounts() async {
+    final http.Response response = await _client.get(
+      _baseUri.resolve('/messages/unread-counts'),
+      headers: _headers,
+    );
+
+    if (response.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          response,
+          fallback:
+              'Unread counts loading failed with status code '
+              '${response.statusCode}.',
+        ),
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(response.body);
+
+    if (decodedBody is! Map) {
+      throw const ChatApiException(
+        'The server returned invalid unread counts.',
+      );
+    }
+
+    final Object? rawCounts = decodedBody['counts_by_sender_id'];
+    final Object? rawTotal = decodedBody['total_unread_count'];
+
+    if (rawCounts is! Map || rawTotal is! int || rawTotal < 0) {
+      throw const ChatApiException(
+        'The server returned invalid unread counts.',
+      );
+    }
+
+    final Map<String, int> counts = <String, int>{};
+
+    for (final MapEntry<dynamic, dynamic> entry in rawCounts.entries) {
+      final dynamic senderId = entry.key;
+      final dynamic unreadCount = entry.value;
+
+      if (senderId is! String ||
+          senderId.isEmpty ||
+          unreadCount is! int ||
+          unreadCount < 0) {
+        throw const ChatApiException(
+          'The server returned invalid unread counts.',
+        );
+      }
+
+      if (unreadCount > 0) {
+        counts[senderId] = unreadCount;
+      }
+    }
+
+    final int calculatedTotal = counts.values.fold<int>(
+      0,
+      (int total, int count) => total + count,
+    );
+    if (calculatedTotal != rawTotal) {
+      throw const ChatApiException(
+        'The server returned invalid unread counts.',
+      );
+    }
+
+    return Map<String, int>.unmodifiable(counts);
+  }
+
   Future<ChatMessage> retryMessageTranslation({
     required String messageId,
   }) async {

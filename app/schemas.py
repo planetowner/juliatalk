@@ -249,3 +249,8 @@ class MessagesMarkedReadResponse(BaseModel):
 
 class UnreadMessageCountRead(BaseModel):
     unread_count: int
+
+
+class UnreadMessageCountsRead(BaseModel):
+    counts_by_sender_id: dict[str, int]
+    total_unread_count: int

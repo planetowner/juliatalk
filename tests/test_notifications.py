@@ -1,6 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
+from uuid import UUID
 
 
 os.environ.setdefault(
@@ -16,6 +17,7 @@ from app.notifications import (
     localized_message_body,
 )
 from app.schemas import DeviceRegistrationUpdate
+from app.unread_counts import build_unread_counts_snapshot
 
 
 class NotificationLocalizationTests(unittest.TestCase):
@@ -124,6 +126,36 @@ class NotificationPayloadTests(unittest.TestCase):
 
         self.assertIsNone(registration.voip_push_token)
         self.assertIn("voip_push_token", registration.model_fields_set)
+
+    def test_unread_snapshot_contains_authoritative_counts(self) -> None:
+        user_id = UUID("00000000-0000-0000-0000-000000000001")
+        first_sender_id = UUID("00000000-0000-0000-0000-000000000002")
+        second_sender_id = UUID("00000000-0000-0000-0000-000000000003")
+        message_id = UUID("00000000-0000-0000-0000-000000000004")
+
+        snapshot = build_unread_counts_snapshot(
+            user_id=user_id,
+            counts_by_sender_id={
+                first_sender_id: 2,
+                second_sender_id: 3,
+            },
+            stream_id="test-stream",
+            sequence=7,
+            cause_message_id=message_id,
+        )
+
+        self.assertEqual(snapshot["user_id"], str(user_id))
+        self.assertEqual(snapshot["stream_id"], "test-stream")
+        self.assertEqual(snapshot["sequence"], 7)
+        self.assertEqual(
+            snapshot["counts_by_sender_id"],
+            {
+                str(first_sender_id): 2,
+                str(second_sender_id): 3,
+            },
+        )
+        self.assertEqual(snapshot["total_unread_count"], 5)
+        self.assertEqual(snapshot["cause_message_id"], str(message_id))
 
 
 if __name__ == "__main__":

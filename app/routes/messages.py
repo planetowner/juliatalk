@@ -58,12 +58,17 @@ from app.schemas import (
     MessageUpdate,
     MessagesMarkedReadResponse,
     UnreadMessageCountRead,
+    UnreadMessageCountsRead,
 )
 from app.translation import (
     TRANSLATION_PROVIDER_NAME,
     TRANSLATION_MODEL,
     should_translate_text,
     translate_message,
+)
+from app.unread_counts import (
+    load_unread_counts_by_sender,
+    unread_counts_event_publisher,
 )
 from app.websocket_manager import connection_manager
 
@@ -1244,9 +1249,19 @@ async def create_message(
         "message": message_read.model_dump(mode="json"),
     }
 
-    await send_to_direct_participants(
+    recipient_id = direct_recipient_id(
         direct_conversation,
-        message_created_event,
+        current_user.id,
+    )
+    await connection_manager.send_to_user(
+        user_id=current_user.id,
+        data=message_created_event,
+    )
+    await unread_counts_event_publisher.send_event(
+        session,
+        user_id=recipient_id,
+        event=message_created_event,
+        cause_message_id=message.id,
     )
 
     if should_translate_created_message:
@@ -1348,6 +1363,30 @@ async def update_call_outcome(
         background_tasks.add_task(send_message_notification, message.id)
 
     return message_read
+
+
+@router.get(
+    "/unread-counts",
+    response_model=UnreadMessageCountsRead,
+)
+async def list_unread_message_counts(
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+) -> UnreadMessageCountsRead:
+    counts_by_sender_id = await load_unread_counts_by_sender(
+        session,
+        user_id=current_user.id,
+    )
+    serialized_counts = {
+        str(sender_id): unread_count
+        for sender_id, unread_count in counts_by_sender_id.items()
+        if unread_count > 0
+    }
+
+    return UnreadMessageCountsRead(
+        counts_by_sender_id=serialized_counts,
+        total_unread_count=sum(serialized_counts.values()),
+    )
 
 
 @router.get(
@@ -1574,6 +1613,14 @@ async def mark_conversation_as_read(
     )
 
     if direct_conversation is None:
+        await unread_counts_event_publisher.send_event(
+            session,
+            user_id=current_user.id,
+            event={
+                "type": "unread.counts.updated",
+                "reason": "conversation.read",
+            },
+        )
         return MessagesMarkedReadResponse(marked_read_count=0)
 
     existing_read_ids = select(MessageReadReceipt.message_id).where(
@@ -1594,6 +1641,14 @@ async def mark_conversation_as_read(
     unread_messages = list(result)
 
     if not unread_messages:
+        await unread_counts_event_publisher.send_event(
+            session,
+            user_id=current_user.id,
+            event={
+                "type": "unread.counts.updated",
+                "reason": "conversation.read",
+            },
+        )
         return MessagesMarkedReadResponse(marked_read_count=0)
 
     read_time = datetime.now(timezone.utc)
@@ -1631,7 +1686,15 @@ async def mark_conversation_as_read(
         "read_at": read_time.isoformat(),
     }
 
-    await send_to_direct_participants(direct_conversation, websocket_event)
+    await unread_counts_event_publisher.send_event(
+        session,
+        user_id=current_user.id,
+        event=websocket_event,
+    )
+    await connection_manager.send_to_user(
+        user_id=other_user.id,
+        data=websocket_event,
+    )
 
     return MessagesMarkedReadResponse(
         marked_read_count=len(unread_messages),
@@ -1912,12 +1975,23 @@ async def delete_message(
 
     await session.commit()
 
-    await send_to_direct_participants(
+    websocket_event = {
+        "type": "message.deleted",
+        "message_id": str(message.id),
+    }
+    recipient_id = direct_recipient_id(
         direct_conversation,
-        {
-            "type": "message.deleted",
-            "message_id": str(message.id),
-        },
+        current_user.id,
+    )
+    await connection_manager.send_to_user(
+        user_id=current_user.id,
+        data=websocket_event,
+    )
+    await unread_counts_event_publisher.send_event(
+        session,
+        user_id=recipient_id,
+        event=websocket_event,
+        cause_message_id=message.id,
     )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

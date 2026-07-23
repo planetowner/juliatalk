@@ -19,7 +19,7 @@ const double _chatListTextStartInset =
     _chatListHorizontalPadding + _chatListAvatarSize + _chatListTitleGap;
 const Duration _chatRouteOpenDuration = Duration(milliseconds: 190);
 const Duration _chatRouteCloseDuration = Duration(milliseconds: 170);
-const double _chatRouteDismissProgress = 0.28;
+const double _chatRouteDismissProgress = 0.5;
 const double _chatRouteFlingVelocity = 700;
 const double _chatRouteDragSlop = 8;
 
@@ -91,6 +91,7 @@ final class _ChatConversationHomeScreenState
   Offset? _chatRoutePointerStart;
   Offset? _chatRoutePointerLast;
   VelocityTracker? _chatRouteVelocityTracker;
+  bool _chatRoutePointerRejected = false;
   bool _chatRouteDragActive = false;
   bool _chatRouteClosing = false;
   bool _chatEntriesLoading = true;
@@ -440,6 +441,7 @@ final class _ChatConversationHomeScreenState
       _chatRoutePointerStart = null;
       _chatRoutePointerLast = null;
       _chatRouteVelocityTracker = null;
+      _chatRoutePointerRejected = false;
 
       if (unlockScroll) {
         _chatRouteDragActive = false;
@@ -455,11 +457,13 @@ final class _ChatConversationHomeScreenState
     _chatRoutePointerStart = null;
     _chatRoutePointerLast = null;
     _chatRouteVelocityTracker = null;
+    _chatRoutePointerRejected = false;
   }
 
   void _handleChatRoutePointerDown(PointerDownEvent event) {
     if (_selectedUser == null ||
         _chatRouteClosing ||
+        _chatRouteDragActive ||
         _chatRoutePointer != null) {
       return;
     }
@@ -469,6 +473,7 @@ final class _ChatConversationHomeScreenState
     _chatRoutePointerLast = event.position;
     _chatRouteVelocityTracker = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
+    _chatRoutePointerRejected = false;
   }
 
   void _handleChatRoutePointerMove(PointerMoveEvent event) {
@@ -488,14 +493,23 @@ final class _ChatConversationHomeScreenState
     }
 
     if (!_chatRouteDragActive) {
+      if (_chatRoutePointerRejected) {
+        return;
+      }
+
       final Offset totalDelta = event.position - pointerStart;
       final double horizontalDistance = totalDelta.dx.abs();
       final double verticalDistance = totalDelta.dy.abs();
 
-      if (totalDelta.dx <= 0 ||
-          horizontalDistance < _chatRouteDragSlop ||
-          horizontalDistance <= verticalDistance) {
-        _chatRoutePointerLast = event.position;
+      if (horizontalDistance < _chatRouteDragSlop &&
+          verticalDistance < _chatRouteDragSlop) {
+        return;
+      }
+
+      // Decide once per pointer sequence. A vertical scroll must not turn into
+      // route navigation later just because the finger drifts to the right.
+      if (totalDelta.dx <= 0 || horizontalDistance <= verticalDistance) {
+        _chatRoutePointerRejected = true;
         return;
       }
 
@@ -532,12 +546,10 @@ final class _ChatConversationHomeScreenState
       return;
     }
 
-    _resetChatRoutePointer(unlockScroll: false);
-
     final AppUser? selectedUser = _selectedUser;
 
     if (selectedUser == null) {
-      _setChatRouteDragActive(false);
+      _resetChatRoutePointer();
       return;
     }
 
@@ -546,6 +558,7 @@ final class _ChatConversationHomeScreenState
         _chatRouteController.value <= 1 - _chatRouteDismissProgress;
 
     if (shouldClose) {
+      _resetChatRoutePointer(unlockScroll: false);
       _chatRouteClosing = true;
       unawaited(
         _chatRouteController
@@ -561,6 +574,7 @@ final class _ChatConversationHomeScreenState
       return;
     }
 
+    _resetChatRoutePointer(unlockScroll: false);
     unawaited(
       _chatRouteController
           .animateTo(
@@ -592,7 +606,6 @@ final class _ChatConversationHomeScreenState
 
     final AppUser? selectedUser = _selectedUser;
     _resetChatRoutePointer(unlockScroll: false);
-
     unawaited(
       _chatRouteController
           .animateTo(

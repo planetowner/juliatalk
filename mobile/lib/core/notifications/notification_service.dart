@@ -64,6 +64,14 @@ final class NotificationService {
     });
   }
 
+  Future<void> clearDeliveredNotifications() async {
+    if (!_isSupported) {
+      return;
+    }
+
+    await _methodChannel.invokeMethod<void>('clearDeliveredNotifications');
+  }
+
   Future<void> setActiveChatSenderId(String senderId) async {
     if (!_isSupported) {
       return;

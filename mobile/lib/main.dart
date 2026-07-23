@@ -33,7 +33,8 @@ final class JuliaTalkApp extends StatefulWidget {
   }
 }
 
-final class _JuliaTalkAppState extends State<JuliaTalkApp> {
+final class _JuliaTalkAppState extends State<JuliaTalkApp>
+    with WidgetsBindingObserver {
   late final http.Client _httpClient;
   late final AuthApi _authApi;
   late final AuthSessionStore _authSessionStore;
@@ -50,6 +51,7 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
   void initState() {
     super.initState();
 
+    WidgetsBinding.instance.addObserver(this);
     _httpClient = http.Client();
     _notificationService = NotificationService();
     _chatController = ChatConversationHomeController();
@@ -63,16 +65,35 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
     );
     _authSessionStore = const AuthSessionStore();
 
+    unawaited(_clearDeliveredNotifications());
     unawaited(_restoreSession());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_notificationEventSubscription?.cancel());
     _chatRealtimeService?.dispose();
     _chatController.dispose();
     _httpClient.close();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_clearDeliveredNotifications());
+    }
+  }
+
+  Future<void> _clearDeliveredNotifications() async {
+    try {
+      await _notificationService.clearDeliveredNotifications();
+    } on PlatformException catch (error) {
+      debugPrint('Delivered notification cleanup failed: ${error.message}');
+    } on MissingPluginException {
+      debugPrint('Notification bridge is unavailable on this platform.');
+    }
   }
 
   void _handleNotificationEvent(Map<String, dynamic> event) {

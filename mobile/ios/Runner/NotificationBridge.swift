@@ -117,6 +117,9 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
       let arguments = call.arguments as? [String: Any]
       let count = arguments?["count"] as? Int ?? 0
       setBadgeCount(count, result: result)
+    case "clearDeliveredNotifications":
+      UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+      result(nil)
     case "setActiveChatSenderId":
       let arguments = call.arguments as? [String: Any]
       activeChatSenderID = arguments?["senderId"] as? String

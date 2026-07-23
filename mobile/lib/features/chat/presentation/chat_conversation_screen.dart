@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../../../core/notifications/notification_service.dart';
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_typography.dart';
 import '../../auth/domain/app_user.dart';
@@ -832,10 +833,13 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   bool _syncingAfterReconnect = false;
   int _unreadOutsideCurrentConversationCount = 0;
   late List<ChatMessage> _messages;
+  final NotificationService _notificationService = NotificationService();
 
   @override
   void initState() {
     super.initState();
+
+    unawaited(_notificationService.setActiveChatSenderId(widget.otherUser.id));
 
     final List<ChatMessage>? initialMessages = widget.initialMessages;
 
@@ -849,8 +853,22 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   }
 
   @override
+  void didUpdateWidget(covariant ChatConversationScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.otherUser.id != widget.otherUser.id) {
+      unawaited(
+        _notificationService.setActiveChatSenderId(widget.otherUser.id),
+      );
+    }
+  }
+
+  @override
   void dispose() {
     _disposed = true;
+    unawaited(
+      _notificationService.clearActiveChatSenderId(widget.otherUser.id),
+    );
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
     _pingTimer?.cancel();

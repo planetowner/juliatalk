@@ -20,11 +20,10 @@ final class NotificationService {
       return const Stream<Map<String, dynamic>>.empty();
     }
 
-    return _eventChannel.receiveBroadcastStream().where(
-      (dynamic event) => event is Map,
-    ).map(
-      (dynamic event) => Map<String, dynamic>.from(event as Map),
-    );
+    return _eventChannel
+        .receiveBroadcastStream()
+        .where((dynamic event) => event is Map)
+        .map((dynamic event) => Map<String, dynamic>.from(event as Map));
   }
 
   Future<void> configure({
@@ -50,8 +49,8 @@ final class NotificationService {
       return const <String, dynamic>{};
     }
 
-    final Map<dynamic, dynamic>? settings =
-        await _methodChannel.invokeMapMethod<dynamic, dynamic>('getSettings');
+    final Map<dynamic, dynamic>? settings = await _methodChannel
+        .invokeMapMethod<dynamic, dynamic>('getSettings');
     return Map<String, dynamic>.from(settings ?? const <dynamic, dynamic>{});
   }
 
@@ -63,5 +62,27 @@ final class NotificationService {
     await _methodChannel.invokeMethod<void>('setBadgeCount', <String, int>{
       'count': count,
     });
+  }
+
+  Future<void> setActiveChatSenderId(String senderId) async {
+    if (!_isSupported) {
+      return;
+    }
+
+    await _methodChannel.invokeMethod<void>(
+      'setActiveChatSenderId',
+      <String, String>{'senderId': senderId},
+    );
+  }
+
+  Future<void> clearActiveChatSenderId(String senderId) async {
+    if (!_isSupported) {
+      return;
+    }
+
+    await _methodChannel.invokeMethod<void>(
+      'clearActiveChatSenderId',
+      <String, String>{'senderId': senderId},
+    );
   }
 }

@@ -62,6 +62,7 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
   private var pendingEvents: [[String: Any]] = []
   private var voipRegistry: PKPushRegistry?
+  private var activeChatSenderID: String?
   private var activeCallers: [UUID: [String: Any]] = [:]
   private var answeredCalls: [UUID: Date] = [:]
   private var callSignalingSession: URLSession?
@@ -116,6 +117,17 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
       let arguments = call.arguments as? [String: Any]
       let count = arguments?["count"] as? Int ?? 0
       setBadgeCount(count, result: result)
+    case "setActiveChatSenderId":
+      let arguments = call.arguments as? [String: Any]
+      activeChatSenderID = arguments?["senderId"] as? String
+      result(nil)
+    case "clearActiveChatSenderId":
+      let arguments = call.arguments as? [String: Any]
+      let senderID = arguments?["senderId"] as? String
+      if activeChatSenderID == senderID {
+        activeChatSenderID = nil
+      }
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -550,6 +562,15 @@ extension NotificationBridge: UNUserNotificationCenterDelegate {
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
+    let userInfo = notification.request.content.userInfo
+    let notificationPayload = userInfo["juliatalk"] as? [String: Any]
+    let senderID = notificationPayload?["sender_id"] as? String
+
+    if let senderID, senderID == activeChatSenderID {
+      completionHandler([])
+      return
+    }
+
     if #available(iOS 14.0, *) {
       completionHandler([.banner, .list, .sound, .badge])
     } else {

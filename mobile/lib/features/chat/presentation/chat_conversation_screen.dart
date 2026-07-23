@@ -1,19 +1,14 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
-import '../../../core/notifications/notification_service.dart';
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_typography.dart';
 import '../../auth/domain/app_user.dart';
 import '../../auth/domain/auth_session.dart';
 import '../data/chat_api.dart';
-import '../data/chat_api_exception.dart';
+import '../data/chat_realtime_service.dart';
 import '../domain/chat_message.dart';
 import 'chat_conversation_view.dart';
 
@@ -51,15 +46,15 @@ final class ChatConversationHomeController extends ChangeNotifier {
 
 final class ChatConversationHomeScreen extends StatefulWidget {
   const ChatConversationHomeScreen({
-    required this.client,
-    required this.baseUri,
+    required this.chatApi,
+    required this.realtimeService,
     required this.session,
     required this.controller,
     super.key,
   });
 
-  final http.Client client;
-  final Uri baseUri;
+  final ChatApi chatApi;
+  final ChatRealtimeService realtimeService;
   final AuthSession session;
   final ChatConversationHomeController controller;
 
@@ -85,7 +80,6 @@ final class _ChatConversationHomeScreenState
         'yunjung5437': <String, String>{'junebabo': '리아', 'liababo': '준'},
       };
 
-  late final ChatApi _chatApi;
   late final AnimationController _chatRouteController;
   final Map<String, List<ChatMessage>> _conversationMessagesByUserId =
       <String, List<ChatMessage>>{};
@@ -101,17 +95,15 @@ final class _ChatConversationHomeScreenState
   bool _chatRouteClosing = false;
   bool _chatEntriesLoading = true;
   bool _chatEntriesRefreshing = false;
+  bool _chatEntriesRefreshPending = false;
   String? _chatEntriesErrorMessage;
+
+  ChatApi get _chatApi => widget.chatApi;
 
   @override
   void initState() {
     super.initState();
 
-    _chatApi = ChatApi(
-      client: widget.client,
-      baseUri: widget.baseUri,
-      accessToken: widget.session.accessToken,
-    );
     _chatRouteController = AnimationController(
       vsync: this,
       duration: _chatRouteOpenDuration,
@@ -119,13 +111,22 @@ final class _ChatConversationHomeScreenState
     );
 
     widget.controller.addListener(_openPendingConversation);
+    widget.realtimeService.addListener(_handleRealtimeStateChanged);
 
     unawaited(_loadChatEntries(showInitialLoading: true));
   }
 
   @override
   void dispose() {
+    final String? selectedUserId = _selectedUser?.id;
+    if (selectedUserId != null) {
+      unawaited(
+        widget.realtimeService.clearActiveConversationUserId(selectedUserId),
+      );
+    }
+
     widget.controller.removeListener(_openPendingConversation);
+    widget.realtimeService.removeListener(_handleRealtimeStateChanged);
     _chatRouteController.dispose();
     super.dispose();
   }
@@ -139,10 +140,29 @@ final class _ChatConversationHomeScreenState
       widget.controller.addListener(_openPendingConversation);
       _openPendingConversation();
     }
+
+    if (oldWidget.realtimeService != widget.realtimeService) {
+      oldWidget.realtimeService.removeListener(_handleRealtimeStateChanged);
+      widget.realtimeService.addListener(_handleRealtimeStateChanged);
+
+      final String? selectedUserId = _selectedUser?.id;
+      if (selectedUserId != null) {
+        unawaited(
+          widget.realtimeService.setActiveConversationUserId(selectedUserId),
+        );
+      }
+    }
+  }
+
+  void _handleRealtimeStateChanged() {
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _loadChatEntries({required bool showInitialLoading}) async {
     if (_chatEntriesRefreshing) {
+      _chatEntriesRefreshPending = true;
       return;
     }
 
@@ -157,7 +177,6 @@ final class _ChatConversationHomeScreenState
 
     try {
       final List<AppUser> users = await _chatApi.listUsers();
-
       final List<AppUser> chatUsers = users
           .where((AppUser user) => user.id != widget.session.user.id)
           .toList(growable: false);
@@ -165,14 +184,9 @@ final class _ChatConversationHomeScreenState
       _sortChatUsers(chatUsers);
       _prefetchConversations(chatUsers);
 
-      final List<_ChatListEntry> entries = await Future.wait(
-        chatUsers.map((AppUser user) async {
-          return _ChatListEntry(
-            user: user,
-            unreadCount: await _loadUnreadCountFor(user),
-          );
-        }),
-      );
+      final List<_ChatListEntry> entries = chatUsers
+          .map((AppUser user) => _ChatListEntry(user: user))
+          .toList(growable: false);
 
       if (!mounted) {
         return;
@@ -197,14 +211,11 @@ final class _ChatConversationHomeScreenState
       });
     } finally {
       _chatEntriesRefreshing = false;
-    }
-  }
 
-  Future<int> _loadUnreadCountFor(AppUser user) async {
-    try {
-      return await _chatApi.countUnreadMessages(fromUserId: user.id);
-    } on ChatApiException {
-      return 0;
+      if (_chatEntriesRefreshPending && mounted) {
+        _chatEntriesRefreshPending = false;
+        unawaited(_loadChatEntries(showInitialLoading: false));
+      }
     }
   }
 
@@ -349,24 +360,6 @@ final class _ChatConversationHomeScreenState
     );
   }
 
-  void _clearUnreadCountFor(String userId) {
-    final List<_ChatListEntry>? entries = _chatEntries;
-
-    if (entries == null) {
-      return;
-    }
-
-    _chatEntries = List<_ChatListEntry>.unmodifiable(
-      entries.map((_ChatListEntry entry) {
-        if (entry.user.id != userId || entry.unreadCount == 0) {
-          return entry;
-        }
-
-        return entry.copyWith(unreadCount: 0);
-      }),
-    );
-  }
-
   void _openChat(AppUser user) {
     if (_selectedUser?.id == user.id) {
       return;
@@ -378,6 +371,7 @@ final class _ChatConversationHomeScreenState
     setState(() {
       _selectedUser = user;
     });
+    unawaited(widget.realtimeService.setActiveConversationUserId(user.id));
 
     unawaited(
       _chatRouteController.animateTo(
@@ -417,14 +411,15 @@ final class _ChatConversationHomeScreenState
     }
 
     setState(() {
-      _clearUnreadCountFor(selectedUser.id);
       _selectedUser = null;
       _chatRouteClosing = false;
       _chatRouteDragActive = false;
     });
 
     _chatRouteController.value = 0;
-    unawaited(_loadChatEntries(showInitialLoading: false));
+    unawaited(
+      widget.realtimeService.clearActiveConversationUserId(selectedUser.id),
+    );
   }
 
   void _setChatRouteDragActive(bool active) {
@@ -646,8 +641,7 @@ final class _ChatConversationHomeScreenState
           child: ChatConversationScreen(
             key: ValueKey<String>(selectedUser.id),
             chatApi: _chatApi,
-            baseUri: widget.baseUri,
-            accessToken: widget.session.accessToken,
+            realtimeService: widget.realtimeService,
             currentUser: widget.session.user,
             otherUser: selectedUser,
             otherUserDisplayName: _displayNameFor(selectedUser),
@@ -744,7 +738,7 @@ final class _ChatConversationHomeScreenState
                   minLeadingWidth: _chatListAvatarSize,
                   leading: _ChatUserAvatar(
                     imageUrl: user.profileImageUrl,
-                    unreadCount: entry.unreadCount,
+                    unreadCount: widget.realtimeService.unreadCountFor(user.id),
                   ),
                   title: Text(
                     _displayNameFor(user),
@@ -771,24 +765,15 @@ final class _ChatConversationHomeScreenState
 }
 
 final class _ChatListEntry {
-  const _ChatListEntry({required this.user, required this.unreadCount});
+  const _ChatListEntry({required this.user});
 
   final AppUser user;
-  final int unreadCount;
-
-  _ChatListEntry copyWith({int? unreadCount}) {
-    return _ChatListEntry(
-      user: user,
-      unreadCount: unreadCount ?? this.unreadCount,
-    );
-  }
 }
 
 final class ChatConversationScreen extends StatefulWidget {
   const ChatConversationScreen({
     required this.chatApi,
-    required this.baseUri,
-    required this.accessToken,
+    required this.realtimeService,
     required this.currentUser,
     required this.otherUser,
     required this.otherUserDisplayName,
@@ -800,8 +785,7 @@ final class ChatConversationScreen extends StatefulWidget {
   });
 
   final ChatApi chatApi;
-  final Uri baseUri;
-  final String accessToken;
+  final ChatRealtimeService realtimeService;
   final AppUser currentUser;
   final AppUser otherUser;
   final String otherUserDisplayName;
@@ -816,30 +800,16 @@ final class ChatConversationScreen extends StatefulWidget {
   }
 }
 
-final class _ChatConversationScreenState extends State<ChatConversationScreen>
-    with WidgetsBindingObserver {
-  static const Duration _reconnectDelay = Duration(seconds: 2);
-  static const Duration _pingInterval = Duration(seconds: 25);
-
-  WebSocketChannel? _webSocketChannel;
-  StreamSubscription<dynamic>? _webSocketSubscription;
-  Timer? _reconnectTimer;
-  Timer? _pingTimer;
-
+final class _ChatConversationScreenState extends State<ChatConversationScreen> {
+  StreamSubscription<Map<String, dynamic>>? _realtimeEventSubscription;
   late bool _loading;
   String? _errorMessage;
-  bool _disposed = false;
-  bool _connectedOnce = false;
   bool _syncingAfterReconnect = false;
-  int _unreadOutsideCurrentConversationCount = 0;
   late List<ChatMessage> _messages;
-  final NotificationService _notificationService = NotificationService();
 
   @override
   void initState() {
     super.initState();
-
-    unawaited(_notificationService.setActiveChatSenderId(widget.otherUser.id));
 
     final List<ChatMessage>? initialMessages = widget.initialMessages;
 
@@ -848,7 +818,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         : List<ChatMessage>.unmodifiable(initialMessages);
     _loading = initialMessages == null;
 
-    WidgetsBinding.instance.addObserver(this);
+    _subscribeToRealtimeService();
+    widget.realtimeService.addListener(_handleRealtimeStateChanged);
     unawaited(_loadConversation(showLoading: initialMessages == null));
   }
 
@@ -856,32 +827,30 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
   void didUpdateWidget(covariant ChatConversationScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (oldWidget.otherUser.id != widget.otherUser.id) {
-      unawaited(
-        _notificationService.setActiveChatSenderId(widget.otherUser.id),
-      );
+    if (oldWidget.realtimeService != widget.realtimeService) {
+      unawaited(_realtimeEventSubscription?.cancel());
+      oldWidget.realtimeService.removeListener(_handleRealtimeStateChanged);
+      _subscribeToRealtimeService();
+      widget.realtimeService.addListener(_handleRealtimeStateChanged);
     }
   }
 
   @override
   void dispose() {
-    _disposed = true;
-    unawaited(
-      _notificationService.clearActiveChatSenderId(widget.otherUser.id),
-    );
-    WidgetsBinding.instance.removeObserver(this);
-    _reconnectTimer?.cancel();
-    _pingTimer?.cancel();
-    unawaited(_webSocketSubscription?.cancel());
-    unawaited(_webSocketChannel?.sink.close());
+    widget.realtimeService.removeListener(_handleRealtimeStateChanged);
+    unawaited(_realtimeEventSubscription?.cancel());
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _connectWebSocket();
-      unawaited(_syncConversationFromRest());
+  void _subscribeToRealtimeService() {
+    _realtimeEventSubscription = widget.realtimeService.events.listen(
+      _handleRealtimeEvent,
+    );
+  }
+
+  void _handleRealtimeStateChanged() {
+    if (mounted) {
+      setState(() {});
     }
   }
 
@@ -909,8 +878,9 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
       });
       _notifyMessagesChanged();
 
-      _connectWebSocket();
-      unawaited(_markCurrentConversationReadAndRefreshUnreadCount());
+      unawaited(
+        widget.realtimeService.markConversationAsRead(widget.otherUser.id),
+      );
     } catch (_) {
       if (!mounted) {
         return;
@@ -951,7 +921,9 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         _errorMessage = null;
       });
       _notifyMessagesChanged();
-      unawaited(_markCurrentConversationReadAndRefreshUnreadCount());
+      unawaited(
+        widget.realtimeService.markConversationAsRead(widget.otherUser.id),
+      );
     } catch (_) {
       // Keep the current conversation visible during transient sync errors.
     } finally {
@@ -959,75 +931,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     }
   }
 
-  Future<void> _markCurrentConversationReadAndRefreshUnreadCount() async {
-    try {
-      await widget.chatApi.markConversationAsRead(
-        otherUserId: widget.otherUser.id,
-      );
-    } catch (_) {
-      // The next reconnect/sync will try again.
-    }
-
-    await _refreshUnreadOutsideCurrentConversationCount();
-  }
-
-  void _connectWebSocket() {
-    if (_disposed || _webSocketChannel != null) {
-      return;
-    }
-
-    _reconnectTimer?.cancel();
-
-    final WebSocketChannel channel = IOWebSocketChannel.connect(
-      _webSocketUri(),
-      headers: <String, String>{
-        'Authorization': 'Bearer ${widget.accessToken}',
-      },
-    );
-
-    _webSocketChannel = channel;
-    _webSocketSubscription = channel.stream.listen(
-      _handleWebSocketData,
-      onError: (_) {
-        _handleWebSocketDisconnected();
-      },
-      onDone: _handleWebSocketDisconnected,
-    );
-  }
-
-  Uri _webSocketUri() {
-    final String scheme = widget.baseUri.scheme == 'https' ? 'wss' : 'ws';
-    final Uri baseUri = widget.baseUri;
-
-    return Uri(
-      scheme: scheme,
-      userInfo: baseUri.userInfo,
-      host: baseUri.host,
-      port: baseUri.hasPort ? baseUri.port : null,
-      path: '/ws',
-    );
-  }
-
-  void _handleWebSocketData(dynamic data) {
-    final Object? decodedData;
-
-    try {
-      if (data is String) {
-        decodedData = jsonDecode(data);
-      } else if (data is List<int>) {
-        decodedData = jsonDecode(utf8.decode(data));
-      } else {
-        return;
-      }
-    } on FormatException {
-      return;
-    }
-
-    if (decodedData is! Map<String, dynamic>) {
-      return;
-    }
-
-    final Object? eventType = decodedData['type'];
+  void _handleRealtimeEvent(Map<String, dynamic> event) {
+    final Object? eventType = event['type'];
 
     if (eventType is! String) {
       return;
@@ -1035,68 +940,48 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
 
     switch (eventType) {
       case 'connected':
-        _handleWebSocketConnected();
+        unawaited(_syncConversationFromRest());
         return;
       case 'pong':
         return;
       case 'message.created':
       case 'message.updated':
       case 'message.translation.updated':
-        _handleMessageEvent(decodedData);
+        _handleMessageEvent(event);
         return;
       case 'message.deleted':
-        _handleMessageDeletedEvent(decodedData);
+        _handleMessageDeletedEvent(event);
         return;
       case 'messages.read':
-        _handleMessagesReadEvent(decodedData);
+        _handleMessagesReadEvent(event);
         return;
       case 'error':
         return;
     }
   }
 
-  void _handleWebSocketConnected() {
-    final bool wasReconnect = _connectedOnce;
-
-    _connectedOnce = true;
-    _startPingTimer();
-
-    if (wasReconnect) {
-      unawaited(_syncConversationFromRest());
-    }
-  }
-
   void _handleMessageEvent(Map<String, dynamic> event) {
     final Object? messageJson = event['message'];
 
-    if (messageJson is! Map<String, dynamic>) {
+    if (messageJson is! Map) {
       return;
     }
 
     final ChatMessage message;
 
     try {
-      message = widget.chatApi.messageFromJson(messageJson);
+      message = widget.chatApi.messageFromJson(
+        Map<String, dynamic>.from(messageJson),
+      );
     } catch (_) {
       return;
     }
 
     if (!_messageBelongsToConversation(message)) {
-      if (message.senderId != widget.currentUser.id) {
-        unawaited(_refreshUnreadOutsideCurrentConversationCount());
-      }
-
       return;
     }
 
     _upsertMessage(message);
-
-    if (message.senderId == widget.otherUser.id) {
-      unawaited(
-        widget.chatApi.markConversationAsRead(otherUserId: widget.otherUser.id),
-      );
-      unawaited(_refreshUnreadOutsideCurrentConversationCount());
-    }
   }
 
   void _handleMessageDeletedEvent(Map<String, dynamic> event) {
@@ -1105,8 +990,6 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
     if (messageId is String) {
       _removeMessage(messageId);
     }
-
-    unawaited(_refreshUnreadOutsideCurrentConversationCount());
   }
 
   void _handleMessagesReadEvent(Map<String, dynamic> event) {
@@ -1134,71 +1017,6 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
       messageIds.whereType<String>().toList(growable: false),
       readAt,
     );
-
-    unawaited(_refreshUnreadOutsideCurrentConversationCount());
-  }
-
-  Future<int> _loadUnreadOutsideCurrentConversationCount() async {
-    try {
-      return await widget.chatApi.countUnreadMessages(
-        excludeUserId: widget.otherUser.id,
-      );
-    } catch (_) {
-      return _unreadOutsideCurrentConversationCount;
-    }
-  }
-
-  Future<void> _refreshUnreadOutsideCurrentConversationCount() async {
-    final int unreadOutsideCurrentConversationCount =
-        await _loadUnreadOutsideCurrentConversationCount();
-
-    if (!mounted) {
-      return;
-    }
-
-    if (unreadOutsideCurrentConversationCount ==
-        _unreadOutsideCurrentConversationCount) {
-      return;
-    }
-
-    setState(() {
-      _unreadOutsideCurrentConversationCount =
-          unreadOutsideCurrentConversationCount;
-    });
-  }
-
-  void _handleWebSocketDisconnected() {
-    _pingTimer?.cancel();
-    _pingTimer = null;
-    _webSocketSubscription = null;
-    _webSocketChannel = null;
-
-    if (_disposed) {
-      return;
-    }
-
-    _reconnectTimer ??= Timer(_reconnectDelay, () {
-      _reconnectTimer = null;
-      _connectWebSocket();
-    });
-  }
-
-  void _startPingTimer() {
-    _pingTimer?.cancel();
-
-    _pingTimer = Timer.periodic(_pingInterval, (_) {
-      final WebSocketChannel? channel = _webSocketChannel;
-
-      if (channel == null) {
-        return;
-      }
-
-      try {
-        channel.sink.add(jsonEncode(<String, String>{'type': 'ping'}));
-      } catch (_) {
-        _handleWebSocketDisconnected();
-      }
-    });
   }
 
   bool _messageBelongsToConversation(ChatMessage message) {
@@ -1506,7 +1324,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen>
         onRetryTranslation: _retryTextMessageTranslation,
         onDeleteMessage: _deleteMessage,
         onBack: widget.onBack,
-        unreadOtherConversationCount: _unreadOutsideCurrentConversationCount,
+        unreadOtherConversationCount: widget.realtimeService
+            .unreadCountExcluding(widget.otherUser.id),
         routeNavigationDragActive: widget.routeNavigationDragActive,
       ),
     );

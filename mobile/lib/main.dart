@@ -12,6 +12,8 @@ import 'features/auth/data/auth_login_exception.dart';
 import 'features/auth/data/auth_session_store.dart';
 import 'features/auth/domain/auth_session.dart';
 import 'features/auth/presentation/login_screen.dart';
+import 'features/chat/data/chat_api.dart';
+import 'features/chat/data/chat_realtime_service.dart';
 import 'features/chat/presentation/chat_conversation_screen.dart';
 
 void main() {
@@ -40,6 +42,8 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
   StreamSubscription<Map<String, dynamic>>? _notificationEventSubscription;
 
   AuthSession? _session;
+  ChatApi? _chatApi;
+  ChatRealtimeService? _chatRealtimeService;
   bool _isRestoringSession = true;
 
   @override
@@ -65,6 +69,7 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
   @override
   void dispose() {
     unawaited(_notificationEventSubscription?.cancel());
+    _chatRealtimeService?.dispose();
     _chatController.dispose();
     _httpClient.close();
     super.dispose();
@@ -100,6 +105,12 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
       return;
     }
 
+    if (session != null) {
+      _activateChatSession(session);
+    } else {
+      _deactivateChatSession();
+    }
+
     setState(() {
       _session = session;
       _isRestoringSession = false;
@@ -132,6 +143,8 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
       return;
     }
 
+    _activateChatSession(session);
+
     setState(() {
       _session = session;
     });
@@ -152,6 +165,32 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
     }
   }
 
+  void _activateChatSession(AuthSession session) {
+    _chatRealtimeService?.dispose();
+
+    final ChatApi chatApi = ChatApi(
+      client: _httpClient,
+      baseUri: widget.appConfig.apiBaseUri,
+      accessToken: session.accessToken,
+    );
+    final ChatRealtimeService realtimeService = ChatRealtimeService(
+      chatApi: chatApi,
+      baseUri: widget.appConfig.apiBaseUri,
+      session: session,
+      notificationService: _notificationService,
+    );
+
+    _chatApi = chatApi;
+    _chatRealtimeService = realtimeService;
+    realtimeService.start();
+  }
+
+  void _deactivateChatSession() {
+    _chatRealtimeService?.dispose();
+    _chatRealtimeService = null;
+    _chatApi = null;
+  }
+
   Widget _buildHome() {
     if (_isRestoringSession) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
@@ -163,9 +202,16 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp> {
       return LoginScreen(onLogin: _login);
     }
 
+    final ChatApi? chatApi = _chatApi;
+    final ChatRealtimeService? realtimeService = _chatRealtimeService;
+
+    if (chatApi == null || realtimeService == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     return ChatConversationHomeScreen(
-      client: _httpClient,
-      baseUri: widget.appConfig.apiBaseUri,
+      chatApi: chatApi,
+      realtimeService: realtimeService,
       session: session,
       controller: _chatController,
     );

@@ -25,8 +25,8 @@ const AppUser _otherUser = AppUser(
   preferredLanguage: 'en',
 );
 
-ListView _messageList(WidgetTester tester) {
-  return tester.widget<ListView>(
+ScrollView _messageList(WidgetTester tester) {
+  return tester.widget<ScrollView>(
     find.byKey(const ValueKey<String>('message-list')),
   );
 }

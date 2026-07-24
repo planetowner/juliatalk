@@ -935,7 +935,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
   }
 
-  Future<void> _loadOlderMessages(VoidCallback beforeMessagesPrepended) async {
+  Future<void> _loadOlderMessages() async {
     if (_loadingOlderMessages || !_hasMoreMessages || _messages.isEmpty) {
       return;
     }
@@ -965,10 +965,6 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
           )
           .length;
       final List<ChatMessage> mergedMessages = _mergeMessages(page.messages);
-
-      if (addedMessageCount > 0) {
-        beforeMessagesPrepended();
-      }
 
       setState(() {
         _messages = mergedMessages;

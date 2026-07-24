@@ -35,13 +35,13 @@ final class _PaginationHarness extends StatefulWidget {
 
 final class _PaginationHarnessState extends State<_PaginationHarness> {
   List<ChatMessage> messages = List<ChatMessage>.unmodifiable(
-    _messages(20, 40),
+    _messages(100, 160),
   );
   bool hasMoreMessages = true;
   bool loadingOlderMessages = false;
   int loadCount = 0;
 
-  Future<void> _loadOlderMessages(VoidCallback beforeMessagesPrepended) async {
+  Future<void> _loadOlderMessages() async {
     if (loadingOlderMessages || !hasMoreMessages) {
       return;
     }
@@ -59,10 +59,9 @@ final class _PaginationHarnessState extends State<_PaginationHarness> {
     }
 
     final List<ChatMessage> page = requestIndex == 0
-        ? _messages(10, 20)
-        : _messages(0, 10);
+        ? _messages(40, 100)
+        : _messages(0, 40);
 
-    beforeMessagesPrepended();
     setState(() {
       messages = List<ChatMessage>.unmodifiable(<ChatMessage>[
         ...page,
@@ -114,7 +113,7 @@ void main() {
       await firstRequestStarted.future;
       await tester.pumpAndSettle();
 
-      final Finder anchorMessage = find.text('message-20');
+      final Finder anchorMessage = find.text('message-100');
       expect(anchorMessage, findsOneWidget);
       final double anchorTopBefore = tester.getTopLeft(anchorMessage).dy;
 
@@ -135,6 +134,69 @@ void main() {
 
       expect(find.text('message-0'), findsOneWidget);
       expect(harnessKey.currentState!.loadCount, 2);
+    },
+  );
+
+  testWidgets(
+    'keeps an active drag continuous when an older page is inserted',
+    (WidgetTester tester) async {
+      final Completer<void> firstRequestStarted = Completer<void>();
+      final Completer<void> releaseFirstRequest = Completer<void>();
+
+      await tester.pumpWidget(
+        _PaginationHarness(
+          firstRequestStarted: firstRequestStarted,
+          releaseFirstRequest: releaseFirstRequest,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+
+      await tester.drag(listFinder, const Offset(0, 4000));
+      await tester.pumpAndSettle();
+
+      expect(
+        firstRequestStarted.isCompleted,
+        isTrue,
+        reason: 'The upward history drag must start the older-page request.',
+      );
+
+      final TestGesture gesture = await tester.startGesture(
+        tester.getCenter(listFinder),
+      );
+
+      await gesture.moveBy(const Offset(0, -60));
+      await tester.pump();
+
+      final Finder anchorMessage = find.text('message-100');
+      expect(anchorMessage, findsOneWidget);
+      final double anchorTopBefore = tester.getTopLeft(anchorMessage).dy;
+
+      releaseFirstRequest.complete();
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.getTopLeft(anchorMessage).dy, closeTo(anchorTopBefore, 1));
+
+      final ScrollableState scrollableState = tester.state<ScrollableState>(
+        find.descendant(of: listFinder, matching: find.byType(Scrollable)),
+      );
+      final double scrollOffsetBeforeContinuedDrag =
+          scrollableState.position.pixels;
+
+      await gesture.moveBy(const Offset(0, 40));
+      await tester.pump();
+
+      expect(
+        scrollableState.position.pixels,
+        lessThan(scrollOffsetBeforeContinuedDrag - 20),
+      );
+
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 500));
     },
   );
 }

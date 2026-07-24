@@ -113,8 +113,7 @@ typedef ChatMessageTranslationRetrier =
     Future<ChatMessage> Function({required String messageId});
 
 typedef ChatMessageDeleter = Future<void> Function({required String messageId});
-typedef ChatOlderMessagesLoader =
-    Future<void> Function(VoidCallback beforeMessagesPrepended);
+typedef ChatOlderMessagesLoader = Future<void> Function();
 
 enum _CallNowAction { voice, video }
 
@@ -5566,20 +5565,6 @@ final class _ViewportAnchorScrollPosition
   }
 }
 
-final class _MessageViewportAnchor {
-  const _MessageViewportAnchor({
-    required this.messageId,
-    required this.viewportOffset,
-    required this.scrollOffset,
-    required this.maxScrollExtent,
-  });
-
-  final String? messageId;
-  final double? viewportOffset;
-  final double scrollOffset;
-  final double maxScrollExtent;
-}
-
 final class _MessageList extends StatefulWidget {
   const _MessageList({
     required this.initialMessages,
@@ -5648,20 +5633,23 @@ final class _MessageList extends StatefulWidget {
 
 final class _MessageListState extends State<_MessageList> {
   static const double _replyOriginalAlignment = 0.28;
-  static const double _olderMessagesLoadThreshold = 240;
+  static const double _minimumOlderMessagesPrefetchExtent = 1200;
+  static const double _olderMessagesPrefetchViewportCount = 3;
 
   final Set<String> _showTranslatedMessageIds = <String>{};
+  final Set<String> _historyPageBoundaryMessageIds = <String>{};
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
+  final Key _historyCenterSliverKey = UniqueKey();
   late final _ViewportAnchorScrollController _scrollController;
   bool _didResolveInitialScrollPosition = false;
   bool _olderMessagesLoadInProgress = false;
   bool _pinBottomDuringContentResize = false;
-  _MessageViewportAnchor? _pendingPrependViewportAnchor;
 
   Timer? _contentResizeBottomPinTimer;
   Timer? _messageHighlightTimer;
 
   String? _highlightedMessageId;
+  String? _historyCenterMessageId;
   String? _returnToReplyMessageId;
   double? _returnToReplyScrollOffset;
 
@@ -5683,6 +5671,11 @@ final class _MessageListState extends State<_MessageList> {
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
+    _historyCenterMessageId = _messages.isEmpty ? null : _messages.first.id;
+    final String? centerMessageId = _historyCenterMessageId;
+    if (centerMessageId != null) {
+      _historyPageBoundaryMessageIds.add(centerMessageId);
+    }
     _syncMessageClockWithMessages(_messages);
     _nextMessageId = widget.nextLocalMessageId;
 
@@ -5762,89 +5755,20 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     final ScrollPosition position = _scrollController.position;
+    final double loadThreshold = math.max(
+      _minimumOlderMessagesPrefetchExtent,
+      position.viewportDimension * _olderMessagesPrefetchViewportCount,
+    );
 
     if (!position.hasContentDimensions ||
-        position.extentBefore > _olderMessagesLoadThreshold) {
+        position.extentBefore > loadThreshold) {
       return;
     }
 
-    unawaited(_loadOlderMessagesPreservingViewport(onLoadOlderMessages));
+    unawaited(_loadOlderMessages(onLoadOlderMessages));
   }
 
-  void _capturePrependViewportAnchor() {
-    if (!_scrollController.hasClients) {
-      _pendingPrependViewportAnchor = null;
-      return;
-    }
-
-    final ScrollPosition position = _scrollController.position;
-    String? anchorMessageId;
-    double? anchorViewportOffset;
-    double closestDistance = double.infinity;
-
-    for (final ChatMessage message in _messages) {
-      final RenderObject? renderObject = _messageRenderObject(message.id);
-
-      if (renderObject == null) {
-        continue;
-      }
-
-      final RenderAbstractViewport viewport = RenderAbstractViewport.of(
-        renderObject,
-      );
-      final double viewportOffset =
-          viewport.getOffsetToReveal(renderObject, 0).offset - position.pixels;
-      final double distance = viewportOffset.abs();
-
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        anchorMessageId = message.id;
-        anchorViewportOffset = viewportOffset;
-      }
-    }
-
-    _pendingPrependViewportAnchor = _MessageViewportAnchor(
-      messageId: anchorMessageId,
-      viewportOffset: anchorViewportOffset,
-      scrollOffset: position.pixels,
-      maxScrollExtent: position.maxScrollExtent,
-    );
-  }
-
-  void _restorePrependViewportAnchor(_MessageViewportAnchor anchor) {
-    if (!mounted || !_scrollController.hasClients) {
-      return;
-    }
-
-    final ScrollPosition position = _scrollController.position;
-    double targetOffset =
-        anchor.scrollOffset +
-        (position.maxScrollExtent - anchor.maxScrollExtent);
-    final String? messageId = anchor.messageId;
-    final double? viewportOffset = anchor.viewportOffset;
-
-    if (messageId != null && viewportOffset != null) {
-      final RenderObject? renderObject = _messageRenderObject(messageId);
-
-      if (renderObject != null) {
-        final RenderAbstractViewport viewport = RenderAbstractViewport.of(
-          renderObject,
-        );
-        targetOffset =
-            viewport.getOffsetToReveal(renderObject, 0).offset - viewportOffset;
-      }
-    }
-
-    targetOffset = targetOffset
-        .clamp(position.minScrollExtent, position.maxScrollExtent)
-        .toDouble();
-
-    if ((targetOffset - position.pixels).abs() >= 0.5) {
-      _scrollController.jumpTo(targetOffset);
-    }
-  }
-
-  Future<void> _loadOlderMessagesPreservingViewport(
+  Future<void> _loadOlderMessages(
     ChatOlderMessagesLoader onLoadOlderMessages,
   ) async {
     if (_olderMessagesLoadInProgress) {
@@ -5856,31 +5780,20 @@ final class _MessageListState extends State<_MessageList> {
         ? null
         : _messages.first.id;
     bool loadedOlderMessages = false;
-    _pendingPrependViewportAnchor = null;
 
     try {
-      await onLoadOlderMessages(_capturePrependViewportAnchor);
+      await onLoadOlderMessages();
+      WidgetsBinding.instance.scheduleFrame();
+      await WidgetsBinding.instance.endOfFrame;
 
-      for (int attempt = 0; attempt < 3; attempt++) {
-        WidgetsBinding.instance.scheduleFrame();
-        await WidgetsBinding.instance.endOfFrame;
-
-        if (!mounted) {
-          return;
-        }
-
-        final _MessageViewportAnchor? anchor = _pendingPrependViewportAnchor;
-
-        if (anchor != null) {
-          _restorePrependViewportAnchor(anchor);
-        }
+      if (!mounted) {
+        return;
       }
 
       loadedOlderMessages =
           previousFirstMessageId !=
           (_messages.isEmpty ? null : _messages.first.id);
     } finally {
-      _pendingPrependViewportAnchor = null;
       _olderMessagesLoadInProgress = false;
     }
 
@@ -5924,10 +5837,30 @@ final class _MessageListState extends State<_MessageList> {
     final bool shouldPinToBottomAfterUpdate =
         !_olderMessagesLoadInProgress &&
         (!_didResolveInitialScrollPosition || isNearBottom);
+    final String? previousFirstMessageId = _messages.isEmpty
+        ? null
+        : _messages.first.id;
 
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
+    if (previousFirstMessageId != null &&
+        _messages.isNotEmpty &&
+        _messages.first.id != previousFirstMessageId &&
+        _messages.any(
+          (ChatMessage message) => message.id == previousFirstMessageId,
+        )) {
+      _historyPageBoundaryMessageIds.add(previousFirstMessageId);
+    }
+    if (_messages.isEmpty) {
+      _historyCenterMessageId = null;
+    } else if (_historyCenterMessageId == null ||
+        !_messages.any(
+          (ChatMessage message) => message.id == _historyCenterMessageId,
+        )) {
+      _historyCenterMessageId = _messages.first.id;
+      _historyPageBoundaryMessageIds.add(_historyCenterMessageId!);
+    }
     _syncMessageClockWithMessages(_messages);
 
     if (shouldPinToBottomAfterUpdate) {
@@ -7167,11 +7100,60 @@ final class _MessageListState extends State<_MessageList> {
 
   @override
   Widget build(BuildContext context) {
-    final List<ChatMessageGroup> groups = groupChatMessages(_messages);
+    if (_messages.isEmpty) {
+      _historyCenterMessageId = null;
+    } else if (_historyCenterMessageId == null ||
+        !_messages.any(
+          (ChatMessage message) => message.id == _historyCenterMessageId,
+        )) {
+      _historyCenterMessageId = _messages.first.id;
+    }
+    final String? historyCenterMessageId = _historyCenterMessageId;
+    if (historyCenterMessageId != null) {
+      _historyPageBoundaryMessageIds.add(historyCenterMessageId);
+    }
+
+    final int historyCenterIndex = _historyCenterMessageId == null
+        ? 0
+        : _messages.indexWhere(
+            (ChatMessage message) => message.id == _historyCenterMessageId,
+          );
+    final int resolvedHistoryCenterIndex = historyCenterIndex < 0
+        ? 0
+        : historyCenterIndex;
+    final List<ChatMessageGroup> olderGroups = _groupTimelineMessages(
+      _messages.take(resolvedHistoryCenterIndex).toList(growable: false),
+    );
+    final List<ChatMessageGroup> currentGroups = _groupTimelineMessages(
+      _messages.skip(resolvedHistoryCenterIndex).toList(growable: false),
+    );
 
     final String? latestReadMessageId = findLatestReadOutgoingMessageId(
       messages: _messages,
       currentUserId: widget.currentUserId,
+    );
+    final List<Widget> olderTimeline = _buildTimeline(
+      groups: olderGroups,
+      latestReadMessageId: latestReadMessageId,
+    );
+    final ChatMessageGroup? previousCenterGroup = olderGroups.isEmpty
+        ? null
+        : olderGroups.last;
+    final List<Widget> centerLeadingTimeline = currentGroups.isEmpty
+        ? const <Widget>[]
+        : _buildTimelineLeadingDecoration(
+            previousGroup: previousCenterGroup,
+            group: currentGroups.first,
+          );
+    final List<Widget> beforeCenterTimeline = <Widget>[
+      ...olderTimeline,
+      ...centerLeadingTimeline,
+    ];
+    final List<Widget> currentTimeline = _buildTimeline(
+      groups: currentGroups,
+      latestReadMessageId: latestReadMessageId,
+      previousGroup: previousCenterGroup,
+      includeLeadingDecoration: false,
     );
 
     final Widget messageList = IgnorePointer(
@@ -7184,23 +7166,48 @@ final class _MessageListState extends State<_MessageList> {
           onTap: widget.onBackgroundTap,
           child: NotificationListener<ScrollMetricsNotification>(
             onNotification: _handleScrollMetricsChanged,
-            child: ListView(
-              key: const ValueKey<String>('message-list'),
-              controller: _scrollController,
-              physics: widget.scrollLocked
-                  ? const NeverScrollableScrollPhysics()
-                  : null,
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              padding: EdgeInsets.fromLTRB(
-                8,
-                widget.topPadding,
-                8,
-                widget.bottomPadding,
-              ),
-              children: _buildTimeline(
-                groups: groups,
-                latestReadMessageId: latestReadMessageId,
-              ),
+            child: LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints constraints) {
+                final double viewportHeight = constraints.maxHeight;
+                final double centerAnchor = viewportHeight > 0
+                    ? (widget.topPadding / viewportHeight)
+                          .clamp(0.0, 1.0)
+                          .toDouble()
+                    : 0.0;
+
+                return CustomScrollView(
+                  key: const ValueKey<String>('message-list'),
+                  controller: _scrollController,
+                  center: _historyCenterSliverKey,
+                  anchor: centerAnchor,
+                  physics: widget.scrollLocked
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  slivers: <Widget>[
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: widget.topPadding),
+                    ),
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      sliver: SliverList.list(
+                        children: beforeCenterTimeline.reversed.toList(
+                          growable: false,
+                        ),
+                      ),
+                    ),
+                    SliverPadding(
+                      key: _historyCenterSliverKey,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      sliver: SliverList.list(children: currentTimeline),
+                    ),
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: widget.bottomPadding),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         ),
@@ -7231,20 +7238,24 @@ final class _MessageListState extends State<_MessageList> {
   List<Widget> _buildTimeline({
     required List<ChatMessageGroup> groups,
     required String? latestReadMessageId,
+    ChatMessageGroup? previousGroup,
+    bool includeLeadingDecoration = true,
   }) {
     final List<Widget> timeline = [];
 
     for (int index = 0; index < groups.length; index++) {
       final ChatMessageGroup group = groups[index];
+      final ChatMessageGroup? precedingGroup = index == 0
+          ? previousGroup
+          : groups[index - 1];
 
-      final bool startsNewDate =
-          index == 0 ||
-          !isSameChatDate(groups[index - 1].createdAt, group.createdAt);
-
-      if (startsNewDate) {
-        timeline.add(_DateSeparator(date: group.createdAt));
-
-        timeline.add(const SizedBox(height: 18));
+      if (index > 0 || includeLeadingDecoration) {
+        timeline.addAll(
+          _buildTimelineLeadingDecoration(
+            previousGroup: precedingGroup,
+            group: group,
+          ),
+        );
       }
 
       timeline.add(
@@ -7275,15 +7286,54 @@ final class _MessageListState extends State<_MessageList> {
           messageBubbleKeyFor: _messageBubbleKeyFor,
         ),
       );
-
-      if (index != groups.length - 1) {
-        timeline.add(
-          SizedBox(height: _timelineGapBetweenGroups(group, groups[index + 1])),
-        );
-      }
     }
 
     return timeline;
+  }
+
+  List<Widget> _buildTimelineLeadingDecoration({
+    required ChatMessageGroup? previousGroup,
+    required ChatMessageGroup group,
+  }) {
+    final List<Widget> timeline = <Widget>[];
+    final bool startsNewDate =
+        previousGroup == null ||
+        !isSameChatDate(previousGroup.createdAt, group.createdAt);
+
+    if (previousGroup != null) {
+      timeline.add(
+        SizedBox(height: _timelineGapBetweenGroups(previousGroup, group)),
+      );
+    }
+
+    if (startsNewDate) {
+      timeline.add(_DateSeparator(date: group.createdAt));
+      timeline.add(const SizedBox(height: 18));
+    }
+
+    return timeline;
+  }
+
+  List<ChatMessageGroup> _groupTimelineMessages(List<ChatMessage> messages) {
+    if (messages.isEmpty) {
+      return const <ChatMessageGroup>[];
+    }
+
+    final List<ChatMessageGroup> groups = <ChatMessageGroup>[];
+    int segmentStart = 0;
+
+    for (int index = 1; index < messages.length; index++) {
+      if (!_historyPageBoundaryMessageIds.contains(messages[index].id)) {
+        continue;
+      }
+
+      groups.addAll(groupChatMessages(messages.sublist(segmentStart, index)));
+      segmentStart = index;
+    }
+
+    groups.addAll(groupChatMessages(messages.sublist(segmentStart)));
+
+    return groups;
   }
 
   double _timelineGapBetweenGroups(

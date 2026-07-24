@@ -967,6 +967,79 @@ void main() {
     expect(newestBubbleRect.bottom, lessThanOrEqualTo(listRect.bottom + 0.01));
   });
 
+  testWidgets('user drag after sending cancels bottom pinning', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 600));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    await _scrollChatToBottom(tester);
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('message-input')),
+      '전송 직후 스크롤',
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+    await tester.pumpAndSettle();
+
+    final Finder messageListFinder = find.byKey(
+      const ValueKey<String>('message-list'),
+    );
+    final TestGesture gesture = await tester.startGesture(
+      tester.getCenter(messageListFinder),
+    );
+
+    // 첫 이동으로 터치 슬롭을 넘어 실제 스크롤 드래그를 시작한다.
+    await gesture.moveBy(const Offset(0, 30));
+    await tester.pump();
+
+    await gesture.moveBy(const Offset(0, 180));
+    await tester.pump();
+
+    ScrollPosition position = _messageListPosition(tester);
+
+    expect(
+      position.maxScrollExtent - position.pixels,
+      greaterThan(80),
+      reason: 'The first drag must move away from the newest message.',
+    );
+
+    await tester.binding.setSurfaceSize(const Size(420, 620));
+    await tester.pump();
+
+    position = _messageListPosition(tester);
+
+    expect(
+      position.maxScrollExtent - position.pixels,
+      greaterThan(80),
+      reason: 'A viewport metrics update must not restore the bottom pin.',
+    );
+
+    final double offsetAfterResize = position.pixels;
+
+    await gesture.moveBy(const Offset(0, 80));
+    await tester.pump();
+
+    position = _messageListPosition(tester);
+
+    expect(
+      position.pixels,
+      lessThan(offsetAfterResize - 20),
+      reason: 'The same active drag must continue after the resize.',
+    );
+
+    await gesture.up();
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('reply keeps the latest message above the composer', (
     WidgetTester tester,
   ) async {

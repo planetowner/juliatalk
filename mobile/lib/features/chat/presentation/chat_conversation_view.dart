@@ -1165,7 +1165,18 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _keyboardTransitionTimer?.cancel();
     _keyboardTransitionTimer = null;
 
-    _keyboardTransitionActive = false;
+    if (!_keyboardTransitionActive) {
+      return;
+    }
+
+    if (!mounted) {
+      _keyboardTransitionActive = false;
+      return;
+    }
+
+    setState(() {
+      _keyboardTransitionActive = false;
+    });
   }
 
   void _stopKeyboardTransition() {
@@ -1207,6 +1218,26 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   void _markPostSendBottomSettlePending() {
     _postSendBottomSettlePending = true;
     _pinBottomAfterKeyboardDismiss = true;
+  }
+
+  void _handleMessageListUserScrollStarted() {
+    _keyboardTransitionTimer?.cancel();
+    _keyboardTransitionTimer = null;
+    _keyboardDismissSettleTimer?.cancel();
+    _keyboardDismissSettleTimer = null;
+    _composerResizeTimer?.cancel();
+    _composerResizeTimer = null;
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _keyboardTransitionActive = false;
+      _pinBottomDuringComposerResize = false;
+      _pinBottomAfterKeyboardDismiss = false;
+      _postSendBottomSettlePending = false;
+    });
   }
 
   void _handleKeyboardDismissViewportChange({
@@ -1301,8 +1332,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
           unawaited(settledMessageListState.scrollToBottom(animate: false));
         }
 
-        _pinBottomAfterKeyboardDismiss = false;
-        _postSendBottomSettlePending = false;
+        setState(() {
+          _pinBottomAfterKeyboardDismiss = false;
+          _postSendBottomSettlePending = false;
+        });
       });
     });
   }
@@ -1312,7 +1345,15 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _composerResizeTimer?.cancel();
     _composerResizeTimer = Timer(const Duration(milliseconds: 260), () {
-      _pinBottomDuringComposerResize = false;
+      _composerResizeTimer = null;
+
+      if (!mounted || !_pinBottomDuringComposerResize) {
+        return;
+      }
+
+      setState(() {
+        _pinBottomDuringComposerResize = false;
+      });
     });
   }
 
@@ -2409,6 +2450,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       bottomPadding: messageListBottomPadding,
                       pinToBottom: pinMessageListToBottom,
                       scrollLocked: widget.routeNavigationDragActive,
+                      onUserScrollStarted: _handleMessageListUserScrollStarted,
                     ),
                   ),
                   if (!_searchModeActive)
@@ -5594,6 +5636,7 @@ final class _MessageList extends StatefulWidget {
     required this.bottomPadding,
     required this.pinToBottom,
     required this.scrollLocked,
+    required this.onUserScrollStarted,
     super.key,
   });
 
@@ -5624,6 +5667,7 @@ final class _MessageList extends StatefulWidget {
   final double bottomPadding;
   final bool pinToBottom;
   final bool scrollLocked;
+  final VoidCallback onUserScrollStarted;
 
   @override
   State<_MessageList> createState() {
@@ -5644,6 +5688,7 @@ final class _MessageListState extends State<_MessageList> {
   bool _didResolveInitialScrollPosition = false;
   bool _olderMessagesLoadInProgress = false;
   bool _pinBottomDuringContentResize = false;
+  bool _bottomPinCanceledByUserScroll = false;
 
   Timer? _contentResizeBottomPinTimer;
   Timer? _messageHighlightTimer;
@@ -5823,8 +5868,10 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     if (widget.pinToBottom && !oldWidget.pinToBottom) {
+      _bottomPinCanceledByUserScroll = false;
+
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
+        if (mounted && widget.pinToBottom && !_bottomPinCanceledByUserScroll) {
           unawaited(scrollToBottom(animate: false));
         }
       });
@@ -5865,7 +5912,7 @@ final class _MessageListState extends State<_MessageList> {
 
     if (shouldPinToBottomAfterUpdate) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
+        if (mounted && !_bottomPinCanceledByUserScroll) {
           unawaited(scrollToBottom(animate: false));
         }
       });
@@ -6236,7 +6283,9 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   Future<void> scrollToBottom({bool animate = true}) async {
-    if (!mounted || !_scrollController.hasClients) {
+    if (!mounted ||
+        !_scrollController.hasClients ||
+        _bottomPinCanceledByUserScroll) {
       return;
     }
 
@@ -6261,7 +6310,7 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   void _pinBottomDuringNextContentResize() {
-    if (!mounted || !isNearBottom) {
+    if (!mounted || _bottomPinCanceledByUserScroll || !isNearBottom) {
       return;
     }
 
@@ -6274,7 +6323,8 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   bool _handleScrollMetricsChanged(ScrollMetricsNotification notification) {
-    if ((!widget.pinToBottom && !_pinBottomDuringContentResize) ||
+    if (_bottomPinCanceledByUserScroll ||
+        (!widget.pinToBottom && !_pinBottomDuringContentResize) ||
         !_scrollController.hasClients) {
       return false;
     }
@@ -6292,6 +6342,25 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     _scrollController.jumpTo(targetOffset);
+
+    return false;
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification.depth != 0) {
+      return false;
+    }
+
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _bottomPinCanceledByUserScroll = true;
+      _contentResizeBottomPinTimer?.cancel();
+      _contentResizeBottomPinTimer = null;
+      _pinBottomDuringContentResize = false;
+      widget.onUserScrollStarted();
+    } else if (notification is ScrollEndNotification && isNearBottom) {
+      _bottomPinCanceledByUserScroll = false;
+    }
 
     return false;
   }
@@ -7164,50 +7233,53 @@ final class _MessageListState extends State<_MessageList> {
           key: const ValueKey<String>('message-list-tap-area'),
           behavior: HitTestBehavior.translucent,
           onTap: widget.onBackgroundTap,
-          child: NotificationListener<ScrollMetricsNotification>(
-            onNotification: _handleScrollMetricsChanged,
-            child: LayoutBuilder(
-              builder: (BuildContext context, BoxConstraints constraints) {
-                final double viewportHeight = constraints.maxHeight;
-                final double centerAnchor = viewportHeight > 0
-                    ? (widget.topPadding / viewportHeight)
-                          .clamp(0.0, 1.0)
-                          .toDouble()
-                    : 0.0;
+          child: NotificationListener<ScrollNotification>(
+            onNotification: _handleScrollNotification,
+            child: NotificationListener<ScrollMetricsNotification>(
+              onNotification: _handleScrollMetricsChanged,
+              child: LayoutBuilder(
+                builder: (BuildContext context, BoxConstraints constraints) {
+                  final double viewportHeight = constraints.maxHeight;
+                  final double centerAnchor = viewportHeight > 0
+                      ? (widget.topPadding / viewportHeight)
+                            .clamp(0.0, 1.0)
+                            .toDouble()
+                      : 0.0;
 
-                return CustomScrollView(
-                  key: const ValueKey<String>('message-list'),
-                  controller: _scrollController,
-                  center: _historyCenterSliverKey,
-                  anchor: centerAnchor,
-                  physics: widget.scrollLocked
-                      ? const NeverScrollableScrollPhysics()
-                      : null,
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  slivers: <Widget>[
-                    SliverToBoxAdapter(
-                      child: SizedBox(height: widget.topPadding),
-                    ),
-                    SliverPadding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      sliver: SliverList.list(
-                        children: beforeCenterTimeline.reversed.toList(
-                          growable: false,
+                  return CustomScrollView(
+                    key: const ValueKey<String>('message-list'),
+                    controller: _scrollController,
+                    center: _historyCenterSliverKey,
+                    anchor: centerAnchor,
+                    physics: widget.scrollLocked
+                        ? const NeverScrollableScrollPhysics()
+                        : null,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    slivers: <Widget>[
+                      SliverToBoxAdapter(
+                        child: SizedBox(height: widget.topPadding),
+                      ),
+                      SliverPadding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        sliver: SliverList.list(
+                          children: beforeCenterTimeline.reversed.toList(
+                            growable: false,
+                          ),
                         ),
                       ),
-                    ),
-                    SliverPadding(
-                      key: _historyCenterSliverKey,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      sliver: SliverList.list(children: currentTimeline),
-                    ),
-                    SliverToBoxAdapter(
-                      child: SizedBox(height: widget.bottomPadding),
-                    ),
-                  ],
-                );
-              },
+                      SliverPadding(
+                        key: _historyCenterSliverKey,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        sliver: SliverList.list(children: currentTimeline),
+                      ),
+                      SliverToBoxAdapter(
+                        child: SizedBox(height: widget.bottomPadding),
+                      ),
+                    ],
+                  );
+                },
+              ),
             ),
           ),
         ),

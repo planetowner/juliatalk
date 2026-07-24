@@ -83,6 +83,7 @@ final class _ChatConversationHomeScreenState
   late final AnimationController _chatRouteController;
   final Map<String, List<ChatMessage>> _conversationMessagesByUserId =
       <String, List<ChatMessage>>{};
+  final Map<String, bool> _conversationHasMoreByUserId = <String, bool>{};
   final Set<String> _prefetchingConversationUserIds = <String>{};
 
   List<_ChatListEntry>? _chatEntries;
@@ -293,7 +294,7 @@ final class _ChatConversationHomeScreenState
 
   Future<void> _prefetchConversation(String userId) async {
     try {
-      final List<ChatMessage> messages = await _chatApi.listConversation(
+      final ChatConversationPage page = await _chatApi.listConversation(
         otherUserId: userId,
       );
 
@@ -302,8 +303,9 @@ final class _ChatConversationHomeScreenState
       }
 
       _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
-        messages,
+        page.messages,
       );
+      _conversationHasMoreByUserId[userId] = page.hasMore;
     } catch (_) {
       // Prefetching should never block the chat list.
     } finally {
@@ -660,11 +662,16 @@ final class _ChatConversationHomeScreenState
             otherUserDisplayName: _displayNameFor(selectedUser),
             routeNavigationDragActive: _chatRouteDragActive,
             initialMessages: _conversationMessagesByUserId[selectedUser.id],
+            initialHasMoreMessages:
+                _conversationHasMoreByUserId[selectedUser.id],
             onMessagesChanged: (List<ChatMessage> messages) {
               _cacheConversationMessages(
                 userId: selectedUser.id,
                 messages: messages,
               );
+            },
+            onHasMoreMessagesChanged: (bool hasMore) {
+              _conversationHasMoreByUserId[selectedUser.id] = hasMore;
             },
             onBack: _requestCloseChat,
           ),
@@ -793,7 +800,9 @@ final class ChatConversationScreen extends StatefulWidget {
     required this.onBack,
     this.routeNavigationDragActive = false,
     this.initialMessages,
+    this.initialHasMoreMessages,
     this.onMessagesChanged,
+    this.onHasMoreMessagesChanged,
     super.key,
   });
 
@@ -805,7 +814,9 @@ final class ChatConversationScreen extends StatefulWidget {
   final VoidCallback onBack;
   final bool routeNavigationDragActive;
   final List<ChatMessage>? initialMessages;
+  final bool? initialHasMoreMessages;
   final ValueChanged<List<ChatMessage>>? onMessagesChanged;
+  final ValueChanged<bool>? onHasMoreMessagesChanged;
 
   @override
   State<ChatConversationScreen> createState() {
@@ -818,6 +829,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   late bool _loading;
   String? _errorMessage;
   bool _syncingAfterReconnect = false;
+  bool _loadingOlderMessages = false;
+  late bool _hasMoreMessages;
   late List<ChatMessage> _messages;
 
   @override
@@ -830,6 +843,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         ? const <ChatMessage>[]
         : List<ChatMessage>.unmodifiable(initialMessages);
     _loading = initialMessages == null;
+    _hasMoreMessages =
+        widget.initialHasMoreMessages ?? (initialMessages?.length == 100);
 
     _subscribeToRealtimeService();
     widget.realtimeService.addListener(_handleRealtimeStateChanged);
@@ -876,7 +891,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
 
     try {
-      final List<ChatMessage> messages = await widget.chatApi.listConversation(
+      final ChatConversationPage page = await widget.chatApi.listConversation(
         otherUserId: widget.otherUser.id,
       );
 
@@ -884,8 +899,15 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         return;
       }
 
+      final bool hadCachedMessages = _messages.isNotEmpty;
+
       setState(() {
-        _messages = List<ChatMessage>.unmodifiable(messages);
+        _messages = hadCachedMessages
+            ? _mergeMessages(page.messages)
+            : page.messages;
+        if (!hadCachedMessages) {
+          _hasMoreMessages = page.hasMore;
+        }
         _loading = false;
         _errorMessage = null;
       });
@@ -913,6 +935,56 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
   }
 
+  Future<void> _loadOlderMessages(VoidCallback beforeMessagesPrepended) async {
+    if (_loadingOlderMessages || !_hasMoreMessages || _messages.isEmpty) {
+      return;
+    }
+
+    final String beforeMessageId = _messages.first.id;
+
+    setState(() {
+      _loadingOlderMessages = true;
+    });
+
+    try {
+      final ChatConversationPage page = await widget.chatApi.listConversation(
+        otherUserId: widget.otherUser.id,
+        beforeMessageId: beforeMessageId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      final Set<String> existingMessageIds = _messages
+          .map((ChatMessage message) => message.id)
+          .toSet();
+      final int addedMessageCount = page.messages
+          .where(
+            (ChatMessage message) => !existingMessageIds.contains(message.id),
+          )
+          .length;
+      final List<ChatMessage> mergedMessages = _mergeMessages(page.messages);
+
+      if (addedMessageCount > 0) {
+        beforeMessagesPrepended();
+      }
+
+      setState(() {
+        _messages = mergedMessages;
+        _hasMoreMessages = page.hasMore && addedMessageCount > 0;
+        _loadingOlderMessages = false;
+      });
+      _notifyMessagesChanged();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _loadingOlderMessages = false;
+        });
+      }
+    }
+  }
+
   Future<void> _syncConversationFromRest() async {
     if (_loading || _syncingAfterReconnect) {
       return;
@@ -921,7 +993,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     _syncingAfterReconnect = true;
 
     try {
-      final List<ChatMessage> messages = await widget.chatApi.listConversation(
+      final ChatConversationPage page = await widget.chatApi.listConversation(
         otherUserId: widget.otherUser.id,
       );
 
@@ -930,7 +1002,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       }
 
       setState(() {
-        _messages = List<ChatMessage>.unmodifiable(messages);
+        _messages = _mergeMessages(page.messages);
         _errorMessage = null;
       });
       _notifyMessagesChanged();
@@ -942,6 +1014,22 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     } finally {
       _syncingAfterReconnect = false;
     }
+  }
+
+  List<ChatMessage> _mergeMessages(Iterable<ChatMessage> messages) {
+    final Map<String, ChatMessage> messagesById = <String, ChatMessage>{
+      for (final ChatMessage message in _messages) message.id: message,
+    };
+
+    for (final ChatMessage message in messages) {
+      messagesById[message.id] = message;
+    }
+
+    final List<ChatMessage> mergedMessages = messagesById.values.toList(
+      growable: false,
+    )..sort(_compareMessages);
+
+    return List<ChatMessage>.unmodifiable(mergedMessages);
   }
 
   void _handleRealtimeEvent(Map<String, dynamic> event) {
@@ -1118,6 +1206,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
 
   void _notifyMessagesChanged() {
     widget.onMessagesChanged?.call(_messages);
+    widget.onHasMoreMessagesChanged?.call(_hasMoreMessages);
   }
 
   int _compareMessages(ChatMessage first, ChatMessage second) {
@@ -1320,6 +1409,9 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       },
       child: ChatConversationView(
         initialMessages: _messages,
+        hasMoreMessages: _hasMoreMessages,
+        loadingOlderMessages: _loadingOlderMessages,
+        onLoadOlderMessages: _loadOlderMessages,
         currentUserId: widget.currentUser.id,
         currentUserName: widget.currentUser.displayName,
         currentUserPreferredLanguage: widget.currentUser.preferredLanguage,

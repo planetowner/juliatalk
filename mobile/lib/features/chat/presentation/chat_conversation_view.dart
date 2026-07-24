@@ -113,6 +113,8 @@ typedef ChatMessageTranslationRetrier =
     Future<ChatMessage> Function({required String messageId});
 
 typedef ChatMessageDeleter = Future<void> Function({required String messageId});
+typedef ChatOlderMessagesLoader =
+    Future<void> Function(VoidCallback beforeMessagesPrepended);
 
 enum _CallNowAction { voice, video }
 
@@ -214,6 +216,9 @@ final class ChatConversationView extends StatefulWidget {
     super.key,
     this.photoLibrary,
     this.initialMessages,
+    this.hasMoreMessages = false,
+    this.loadingOlderMessages = false,
+    this.onLoadOlderMessages,
     this.currentUserId = _currentUserId,
     this.currentUserName = _currentUserName,
     this.currentUserPreferredLanguage = _currentUserPreferredLanguage,
@@ -241,6 +246,9 @@ final class ChatConversationView extends StatefulWidget {
 
   final ChatPhotoLibrary? photoLibrary;
   final List<ChatMessage>? initialMessages;
+  final bool hasMoreMessages;
+  final bool loadingOlderMessages;
+  final ChatOlderMessagesLoader? onLoadOlderMessages;
   final String currentUserId;
   final String currentUserName;
   final String currentUserPreferredLanguage;
@@ -2215,9 +2223,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     });
 
     _finishActiveCallMessage(
-      outcome: wasConnected
-          ? ChatCallOutcome.ended
-          : ChatCallOutcome.cancelled,
+      outcome: wasConnected ? ChatCallOutcome.ended : ChatCallOutcome.cancelled,
       duration: duration,
     );
   }
@@ -2371,6 +2377,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                     child: _MessageList(
                       key: _messageListKey,
                       initialMessages: widget.initialMessages,
+                      hasMoreMessages: widget.hasMoreMessages,
+                      loadingOlderMessages: widget.loadingOlderMessages,
+                      onLoadOlderMessages: widget.onLoadOlderMessages,
                       currentUserId: widget.currentUserId,
                       currentUserPreferredLanguage:
                           widget.currentUserPreferredLanguage,
@@ -5557,9 +5566,26 @@ final class _ViewportAnchorScrollPosition
   }
 }
 
+final class _MessageViewportAnchor {
+  const _MessageViewportAnchor({
+    required this.messageId,
+    required this.viewportOffset,
+    required this.scrollOffset,
+    required this.maxScrollExtent,
+  });
+
+  final String? messageId;
+  final double? viewportOffset;
+  final double scrollOffset;
+  final double maxScrollExtent;
+}
+
 final class _MessageList extends StatefulWidget {
   const _MessageList({
     required this.initialMessages,
+    required this.hasMoreMessages,
+    required this.loadingOlderMessages,
+    required this.onLoadOlderMessages,
     required this.currentUserId,
     required this.currentUserPreferredLanguage,
     required this.otherParticipantId,
@@ -5587,6 +5613,9 @@ final class _MessageList extends StatefulWidget {
   });
 
   final List<ChatMessage>? initialMessages;
+  final bool hasMoreMessages;
+  final bool loadingOlderMessages;
+  final ChatOlderMessagesLoader? onLoadOlderMessages;
   final String currentUserId;
   final String currentUserPreferredLanguage;
   final String otherParticipantId;
@@ -5619,12 +5648,15 @@ final class _MessageList extends StatefulWidget {
 
 final class _MessageListState extends State<_MessageList> {
   static const double _replyOriginalAlignment = 0.28;
+  static const double _olderMessagesLoadThreshold = 240;
 
   final Set<String> _showTranslatedMessageIds = <String>{};
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
   late final _ViewportAnchorScrollController _scrollController;
   bool _didResolveInitialScrollPosition = false;
+  bool _olderMessagesLoadInProgress = false;
   bool _pinBottomDuringContentResize = false;
+  _MessageViewportAnchor? _pendingPrependViewportAnchor;
 
   Timer? _contentResizeBottomPinTimer;
   Timer? _messageHighlightTimer;
@@ -5645,7 +5677,7 @@ final class _MessageListState extends State<_MessageList> {
 
     _scrollController = _ViewportAnchorScrollController(
       bottomPadding: () => widget.bottomPadding,
-    );
+    )..addListener(_handleMessageListScroll);
 
     _messageClock = widget.initialClock ?? DateTime.now();
     _messages = List<ChatMessage>.of(
@@ -5685,6 +5717,9 @@ final class _MessageListState extends State<_MessageList> {
       setState(() {
         _didResolveInitialScrollPosition = true;
       });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _maybeLoadOlderMessages();
+      });
       return;
     }
 
@@ -5708,10 +5743,159 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
+  void _handleMessageListScroll() {
+    _maybeLoadOlderMessages();
+  }
+
+  void _maybeLoadOlderMessages() {
+    final ChatOlderMessagesLoader? onLoadOlderMessages =
+        widget.onLoadOlderMessages;
+
+    if (!mounted ||
+        !_didResolveInitialScrollPosition ||
+        _olderMessagesLoadInProgress ||
+        widget.loadingOlderMessages ||
+        !widget.hasMoreMessages ||
+        onLoadOlderMessages == null ||
+        !_scrollController.hasClients) {
+      return;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+
+    if (!position.hasContentDimensions ||
+        position.extentBefore > _olderMessagesLoadThreshold) {
+      return;
+    }
+
+    unawaited(_loadOlderMessagesPreservingViewport(onLoadOlderMessages));
+  }
+
+  void _capturePrependViewportAnchor() {
+    if (!_scrollController.hasClients) {
+      _pendingPrependViewportAnchor = null;
+      return;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    String? anchorMessageId;
+    double? anchorViewportOffset;
+    double closestDistance = double.infinity;
+
+    for (final ChatMessage message in _messages) {
+      final RenderObject? renderObject = _messageRenderObject(message.id);
+
+      if (renderObject == null) {
+        continue;
+      }
+
+      final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+        renderObject,
+      );
+      final double viewportOffset =
+          viewport.getOffsetToReveal(renderObject, 0).offset - position.pixels;
+      final double distance = viewportOffset.abs();
+
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        anchorMessageId = message.id;
+        anchorViewportOffset = viewportOffset;
+      }
+    }
+
+    _pendingPrependViewportAnchor = _MessageViewportAnchor(
+      messageId: anchorMessageId,
+      viewportOffset: anchorViewportOffset,
+      scrollOffset: position.pixels,
+      maxScrollExtent: position.maxScrollExtent,
+    );
+  }
+
+  void _restorePrependViewportAnchor(_MessageViewportAnchor anchor) {
+    if (!mounted || !_scrollController.hasClients) {
+      return;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    double targetOffset =
+        anchor.scrollOffset +
+        (position.maxScrollExtent - anchor.maxScrollExtent);
+    final String? messageId = anchor.messageId;
+    final double? viewportOffset = anchor.viewportOffset;
+
+    if (messageId != null && viewportOffset != null) {
+      final RenderObject? renderObject = _messageRenderObject(messageId);
+
+      if (renderObject != null) {
+        final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+          renderObject,
+        );
+        targetOffset =
+            viewport.getOffsetToReveal(renderObject, 0).offset - viewportOffset;
+      }
+    }
+
+    targetOffset = targetOffset
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+
+    if ((targetOffset - position.pixels).abs() >= 0.5) {
+      _scrollController.jumpTo(targetOffset);
+    }
+  }
+
+  Future<void> _loadOlderMessagesPreservingViewport(
+    ChatOlderMessagesLoader onLoadOlderMessages,
+  ) async {
+    if (_olderMessagesLoadInProgress) {
+      return;
+    }
+
+    _olderMessagesLoadInProgress = true;
+    final String? previousFirstMessageId = _messages.isEmpty
+        ? null
+        : _messages.first.id;
+    bool loadedOlderMessages = false;
+    _pendingPrependViewportAnchor = null;
+
+    try {
+      await onLoadOlderMessages(_capturePrependViewportAnchor);
+
+      for (int attempt = 0; attempt < 3; attempt++) {
+        WidgetsBinding.instance.scheduleFrame();
+        await WidgetsBinding.instance.endOfFrame;
+
+        if (!mounted) {
+          return;
+        }
+
+        final _MessageViewportAnchor? anchor = _pendingPrependViewportAnchor;
+
+        if (anchor != null) {
+          _restorePrependViewportAnchor(anchor);
+        }
+      }
+
+      loadedOlderMessages =
+          previousFirstMessageId !=
+          (_messages.isEmpty ? null : _messages.first.id);
+    } finally {
+      _pendingPrependViewportAnchor = null;
+      _olderMessagesLoadInProgress = false;
+    }
+
+    if (loadedOlderMessages && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _maybeLoadOlderMessages();
+      });
+    }
+  }
+
   @override
   void dispose() {
     _contentResizeBottomPinTimer?.cancel();
     _messageHighlightTimer?.cancel();
+    _scrollController.removeListener(_handleMessageListScroll);
     _scrollController.dispose();
 
     super.dispose();
@@ -5738,7 +5922,8 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     final bool shouldPinToBottomAfterUpdate =
-        !_didResolveInitialScrollPosition || isNearBottom;
+        !_olderMessagesLoadInProgress &&
+        (!_didResolveInitialScrollPosition || isNearBottom);
 
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],

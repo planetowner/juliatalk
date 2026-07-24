@@ -24,7 +24,7 @@ from fastapi import (
     Response,
     status,
 )
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal, get_session
@@ -1458,6 +1458,8 @@ async def list_conversation(
     other_user_id: UUID,
     current_user: CurrentUserDependency,
     session: SessionDependency,
+    response: Response,
+    before_message_id: Annotated[Optional[UUID], Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[MessageRead]:
     other_user = await session.get(User, other_user_id)
@@ -1489,19 +1491,49 @@ async def list_conversation(
         MessageDeletion.user_id == current_user.id,
     )
 
+    message_filters = [
+        Message.conversation_id == direct_conversation.conversation_id,
+        Message.deleted_at.is_(None),
+        Message.id.not_in(hidden_message_ids),
+    ]
+
+    if before_message_id is not None:
+        cursor_message = await session.get(Message, before_message_id)
+
+        if (
+            cursor_message is None
+            or cursor_message.conversation_id
+            != direct_conversation.conversation_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid conversation cursor",
+            )
+
+        message_filters.append(
+            or_(
+                Message.created_at < cursor_message.created_at,
+                and_(
+                    Message.created_at == cursor_message.created_at,
+                    Message.id < cursor_message.id,
+                ),
+            )
+        )
+
     result = await session.scalars(
         select(Message)
-        .where(
-            Message.conversation_id
-            == direct_conversation.conversation_id,
-            Message.deleted_at.is_(None),
-            Message.id.not_in(hidden_message_ids),
-        )
+        .where(*message_filters)
         .order_by(desc(Message.created_at), desc(Message.id))
-        .limit(limit)
+        .limit(limit + 1)
     )
 
     messages = list(result)
+    has_more = len(messages) > limit
+
+    if has_more:
+        messages = messages[:limit]
+
+    response.headers["X-Has-More"] = "true" if has_more else "false"
     messages.reverse()
 
     return await build_message_reads(

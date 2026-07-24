@@ -7,6 +7,16 @@ import '../../auth/domain/app_user.dart';
 import '../domain/chat_message.dart';
 import 'chat_api_exception.dart';
 
+final class ChatConversationPage {
+  ChatConversationPage({
+    required List<ChatMessage> messages,
+    required this.hasMore,
+  }) : messages = List<ChatMessage>.unmodifiable(messages);
+
+  final List<ChatMessage> messages;
+  final bool hasMore;
+}
+
 final class ChatApi {
   const ChatApi({
     required http.Client client,
@@ -73,13 +83,19 @@ final class ChatApi {
         .toList(growable: false);
   }
 
-  Future<List<ChatMessage>> listConversation({
+  Future<ChatConversationPage> listConversation({
     required String otherUserId,
     int limit = 100,
+    String? beforeMessageId,
   }) async {
     final Uri requestUri = _baseUri
         .resolve('/messages/conversation/$otherUserId')
-        .replace(queryParameters: <String, String>{'limit': limit.toString()});
+        .replace(
+          queryParameters: <String, String>{
+            'limit': limit.toString(),
+            'before_message_id': ?beforeMessageId,
+          },
+        );
 
     final http.Response response = await _client.get(
       requestUri,
@@ -105,7 +121,7 @@ final class ChatApi {
       );
     }
 
-    return decodedBody
+    final List<ChatMessage> messages = decodedBody
         .map((dynamic item) {
           if (item is! Map<String, dynamic>) {
             throw const ChatApiException(
@@ -116,6 +132,13 @@ final class ChatApi {
           return messageFromJson(item);
         })
         .toList(growable: false);
+
+    final String? hasMoreHeader = response.headers['x-has-more'];
+    final bool hasMore =
+        hasMoreHeader == 'true' ||
+        (hasMoreHeader == null && messages.length == limit);
+
+    return ChatConversationPage(messages: messages, hasMore: hasMore);
   }
 
   Future<List<ChatMessage>> searchConversation({

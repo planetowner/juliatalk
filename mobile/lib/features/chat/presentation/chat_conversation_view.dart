@@ -5541,6 +5541,22 @@ final class _ViewportAnchorScrollController extends ScrollController {
 
     (position as _ViewportAnchorScrollPosition).endViewportAnchorPreservation();
   }
+
+  void beginBottomAnchorPreservation() {
+    if (!hasClients) {
+      return;
+    }
+
+    (position as _ViewportAnchorScrollPosition).beginBottomAnchorPreservation();
+  }
+
+  void endBottomAnchorPreservation() {
+    if (!hasClients) {
+      return;
+    }
+
+    (position as _ViewportAnchorScrollPosition).endBottomAnchorPreservation();
+  }
 }
 
 final class _ViewportAnchorScrollPosition
@@ -5559,6 +5575,8 @@ final class _ViewportAnchorScrollPosition
 
   bool _preserveViewportAnchor = false;
   double? _lastEffectiveViewportBottom;
+  bool _preserveBottomAnchor = false;
+  double? _preservedBottomDistance;
 
   void beginViewportAnchorPreservation() {
     _preserveViewportAnchor = true;
@@ -5572,11 +5590,41 @@ final class _ViewportAnchorScrollPosition
     _lastEffectiveViewportBottom = null;
   }
 
+  void beginBottomAnchorPreservation() {
+    _preserveBottomAnchor = true;
+    _preservedBottomDistance = hasContentDimensions
+        ? math.max(0.0, maxScrollExtent - pixels)
+        : null;
+  }
+
+  void endBottomAnchorPreservation() {
+    _preserveBottomAnchor = false;
+    _preservedBottomDistance = null;
+  }
+
   @override
   bool correctForNewDimensions(
     ScrollMetrics oldPosition,
     ScrollMetrics newPosition,
   ) {
+    if (_preserveBottomAnchor) {
+      final double bottomDistance =
+          _preservedBottomDistance ??
+          math.max(0.0, oldPosition.maxScrollExtent - oldPosition.pixels);
+      final double targetPixels = (newPosition.maxScrollExtent - bottomDistance)
+          .clamp(newPosition.minScrollExtent, newPosition.maxScrollExtent)
+          .toDouble();
+
+      _preservedBottomDistance = bottomDistance;
+
+      if ((targetPixels - pixels).abs() < 0.5) {
+        return true;
+      }
+
+      correctPixels(targetPixels);
+      return false;
+    }
+
     final double currentBottomPadding = bottomPadding();
     final double currentEffectiveViewportBottom =
         newPosition.viewportDimension - currentBottomPadding;
@@ -5679,6 +5727,11 @@ final class _MessageListState extends State<_MessageList> {
   static const double _replyOriginalAlignment = 0.28;
   static const double _minimumOlderMessagesPrefetchExtent = 1200;
   static const double _olderMessagesPrefetchViewportCount = 3;
+  // 긴 번역문이 사라질 때는 AnimatedSwitcher(160ms)가 끝난 뒤
+  // AnimatedSize(180ms)의 축소가 시작되므로 두 전환 전체를 덮는다.
+  static const Duration _bottomAnchorPreservationDuration = Duration(
+    milliseconds: 400,
+  );
 
   final Set<String> _showTranslatedMessageIds = <String>{};
   final Set<String> _historyPageBoundaryMessageIds = <String>{};
@@ -5687,10 +5740,9 @@ final class _MessageListState extends State<_MessageList> {
   late final _ViewportAnchorScrollController _scrollController;
   bool _didResolveInitialScrollPosition = false;
   bool _olderMessagesLoadInProgress = false;
-  bool _pinBottomDuringContentResize = false;
   bool _bottomPinCanceledByUserScroll = false;
 
-  Timer? _contentResizeBottomPinTimer;
+  Timer? _bottomAnchorPreservationTimer;
   Timer? _messageHighlightTimer;
 
   String? _highlightedMessageId;
@@ -5851,7 +5903,7 @@ final class _MessageListState extends State<_MessageList> {
 
   @override
   void dispose() {
-    _contentResizeBottomPinTimer?.cancel();
+    _bottomAnchorPreservationTimer?.cancel();
     _messageHighlightTimer?.cancel();
     _scrollController.removeListener(_handleMessageListScroll);
     _scrollController.dispose();
@@ -6309,22 +6361,31 @@ final class _MessageListState extends State<_MessageList> {
     );
   }
 
-  void _pinBottomDuringNextContentResize() {
+  void _preserveBottomDuringNextContentResize() {
     if (!mounted || _bottomPinCanceledByUserScroll || !isNearBottom) {
       return;
     }
 
-    _pinBottomDuringContentResize = true;
-    _contentResizeBottomPinTimer?.cancel();
-    _contentResizeBottomPinTimer = Timer(const Duration(milliseconds: 260), () {
-      _contentResizeBottomPinTimer = null;
-      _pinBottomDuringContentResize = false;
-    });
+    _scrollController.beginBottomAnchorPreservation();
+    _bottomAnchorPreservationTimer?.cancel();
+    _bottomAnchorPreservationTimer = Timer(
+      _bottomAnchorPreservationDuration,
+      () {
+        _bottomAnchorPreservationTimer = null;
+        _scrollController.endBottomAnchorPreservation();
+      },
+    );
+  }
+
+  void _cancelBottomAnchorPreservation() {
+    _bottomAnchorPreservationTimer?.cancel();
+    _bottomAnchorPreservationTimer = null;
+    _scrollController.endBottomAnchorPreservation();
   }
 
   bool _handleScrollMetricsChanged(ScrollMetricsNotification notification) {
     if (_bottomPinCanceledByUserScroll ||
-        (!widget.pinToBottom && !_pinBottomDuringContentResize) ||
+        !widget.pinToBottom ||
         !_scrollController.hasClients) {
       return false;
     }
@@ -6354,9 +6415,7 @@ final class _MessageListState extends State<_MessageList> {
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
       _bottomPinCanceledByUserScroll = true;
-      _contentResizeBottomPinTimer?.cancel();
-      _contentResizeBottomPinTimer = null;
-      _pinBottomDuringContentResize = false;
+      _cancelBottomAnchorPreservation();
       widget.onUserScrollStarted();
     } else if (notification is ScrollEndNotification && isNearBottom) {
       _bottomPinCanceledByUserScroll = false;
@@ -6716,6 +6775,8 @@ final class _MessageListState extends State<_MessageList> {
           return;
         }
 
+        _preserveBottomDuringNextContentResize();
+
         setState(() {
           if (_showTranslatedMessageIds.contains(messageId)) {
             _showTranslatedMessageIds.remove(messageId);
@@ -6821,7 +6882,7 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
-    _pinBottomDuringNextContentResize();
+    _preserveBottomDuringNextContentResize();
 
     setState(() {
       _showTranslatedMessageIds.remove(messageId);
@@ -6848,7 +6909,7 @@ final class _MessageListState extends State<_MessageList> {
         return;
       }
 
-      _pinBottomDuringNextContentResize();
+      _preserveBottomDuringNextContentResize();
 
       setState(() {
         _messages[failedIndex] = _messages[failedIndex].copyWith(
@@ -6864,7 +6925,7 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
-    _pinBottomDuringNextContentResize();
+    _preserveBottomDuringNextContentResize();
 
     setState(() {
       final int retriedIndex = _messages.indexWhere(
@@ -7094,7 +7155,7 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
-    _pinBottomDuringNextContentResize();
+    _preserveBottomDuringNextContentResize();
 
     setState(() {
       _showTranslatedMessageIds.remove(messageId);
@@ -7124,7 +7185,7 @@ final class _MessageListState extends State<_MessageList> {
     );
 
     if (translatedContent == null) {
-      _pinBottomDuringNextContentResize();
+      _preserveBottomDuringNextContentResize();
 
       setState(() {
         _messages[refreshedIndex] = _messages[refreshedIndex].copyWith(
@@ -7136,7 +7197,7 @@ final class _MessageListState extends State<_MessageList> {
       return;
     }
 
-    _pinBottomDuringNextContentResize();
+    _preserveBottomDuringNextContentResize();
 
     setState(() {
       _messages[refreshedIndex] = _messages[refreshedIndex].copyWith(

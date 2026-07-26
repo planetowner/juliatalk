@@ -524,6 +524,138 @@ void main() {
     expect(lastBubbleRect.bottom, lessThanOrEqualTo(composerRect.top));
   });
 
+  testWidgets(
+    'translation size animation preserves the read receipt bottom gap',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+      });
+
+      final DateTime baseTime = DateTime(2026, 7, 10, 19);
+      final DateTime readAt = baseTime.add(
+        const Duration(minutes: 14, seconds: 30),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: <ChatMessage>[
+              for (int index = 0; index < 10; index++)
+                ChatMessage(
+                  id: 'anchor-filler-$index',
+                  senderId: index.isEven ? '1' : '2',
+                  recipientId: index.isEven ? '2' : '1',
+                  content: 'anchor filler message $index',
+                  createdAt: baseTime.add(Duration(minutes: index)),
+                ),
+              ChatMessage(
+                id: 'translation-bottom-anchor',
+                senderId: '2',
+                recipientId: '1',
+                content: '我不知道它们有什么区别',
+                createdAt: baseTime.add(const Duration(minutes: 10)),
+                translationStatus: ChatTranslationStatus.translated,
+                translatedContent: '나는 그 차이가 무엇인지 아직도 전혀 모르겠어 정말 하나도 모르겠어',
+                sourceLanguage: 'zh-CN',
+                translatedLanguage: 'ko',
+              ),
+              ChatMessage(
+                id: 'after-anchor-1',
+                senderId: '1',
+                recipientId: '2',
+                content: '첫 번째 아래 메시지',
+                createdAt: baseTime.add(const Duration(minutes: 11)),
+              ),
+              ChatMessage(
+                id: 'after-anchor-2',
+                senderId: '2',
+                recipientId: '1',
+                content: '두 번째 아래 메시지',
+                createdAt: baseTime.add(const Duration(minutes: 12)),
+              ),
+              ChatMessage(
+                id: 'after-anchor-3',
+                senderId: '1',
+                recipientId: '2',
+                content: '세 번째 아래 메시지',
+                createdAt: baseTime.add(const Duration(minutes: 13)),
+              ),
+              ChatMessage(
+                id: 'read-receipt-anchor',
+                senderId: '1',
+                recipientId: '2',
+                content: '마지막 읽은 메시지',
+                createdAt: baseTime.add(const Duration(minutes: 14)),
+                readAt: readAt,
+              ),
+            ],
+            currentUserPreferredLanguage: 'ko',
+            initialClock: readAt.add(const Duration(seconds: 10)),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      final Finder bubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-translation-bottom-anchor'),
+      );
+      final Finder composerFinder = find.byKey(
+        const ValueKey<String>('message-composer-default'),
+      );
+      final Finder readReceiptFinder = find.text('Seen just now');
+
+      double readReceiptBottomGap() {
+        return tester.getRect(composerFinder).top -
+            tester.getRect(readReceiptFinder).bottom;
+      }
+
+      expect(bubbleFinder, findsOneWidget);
+      expect(readReceiptFinder, findsOneWidget);
+
+      final double originalHeight = tester.getSize(bubbleFinder).height;
+      final double originalBottomGap = readReceiptBottomGap();
+
+      await tester.tap(find.text('我不知道它们有什么区别'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 90));
+
+      final double growingHeight = tester.getSize(bubbleFinder).height;
+
+      expect(growingHeight, greaterThan(originalHeight + 1));
+      expect(readReceiptBottomGap(), closeTo(originalBottomGap, 1));
+
+      await tester.pumpAndSettle();
+
+      final double translatedHeight = tester.getSize(bubbleFinder).height;
+
+      expect(translatedHeight, greaterThan(growingHeight + 0.5));
+      expect(readReceiptBottomGap(), closeTo(originalBottomGap, 1));
+
+      await tester.tap(find.text('나는 그 차이가 무엇인지 아직도 전혀 모르겠어 정말 하나도 모르겠어'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 170));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 90));
+
+      final double shrinkingHeight = tester.getSize(bubbleFinder).height;
+
+      expect(shrinkingHeight, lessThan(translatedHeight - 1));
+      expect(shrinkingHeight, greaterThan(originalHeight + 0.5));
+      expect(readReceiptBottomGap(), closeTo(originalBottomGap, 1));
+
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getSize(bubbleFinder).height,
+        closeTo(originalHeight, 0.01),
+      );
+      expect(readReceiptBottomGap(), closeTo(originalBottomGap, 1));
+    },
+  );
+
   testWidgets('translated text stays inside the bubble', (
     WidgetTester tester,
   ) async {

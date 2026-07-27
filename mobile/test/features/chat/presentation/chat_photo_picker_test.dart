@@ -12,7 +12,8 @@ final Uint8List _testPng = base64Decode(
   'HwAEAQH/2p3KAAAAAElFTkSuQmCC',
 );
 
-final class _FakePhotoLibrary implements ChatPhotoLibrary {
+final class _FakePhotoLibrary
+    implements ChatPhotoLibrary, ChatPhotoLibraryChangeSource {
   _FakePhotoLibrary()
     : albums = const <ChatPhotoAlbum>[
         ChatPhotoAlbum(
@@ -46,6 +47,34 @@ final class _FakePhotoLibrary implements ChatPhotoLibrary {
   final List<ChatPhotoAlbum> albums;
 
   final Map<String, List<ChatPhotoAsset>> assetsByAlbum;
+
+  final Set<ChatPhotoLibraryChangeCallback> _changeListeners =
+      <ChatPhotoLibraryChangeCallback>{};
+
+  @override
+  void addChangeListener(ChatPhotoLibraryChangeCallback listener) {
+    _changeListeners.add(listener);
+  }
+
+  @override
+  void removeChangeListener(ChatPhotoLibraryChangeCallback listener) {
+    _changeListeners.remove(listener);
+  }
+
+  void emitChange({
+    Iterable<String> createdAssetIds = const <String>[],
+    Iterable<String> deletedAssetIds = const <String>[],
+  }) {
+    final ChatPhotoLibraryChange change = ChatPhotoLibraryChange(
+      createdAssetIds: createdAssetIds,
+      deletedAssetIds: deletedAssetIds,
+    );
+
+    for (final ChatPhotoLibraryChangeCallback listener
+        in List<ChatPhotoLibraryChangeCallback>.of(_changeListeners)) {
+      listener(change);
+    }
+  }
 
   @override
   Future<ChatPhotoAccessState> requestAccess() async {
@@ -128,17 +157,10 @@ Widget _buildPicker({
   );
 }
 
-Future<void> _tapPhotoAsset(
-  WidgetTester tester,
-  String assetId,
-) async {
-  final Finder tileFinder = find.byKey(
-    ValueKey<String>('photo-tile-$assetId'),
-  );
+Future<void> _tapPhotoAsset(WidgetTester tester, String assetId) async {
+  final Finder tileFinder = find.byKey(ValueKey<String>('photo-tile-$assetId'));
 
-  final Finder gridFinder = find.byKey(
-    const ValueKey<String>('photo-grid'),
-  );
+  final Finder gridFinder = find.byKey(const ValueKey<String>('photo-grid'));
 
   final Finder gridScrollableFinder = find.descendant(
     of: gridFinder,
@@ -147,10 +169,7 @@ Future<void> _tapPhotoAsset(
 
   for (int attempt = 0; attempt < 30; attempt++) {
     if (tileFinder.evaluate().isEmpty) {
-      await tester.drag(
-        gridScrollableFinder,
-        const Offset(0, -160),
-      );
+      await tester.drag(gridScrollableFinder, const Offset(0, -160));
       await tester.pumpAndSettle();
       continue;
     }
@@ -164,19 +183,13 @@ Future<void> _tapPhotoAsset(
     final double safeBottom = gridRect.bottom - 8;
 
     if (tileRect.center.dy < safeTop) {
-      await tester.drag(
-        gridScrollableFinder,
-        const Offset(0, 120),
-      );
+      await tester.drag(gridScrollableFinder, const Offset(0, 120));
       await tester.pumpAndSettle();
       continue;
     }
 
     if (tileRect.center.dy > safeBottom) {
-      await tester.drag(
-        gridScrollableFinder,
-        const Offset(0, -120),
-      );
+      await tester.drag(gridScrollableFinder, const Offset(0, -120));
       await tester.pumpAndSettle();
       continue;
     }
@@ -200,274 +213,169 @@ void main() {
   testWidgets(
     'photo selections are numbered in selection order and renumber after removal',
     (WidgetTester tester) async {
-      final _FakePhotoLibrary library =
-          _FakePhotoLibrary();
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
 
       await tester.pumpWidget(
         _buildPicker(
           library: library,
-          onSend: (
-            ChatPhotoSelectionResult result,
-          ) async {},
+          onSend: (ChatPhotoSelectionResult result) async {},
         ),
       );
 
       await tester.pumpAndSettle();
 
-      await _tapPhotoAsset(
-        tester,
-        'asset-2',
-      );
+      await _tapPhotoAsset(tester, 'asset-2');
 
-      await _tapPhotoAsset(
-        tester,
-        'asset-4',
-      );
+      await _tapPhotoAsset(tester, 'asset-4');
 
       Finder badgeFinder = find.descendant(
-        of: find.byKey(
-          const ValueKey<String>(
-            'photo-selection-badge-asset-2',
-          ),
-        ),
+        of: find.byKey(const ValueKey<String>('photo-selection-badge-asset-2')),
         matching: find.text('1'),
       );
 
       expect(badgeFinder, findsOneWidget);
 
       badgeFinder = find.descendant(
-        of: find.byKey(
-          const ValueKey<String>(
-            'photo-selection-badge-asset-4',
-          ),
-        ),
+        of: find.byKey(const ValueKey<String>('photo-selection-badge-asset-4')),
         matching: find.text('2'),
       );
 
       expect(badgeFinder, findsOneWidget);
 
-      await _tapPhotoAsset(
-        tester,
-        'asset-2',
-      );
+      await _tapPhotoAsset(tester, 'asset-2');
 
       badgeFinder = find.descendant(
-        of: find.byKey(
-          const ValueKey<String>(
-            'photo-selection-badge-asset-4',
-          ),
-        ),
+        of: find.byKey(const ValueKey<String>('photo-selection-badge-asset-4')),
         matching: find.text('1'),
       );
 
       expect(badgeFinder, findsOneWidget);
 
-      expect(
-        find.text('1 Send'),
-        findsOneWidget,
-      );
+      expect(find.text('1 Send'), findsOneWidget);
     },
   );
 
-  testWidgets(
-    'photo picker limits selection to ten photos',
-    (WidgetTester tester) async {
-      final _FakePhotoLibrary library =
-          _FakePhotoLibrary();
+  testWidgets('photo picker limits selection to ten photos', (
+    WidgetTester tester,
+  ) async {
+    final _FakePhotoLibrary library = _FakePhotoLibrary();
 
-      ChatPhotoSelectionResult? result;
+    ChatPhotoSelectionResult? result;
 
-      await tester.pumpWidget(
-        _buildPicker(
-          library: library,
-          onSend: (
-            ChatPhotoSelectionResult value,
-          ) async {
-            result = value;
-          },
+    await tester.pumpWidget(
+      _buildPicker(
+        library: library,
+        onSend: (ChatPhotoSelectionResult value) async {
+          result = value;
+        },
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    for (int index = 0; index < 10; index++) {
+      await _tapPhotoAsset(tester, 'asset-$index');
+    }
+
+    expect(find.text('10 Send'), findsOneWidget);
+
+    // 10장이 이미 선택된 상태에서 11번째를 선택한다.
+    await _tapPhotoAsset(tester, 'asset-10');
+
+    expect(find.text('You can select up to 10 photos.'), findsOneWidget);
+
+    // 제한을 초과한 사진은 선택되지 않아야 한다.
+    expect(
+      find.descendant(
+        of: find.byKey(
+          const ValueKey<String>('photo-selection-badge-asset-10'),
         ),
-      );
+        matching: find.text('11'),
+      ),
+      findsNothing,
+    );
 
-      await tester.pumpAndSettle();
+    expect(find.text('10 Send'), findsOneWidget);
 
-      for (int index = 0; index < 10; index++) {
-        await _tapPhotoAsset(
-          tester,
-          'asset-$index',
-        );
-      }
+    await tester.tap(find.byKey(const ValueKey<String>('photo-picker-send')));
 
-      expect(
-        find.text('10 Send'),
-        findsOneWidget,
-      );
+    await tester.pumpAndSettle();
 
-      // 10장이 이미 선택된 상태에서 11번째를 선택한다.
-      await _tapPhotoAsset(
-        tester,
-        'asset-10',
-      );
-
-      expect(
-        find.text(
-          'You can select up to 10 photos.',
-        ),
-        findsOneWidget,
-      );
-
-      // 제한을 초과한 사진은 선택되지 않아야 한다.
-      expect(
-        find.descendant(
-          of: find.byKey(
-            const ValueKey<String>(
-              'photo-selection-badge-asset-10',
-            ),
-          ),
-          matching: find.text('11'),
-        ),
-        findsNothing,
-      );
-
-      expect(
-        find.text('10 Send'),
-        findsOneWidget,
-      );
-
-      await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-picker-send',
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-
-      expect(result, isNotNull);
-      expect(result!.assets.length, 10);
-      expect(result!.collage, isTrue);
-    },
-  );
+    expect(result, isNotNull);
+    expect(result!.assets.length, 10);
+    expect(result!.collage, isTrue);
+  });
 
   testWidgets(
     'album list changes the visible album without clearing selections',
     (WidgetTester tester) async {
-      final _FakePhotoLibrary library =
-          _FakePhotoLibrary();
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
 
       await tester.pumpWidget(
         _buildPicker(
           library: library,
           expanded: true,
-          onSend: (
-            ChatPhotoSelectionResult result,
-          ) async {},
+          onSend: (ChatPhotoSelectionResult result) async {},
         ),
       );
 
       await tester.pumpAndSettle();
 
-      await _tapPhotoAsset(
-        tester,
-        'asset-1',
-      );
+      await _tapPhotoAsset(tester, 'asset-1');
 
-      expect(
-        find.text('1 Send'),
-        findsOneWidget,
-      );
+      expect(find.text('1 Send'), findsOneWidget);
 
       // 확장 패널 헤더의 Recents 드롭다운을 연다.
       await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-dropdown',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-album-dropdown')),
       );
 
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-list',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-album-list')),
         findsOneWidget,
       );
 
       expect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-sheet',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-album-sheet')),
         findsNothing,
       );
 
       await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-row-favorites',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-album-row-favorites')),
       );
 
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-tile-favorite-0',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-tile-favorite-0')),
         findsOneWidget,
       );
 
       // 다른 앨범으로 이동해도 기존 선택 개수는 유지된다.
-      expect(
-        find.text('1 Send'),
-        findsOneWidget,
-      );
+      expect(find.text('1 Send'), findsOneWidget);
 
       // 다시 Recents로 돌아간다.
       await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-dropdown',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-album-dropdown')),
       );
 
       await tester.pumpAndSettle();
 
       await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-row-all',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-album-row-all')),
       );
 
       await tester.pumpAndSettle();
 
-      await _tapPhotoAsset(
-        tester,
-        'asset-1',
-      );
+      await _tapPhotoAsset(tester, 'asset-1');
 
       // 기존에 1번이었던 사진을 탭하면 해제된다.
       // 이는 앨범 이동 중에도 동일한 선택 항목이 유지됐다는 뜻이다.
-      expect(
-        find.text('1 Send'),
-        findsNothing,
-      );
+      expect(find.text('1 Send'), findsNothing);
 
-      expect(
-        find.text('Send'),
-        findsOneWidget,
-      );
+      expect(find.text('Send'), findsOneWidget);
     },
   );
 
@@ -513,16 +421,13 @@ void main() {
   testWidgets(
     'photo picker fills its surface and header controls do not overlap',
     (WidgetTester tester) async {
-      await tester.binding.setSurfaceSize(
-        const Size(420, 900),
-      );
+      await tester.binding.setSurfaceSize(const Size(420, 900));
 
       addTearDown(() async {
         await tester.binding.setSurfaceSize(null);
       });
 
-      final _FakePhotoLibrary library =
-          _FakePhotoLibrary();
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
 
       await tester.pumpWidget(
         MaterialApp(
@@ -535,9 +440,7 @@ void main() {
                 child: ChatPhotoPicker(
                   photoLibrary: library,
                   onClose: () {},
-                  onSend: (
-                    ChatPhotoSelectionResult result,
-                  ) async {},
+                  onSend: (ChatPhotoSelectionResult result) async {},
                 ),
               ),
             ),
@@ -548,194 +451,321 @@ void main() {
       await tester.pumpAndSettle();
 
       final Rect pickerRect = tester.getRect(
-        find.byKey(
-          const ValueKey<String>('photo-picker'),
-        ),
+        find.byKey(const ValueKey<String>('photo-picker')),
       );
 
       final Rect closeRect = tester.getRect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-picker-close',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-picker-close')),
       );
 
       final Rect titleRect = tester.getRect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-picker-title',
-          ),
-        ),
+        find.byKey(const ValueKey<String>('photo-picker-title')),
       );
 
       final Rect sendRect = tester.getRect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-picker-send',
+        find.byKey(const ValueKey<String>('photo-picker-send')),
+      );
+
+      expect(pickerRect.width, closeTo(420, 0.01));
+
+      expect(closeRect.right, lessThan(titleRect.left));
+
+      expect(titleRect.right, lessThan(sendRect.left));
+
+      expect(titleRect.center.dx, closeTo(pickerRect.center.dx, 0.5));
+    },
+  );
+
+  testWidgets('photo picker handle reports vertical drag gestures', (
+    WidgetTester tester,
+  ) async {
+    final _FakePhotoLibrary library = _FakePhotoLibrary();
+
+    int dragStarts = 0;
+    int dragUpdates = 0;
+    int dragEnds = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            height: 520,
+            child: ChatPhotoPicker(
+              photoLibrary: library,
+              onClose: () {},
+              onSend: (ChatPhotoSelectionResult result) async {},
+              onHandleDragStart: (DragStartDetails details) {
+                dragStarts++;
+              },
+              onHandleDragUpdate: (DragUpdateDetails details) {
+                dragUpdates++;
+              },
+              onHandleDragEnd: (DragEndDetails details) {
+                dragEnds++;
+              },
+            ),
           ),
         ),
-      );
+      ),
+    );
 
-      expect(
-        pickerRect.width,
-        closeTo(420, 0.01),
-      );
+    await tester.pumpAndSettle();
 
-      expect(
-        closeRect.right,
-        lessThan(titleRect.left),
-      );
+    await tester.drag(
+      find.byKey(const ValueKey<String>('photo-picker-handle-area')),
+      const Offset(0, -120),
+    );
 
-      expect(
-        titleRect.right,
-        lessThan(sendRect.left),
-      );
+    await tester.pumpAndSettle();
 
-      expect(
-        titleRect.center.dx,
-        closeTo(
-          pickerRect.center.dx,
-          0.5,
+    expect(dragStarts, 1);
+    expect(dragUpdates, greaterThan(0));
+    expect(dragEnds, 1);
+  });
+
+  testWidgets('expanded photo picker switches between grid and album list', (
+    WidgetTester tester,
+  ) async {
+    final _FakePhotoLibrary library = _FakePhotoLibrary();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            height: 760,
+            child: ChatPhotoPicker(
+              photoLibrary: library,
+              expanded: true,
+              onClose: () {},
+              onSend: (ChatPhotoSelectionResult result) async {},
+            ),
+          ),
         ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-album-dropdown')),
+      findsOneWidget,
+    );
+
+    expect(find.text('Recents'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('photo-album-dropdown')),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-album-list')),
+      findsOneWidget,
+    );
+
+    expect(find.text('Favorites'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('photo-album-row-favorites')),
+    );
+
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-tile-favorite-0')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'visible picker animates gallery additions and removals into the grid',
+    (WidgetTester tester) async {
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
+
+      await tester.pumpWidget(
+        _buildPicker(
+          library: library,
+          onSend: (ChatPhotoSelectionResult result) async {},
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      await _tapPhotoAsset(tester, 'asset-0');
+
+      final Finder movingAssetFinder = find.byKey(
+        const ValueKey<String>('photo-tile-asset-2'),
+      );
+      final Rect beforeAdditionRect = tester.getRect(movingAssetFinder);
+
+      library.assetsByAlbum['all']!.insert(
+        0,
+        const ChatPhotoAsset(id: 'new-screenshot', width: 1290, height: 2796),
+      );
+      library.emitChange(createdAssetIds: const <String>['new-screenshot']);
+
+      await tester.pump(const Duration(milliseconds: 181));
+      await tester.pump();
+
+      final Finder enteringItemFinder = find.byKey(
+        const ValueKey<String>('photo-grid-item-new-screenshot'),
+      );
+
+      expect(enteringItemFinder, findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 80));
+
+      final Rect duringAdditionRect = tester.getRect(movingAssetFinder);
+      final Opacity enteringOpacity = tester.widget<Opacity>(
+        find.descendant(of: enteringItemFinder, matching: find.byType(Opacity)),
+      );
+
+      expect(duringAdditionRect.left, lessThan(beforeAdditionRect.left));
+      expect(duringAdditionRect.top, greaterThan(beforeAdditionRect.top));
+      expect(enteringOpacity.opacity, greaterThan(0));
+      expect(enteringOpacity.opacity, lessThan(1));
+
+      await tester.pumpAndSettle();
+
+      final Rect afterAdditionRect = tester.getRect(movingAssetFinder);
+
+      expect(afterAdditionRect.left, lessThan(duringAdditionRect.left));
+      expect(afterAdditionRect.top, greaterThan(duringAdditionRect.top));
+      expect(
+        find.byKey(const ValueKey<String>('photo-tile-new-screenshot')),
+        findsOneWidget,
+      );
+
+      final Rect beforeRemovalRect = tester.getRect(movingAssetFinder);
+
+      library.assetsByAlbum['all']!.removeWhere(
+        (ChatPhotoAsset asset) => asset.id == 'asset-0',
+      );
+      library.emitChange(deletedAssetIds: const <String>['asset-0']);
+
+      await tester.pump(const Duration(milliseconds: 181));
+      await tester.pump();
+
+      final Finder removedItemFinder = find.byKey(
+        const ValueKey<String>('photo-grid-removal-asset-0'),
+      );
+
+      expect(removedItemFinder, findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 80));
+
+      final Rect duringRemovalRect = tester.getRect(movingAssetFinder);
+      final Opacity removalOpacity = tester.widget<Opacity>(
+        find.descendant(of: removedItemFinder, matching: find.byType(Opacity)),
+      );
+
+      expect(duringRemovalRect.left, greaterThan(beforeRemovalRect.left));
+      expect(duringRemovalRect.top, lessThan(beforeRemovalRect.top));
+      expect(removalOpacity.opacity, greaterThan(0));
+      expect(removalOpacity.opacity, lessThan(1));
+
+      await tester.pumpAndSettle();
+
+      final Rect afterRemovalRect = tester.getRect(movingAssetFinder);
+
+      expect(afterRemovalRect.left, greaterThan(duringRemovalRect.left));
+      expect(afterRemovalRect.top, lessThan(duringRemovalRect.top));
+      expect(removedItemFinder, findsNothing);
+      expect(
+        find.byKey(const ValueKey<String>('photo-tile-asset-0')),
+        findsNothing,
+      );
+      expect(find.text('1 Send'), findsNothing);
+      expect(find.text('Send'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'photo changes received while inactive animate after the app resumes',
+    (WidgetTester tester) async {
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
+
+      await tester.pumpWidget(
+        _buildPicker(
+          library: library,
+          onSend: (ChatPhotoSelectionResult result) async {},
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      library.assetsByAlbum['all']!.insert(
+        0,
+        const ChatPhotoAsset(
+          id: 'created-while-inactive',
+          width: 1200,
+          height: 1600,
+        ),
+      );
+      library.emitChange(
+        createdAssetIds: const <String>['created-while-inactive'],
+      );
+
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(
+        find.byKey(const ValueKey<String>('photo-tile-created-while-inactive')),
+        findsNothing,
+      );
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 181));
+      await tester.pump();
+
+      expect(
+        find.byKey(
+          const ValueKey<String>('photo-grid-item-created-while-inactive'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey<String>('photo-tile-created-while-inactive')),
+        findsOneWidget,
       );
     },
   );
 
   testWidgets(
-    'photo picker handle reports vertical drag gestures',
+    'picker refreshes after the app resumes even without a native change event',
     (WidgetTester tester) async {
-      final _FakePhotoLibrary library =
-          _FakePhotoLibrary();
-
-      int dragStarts = 0;
-      int dragUpdates = 0;
-      int dragEnds = 0;
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
 
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SizedBox(
-              height: 520,
-              child: ChatPhotoPicker(
-                photoLibrary: library,
-                onClose: () {},
-                onSend: (
-                  ChatPhotoSelectionResult result,
-                ) async {},
-                onHandleDragStart: (
-                  DragStartDetails details,
-                ) {
-                  dragStarts++;
-                },
-                onHandleDragUpdate: (
-                  DragUpdateDetails details,
-                ) {
-                  dragUpdates++;
-                },
-                onHandleDragEnd: (
-                  DragEndDetails details,
-                ) {
-                  dragEnds++;
-                },
-              ),
-            ),
-          ),
+        _buildPicker(
+          library: library,
+          onSend: (ChatPhotoSelectionResult result) async {},
         ),
       );
 
       await tester.pumpAndSettle();
 
-      await tester.drag(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-picker-handle-area',
-          ),
-        ),
-        const Offset(0, -120),
-      );
-
-      await tester.pumpAndSettle();
-
-      expect(dragStarts, 1);
-      expect(dragUpdates, greaterThan(0));
-      expect(dragEnds, 1);
-    },
-  );
-
-  testWidgets(
-    'expanded photo picker switches between grid and album list',
-    (WidgetTester tester) async {
-      final _FakePhotoLibrary library =
-          _FakePhotoLibrary();
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SizedBox(
-              height: 760,
-              child: ChatPhotoPicker(
-                photoLibrary: library,
-                expanded: true,
-                onClose: () {},
-                onSend: (
-                  ChatPhotoSelectionResult result,
-                ) async {},
-              ),
-            ),
-          ),
+      library.assetsByAlbum['all']!.insert(
+        0,
+        const ChatPhotoAsset(
+          id: 'saved-while-backgrounded',
+          width: 1200,
+          height: 1600,
         ),
       );
 
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+
+      await tester.pump(const Duration(milliseconds: 181));
       await tester.pumpAndSettle();
 
       expect(
         find.byKey(
-          const ValueKey<String>(
-            'photo-album-dropdown',
-          ),
-        ),
-        findsOneWidget,
-      );
-
-      expect(find.text('Recents'), findsOneWidget);
-
-      await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-dropdown',
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-list',
-          ),
-        ),
-        findsOneWidget,
-      );
-
-      expect(find.text('Favorites'), findsOneWidget);
-
-      await tester.tap(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-album-row-favorites',
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(
-          const ValueKey<String>(
-            'photo-tile-favorite-0',
-          ),
+          const ValueKey<String>('photo-tile-saved-while-backgrounded'),
         ),
         findsOneWidget,
       );

@@ -1,6 +1,7 @@
+import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 enum ChatPhotoAccessState { authorized, limited, denied }
@@ -71,7 +72,31 @@ abstract interface class ChatPhotoLibrary {
   Future<void> openSettings();
 }
 
-final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
+final class ChatPhotoLibraryChange {
+  ChatPhotoLibraryChange({
+    Iterable<String> createdAssetIds = const <String>[],
+    Iterable<String> deletedAssetIds = const <String>[],
+    Iterable<String> updatedAssetIds = const <String>[],
+  }) : createdAssetIds = Set<String>.unmodifiable(createdAssetIds),
+       deletedAssetIds = Set<String>.unmodifiable(deletedAssetIds),
+       updatedAssetIds = Set<String>.unmodifiable(updatedAssetIds);
+
+  final Set<String> createdAssetIds;
+  final Set<String> deletedAssetIds;
+  final Set<String> updatedAssetIds;
+}
+
+typedef ChatPhotoLibraryChangeCallback =
+    void Function(ChatPhotoLibraryChange change);
+
+abstract interface class ChatPhotoLibraryChangeSource {
+  void addChangeListener(ChatPhotoLibraryChangeCallback listener);
+
+  void removeChangeListener(ChatPhotoLibraryChangeCallback listener);
+}
+
+final class PhotoManagerChatPhotoLibrary
+    implements ChatPhotoLibrary, ChatPhotoLibraryChangeSource {
   static const PermissionRequestOption _permissionOption =
       PermissionRequestOption(
         iosAccessLevel: IosAccessLevel.readWrite,
@@ -81,20 +106,209 @@ final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
         ),
       );
 
-  static final FilterOptionGroup _filterOption = FilterOptionGroup(
-    orders: const <OrderOption>[
-      OrderOption(type: OrderOptionType.createDate, asc: false),
-    ],
-  );
+  static final Set<PhotoManagerChatPhotoLibrary> _observedLibraries =
+      <PhotoManagerChatPhotoLibrary>{};
+
+  static final void Function(MethodCall) _photoManagerChangeCallback =
+      _handlePhotoManagerChange;
+
+  static Timer? _stopChangeNotificationsTimer;
+
+  static Future<void>? _startChangeNotificationsInFlight;
+
+  static Future<void>? _stopChangeNotificationsInFlight;
+
+  static bool _changeNotificationsStarted = false;
 
   final Map<String, AssetPathEntity> _albumEntities =
       <String, AssetPathEntity>{};
 
   final Map<String, AssetEntity> _assetEntities = <String, AssetEntity>{};
 
+  final Set<ChatPhotoLibraryChangeCallback> _changeListeners =
+      <ChatPhotoLibraryChangeCallback>{};
+
   ChatPhotoAccessState? _cachedAccessState;
 
   Future<ChatPhotoAccessState>? _accessRequestInFlight;
+
+  static FilterOptionGroup _createFilterOption() {
+    // FilterOptionGroup의 기본 생성일 상한은 생성 순간의 DateTime.now()다.
+    // 조회 옵션을 앱 수명 동안 재사용하면 앱 실행 후 추가된 사진이
+    // 영구적으로 제외되므로 앨범을 조회할 때마다 새로 만든다.
+    return FilterOptionGroup(
+      orders: const <OrderOption>[
+        OrderOption(type: OrderOptionType.createDate, asc: false),
+      ],
+    );
+  }
+
+  @override
+  void addChangeListener(ChatPhotoLibraryChangeCallback listener) {
+    final bool wasEmpty = _changeListeners.isEmpty;
+
+    _changeListeners.add(listener);
+
+    if (!wasEmpty || _changeListeners.isEmpty) {
+      return;
+    }
+
+    _stopChangeNotificationsTimer?.cancel();
+    _stopChangeNotificationsTimer = null;
+    _observedLibraries.add(this);
+
+    unawaited(_ensureChangeNotificationsStarted());
+  }
+
+  @override
+  void removeChangeListener(ChatPhotoLibraryChangeCallback listener) {
+    _changeListeners.remove(listener);
+
+    if (_changeListeners.isNotEmpty) {
+      return;
+    }
+
+    _observedLibraries.remove(this);
+
+    if (_observedLibraries.isNotEmpty) {
+      return;
+    }
+
+    // AnimatedSwitcher로 선택기를 빠르게 닫았다 다시 여는 동안
+    // 네이티브 observer를 불필요하게 중단했다 재시작하지 않는다.
+    _stopChangeNotificationsTimer?.cancel();
+    _stopChangeNotificationsTimer = Timer(
+      const Duration(milliseconds: 400),
+      () {
+        _stopChangeNotificationsTimer = null;
+        unawaited(_stopChangeNotificationsIfUnused());
+      },
+    );
+  }
+
+  static Future<void> _ensureChangeNotificationsStarted() async {
+    _stopChangeNotificationsTimer?.cancel();
+    _stopChangeNotificationsTimer = null;
+
+    final Future<void>? stopping = _stopChangeNotificationsInFlight;
+
+    if (stopping != null) {
+      await stopping;
+    }
+
+    if (_changeNotificationsStarted || _observedLibraries.isEmpty) {
+      return;
+    }
+
+    final Future<void>? existing = _startChangeNotificationsInFlight;
+
+    if (existing != null) {
+      await existing;
+      return;
+    }
+
+    final Future<void> request = _startChangeNotificationsOnce();
+    _startChangeNotificationsInFlight = request;
+
+    await request;
+  }
+
+  static Future<void> _startChangeNotificationsOnce() async {
+    PhotoManager.addChangeCallback(_photoManagerChangeCallback);
+
+    try {
+      await PhotoManager.startChangeNotify();
+      _changeNotificationsStarted = true;
+    } catch (_) {
+      PhotoManager.removeChangeCallback(_photoManagerChangeCallback);
+    } finally {
+      _startChangeNotificationsInFlight = null;
+    }
+  }
+
+  static Future<void> _stopChangeNotificationsIfUnused() async {
+    final Future<void>? starting = _startChangeNotificationsInFlight;
+
+    if (starting != null) {
+      await starting;
+    }
+
+    if (_observedLibraries.isNotEmpty || !_changeNotificationsStarted) {
+      return;
+    }
+
+    final Future<void>? existing = _stopChangeNotificationsInFlight;
+
+    if (existing != null) {
+      await existing;
+      return;
+    }
+
+    final Future<void> request = _stopChangeNotificationsOnce();
+    _stopChangeNotificationsInFlight = request;
+
+    await request;
+  }
+
+  static Future<void> _stopChangeNotificationsOnce() async {
+    try {
+      await PhotoManager.stopChangeNotify();
+    } catch (_) {
+      // 다음 구독 때 다시 시작할 수 있도록 로컬 상태는 정리한다.
+    } finally {
+      PhotoManager.removeChangeCallback(_photoManagerChangeCallback);
+      _changeNotificationsStarted = false;
+      _stopChangeNotificationsInFlight = null;
+    }
+  }
+
+  static void _handlePhotoManagerChange(MethodCall call) {
+    final ChatPhotoLibraryChange change = _changeFromMethodCall(call);
+
+    for (final PhotoManagerChatPhotoLibrary library
+        in List<PhotoManagerChatPhotoLibrary>.of(_observedLibraries)) {
+      library._notifyChangeListeners(change);
+    }
+  }
+
+  static ChatPhotoLibraryChange _changeFromMethodCall(MethodCall call) {
+    final Object? arguments = call.arguments;
+
+    if (arguments is! Map<Object?, Object?>) {
+      return ChatPhotoLibraryChange();
+    }
+
+    return ChatPhotoLibraryChange(
+      createdAssetIds: _assetIdsFromChange(arguments['create']),
+      deletedAssetIds: _assetIdsFromChange(arguments['delete']),
+      updatedAssetIds: _assetIdsFromChange(arguments['update']),
+    );
+  }
+
+  static Iterable<String> _assetIdsFromChange(Object? value) sync* {
+    if (value is! Iterable<Object?>) {
+      return;
+    }
+
+    for (final Object? item in value) {
+      if (item is! Map<Object?, Object?>) {
+        continue;
+      }
+
+      final Object? id = item['id'];
+
+      if (id is String && id.isNotEmpty) {
+        yield id;
+      }
+    }
+  }
+
+  void _notifyChangeListeners(ChatPhotoLibraryChange change) {
+    for (final ChatPhotoLibraryChangeCallback listener
+        in List<ChatPhotoLibraryChangeCallback>.of(_changeListeners)) {
+      listener(change);
+    }
+  }
 
   @override
   Future<ChatPhotoAccessState> requestAccess() {
@@ -149,11 +363,13 @@ final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
 
   @override
   Future<List<ChatPhotoAlbum>> loadAlbums() async {
+    final FilterOptionGroup filterOption = _createFilterOption();
+
     final List<AssetPathEntity> paths = await PhotoManager.getAssetPathList(
       type: RequestType.image,
       hasAll: true,
       onlyAll: false,
-      filterOption: _filterOption,
+      filterOption: filterOption,
     );
 
     _albumEntities
@@ -164,6 +380,8 @@ final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
               MapEntry<String, AssetPathEntity>(path.id, path),
         ),
       );
+
+    _assetEntities.clear();
 
     final List<ChatPhotoAlbum> albums = <ChatPhotoAlbum>[];
 
@@ -304,8 +522,9 @@ final class PhotoManagerChatPhotoLibrary implements ChatPhotoLibrary {
 
     final String fallbackName = '$assetId.jpg';
     final String? entityTitle = entity.title;
-    final String fileName =
-        entityTitle == null || entityTitle.isEmpty ? fallbackName : entityTitle;
+    final String fileName = entityTitle == null || entityTitle.isEmpty
+        ? fallbackName
+        : entityTitle;
 
     return ChatPhotoFile(
       bytes: bytes,

@@ -415,6 +415,137 @@ void main() {
     expect(find.byKey(const ValueKey<String>('reply-composer')), findsNothing);
   });
 
+  testWidgets(
+    'reply divider follows the widest rendered line and quote stays on one line',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(420, 900));
+
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+      });
+
+      await tester.pumpWidget(const JuliaTalkPreviewApp());
+      await tester.pumpAndSettle();
+
+      await _showMessage(tester, find.text('너는 계속 얘기해도 돼'));
+      await tester.longPress(find.text('너는 계속 얘기해도 돼'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Reply'));
+      await tester.pumpAndSettle();
+
+      const String replyContent =
+          '이 문장은 답장 본문이 버블의 최대 너비를 결정하는지 확인하기 위한 '
+          '테스트 문장입니다. 두 줄 이상 줄바꿈되도록 충분히 길게 작성합니다.';
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('message-input')),
+        replyContent,
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+      await tester.pumpAndSettle();
+
+      final Finder bubbleFinder = find.byKey(
+        const ValueKey<String>('outgoing-bubble-9'),
+      );
+      final Finder dividerFinder = find.byKey(
+        const ValueKey<String>('reply-message-divider-9'),
+      );
+      final Finder replyContentFinder = find.byKey(
+        const ValueKey<String>('original-message-9'),
+      );
+      final Finder quotePreviewFinder = find.byKey(
+        const ValueKey<String>('reply-message-preview-9'),
+      );
+      final Finder quotePreviewTextFinder = find.descendant(
+        of: quotePreviewFinder,
+        matching: find.byType(Text),
+      );
+
+      expect(bubbleFinder, findsOneWidget);
+      expect(dividerFinder, findsOneWidget);
+      expect(replyContentFinder, findsOneWidget);
+      expect(quotePreviewTextFinder, findsOneWidget);
+
+      final Rect bubbleRect = tester.getRect(bubbleFinder);
+      final Rect dividerRect = tester.getRect(dividerFinder);
+      final Rect replyContentRect = tester.getRect(replyContentFinder);
+      final double screenWidth = MediaQuery.sizeOf(
+        tester.element(bubbleFinder),
+      ).width;
+
+      expect(dividerRect.left, closeTo(replyContentRect.left, 0.01));
+      expect(dividerRect.right, closeTo(replyContentRect.right, 0.01));
+      expect(dividerRect.left - bubbleRect.left, closeTo(11, 0.01));
+      expect(bubbleRect.right - dividerRect.right, closeTo(11, 0.01));
+      expect(bubbleRect.width, lessThanOrEqualTo((screenWidth * 0.70) + 0.01));
+
+      final Text quotePreviewText = tester.widget<Text>(quotePreviewTextFinder);
+
+      expect(quotePreviewText.maxLines, 1);
+      expect(quotePreviewText.overflow, TextOverflow.ellipsis);
+    },
+  );
+
+  testWidgets('short reply uses the proportional minimum bubble width', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+    await _scrollChatToBottom(tester);
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('message-input')),
+      '가',
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('가'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reply'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('message-input')),
+      '나',
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+    await tester.pumpAndSettle();
+
+    final Finder bubbleFinder = find.byKey(
+      const ValueKey<String>('outgoing-bubble-10'),
+    );
+    final Finder dividerFinder = find.byKey(
+      const ValueKey<String>('reply-message-divider-10'),
+    );
+
+    expect(bubbleFinder, findsOneWidget);
+    expect(dividerFinder, findsOneWidget);
+
+    final Rect bubbleRect = tester.getRect(bubbleFinder);
+    final Rect dividerRect = tester.getRect(dividerFinder);
+    final double screenWidth = MediaQuery.sizeOf(
+      tester.element(bubbleFinder),
+    ).width;
+
+    expect(bubbleRect.width, closeTo(screenWidth * 0.36, 0.01));
+    expect(dividerRect.left - bubbleRect.left, closeTo(11, 0.01));
+    expect(bubbleRect.right - dividerRect.right, closeTo(11, 0.01));
+  });
+
   testWidgets('default composer shows attachment and voice without emoji', (
     WidgetTester tester,
   ) async {

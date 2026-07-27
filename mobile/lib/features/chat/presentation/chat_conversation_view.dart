@@ -29,6 +29,10 @@ import 'read_receipt_formatter.dart';
 
 const double _messageHorizontalPadding = 11;
 
+const double _replyMessageMinimumWidthRatio = 0.36;
+
+const double _replyMessageMaximumWidthRatio = 0.70;
+
 final RegExp _messageUrlPattern = RegExp(
   r'''(?:(?:https?):\/\/|www\.)[^\s<>'"]+''',
   caseSensitive: false,
@@ -7772,25 +7776,36 @@ final class _ReplyMessageBody extends StatelessWidget {
               text: replyTo.content,
               query: searchQuery,
               key: ValueKey<String>('reply-message-preview-${message.id}'),
-              maxLines: 2,
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: AppTypography.subTypography10.copyWith(
                 color: secondaryColor,
                 fontWeight: AppTypography.regular,
               ),
             ),
-            const SizedBox(height: 7),
-            Divider(height: 1, thickness: 1, color: dividerColor),
           ],
         ),
       );
 
-      messageBody = Column(
+      messageBody = _ReplyMessageLayout(
         key: ValueKey<String>('reply-message-${message.id}'),
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [quotedArea, const SizedBox(height: 7), child],
+        quote: quotedArea,
+        divider: Divider(
+          key: ValueKey<String>('reply-message-divider-${message.id}'),
+          height: 1,
+          thickness: 1,
+          color: dividerColor,
+        ),
+        body: _MessageEditStatusBody(
+          message: message,
+          isOutgoing: isOutgoing,
+          child: child,
+        ),
       );
+    }
+
+    if (replyTo != null) {
+      return messageBody;
     }
 
     return _MessageEditStatusBody(
@@ -7798,6 +7813,163 @@ final class _ReplyMessageBody extends StatelessWidget {
       isOutgoing: isOutgoing,
       child: messageBody,
     );
+  }
+}
+
+final class _ReplyMessageLayout extends MultiChildRenderObjectWidget {
+  _ReplyMessageLayout({
+    required Widget quote,
+    required Widget divider,
+    required Widget body,
+    super.key,
+  }) : super(children: <Widget>[quote, divider, body]);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderReplyMessageLayout();
+  }
+}
+
+final class _ReplyMessageParentData extends ContainerBoxParentData<RenderBox> {}
+
+final class _RenderReplyMessageLayout extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _ReplyMessageParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _ReplyMessageParentData> {
+  static const double _quoteToDividerGap = 7;
+  static const double _dividerToBodyGap = 7;
+
+  RenderBox get _quote {
+    assert(childCount == 3);
+    return firstChild!;
+  }
+
+  RenderBox get _divider {
+    assert(childCount == 3);
+    return childAfter(_quote)!;
+  }
+
+  RenderBox get _body {
+    assert(childCount == 3);
+    return lastChild!;
+  }
+
+  BoxConstraints _looseContentConstraints(BoxConstraints constraints) {
+    return BoxConstraints(maxWidth: constraints.maxWidth);
+  }
+
+  double _resolvedWidth({
+    required BoxConstraints constraints,
+    required double quoteWidth,
+    required double bodyWidth,
+  }) {
+    return constraints.constrainWidth(math.max(quoteWidth, bodyWidth));
+  }
+
+  @override
+  void setupParentData(RenderObject child) {
+    if (child.parentData is! _ReplyMessageParentData) {
+      child.parentData = _ReplyMessageParentData();
+    }
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final RenderBox quote = _quote;
+    final RenderBox divider = _divider;
+    final RenderBox body = _body;
+    final BoxConstraints looseConstraints = _looseContentConstraints(
+      constraints,
+    );
+
+    final Size naturalQuoteSize = quote.getDryLayout(looseConstraints);
+    final Size bodySize = body.getDryLayout(looseConstraints);
+    final double width = _resolvedWidth(
+      constraints: constraints,
+      quoteWidth: naturalQuoteSize.width,
+      bodyWidth: bodySize.width,
+    );
+    final Size quoteSize = quote.getDryLayout(
+      BoxConstraints.tightFor(width: width),
+    );
+    final Size dividerSize = divider.getDryLayout(
+      BoxConstraints.tightFor(width: width),
+    );
+
+    return constraints.constrain(
+      Size(
+        width,
+        quoteSize.height +
+            _quoteToDividerGap +
+            dividerSize.height +
+            _dividerToBodyGap +
+            bodySize.height,
+      ),
+    );
+  }
+
+  @override
+  void performLayout() {
+    final RenderBox quote = _quote;
+    final RenderBox divider = _divider;
+    final RenderBox body = _body;
+    final BoxConstraints looseConstraints = _looseContentConstraints(
+      constraints,
+    );
+
+    quote.layout(looseConstraints, parentUsesSize: true);
+    body.layout(looseConstraints, parentUsesSize: true);
+
+    // The quote and reply body determine the width before the divider is laid
+    // out. TextWidthBasis.longestLine can therefore report the actual
+    // rightmost rendered line instead of the divider forcing the maximum width.
+    final double width = _resolvedWidth(
+      constraints: constraints,
+      quoteWidth: quote.size.width,
+      bodyWidth: body.size.width,
+    );
+
+    quote.layout(BoxConstraints.tightFor(width: width), parentUsesSize: true);
+    divider.layout(BoxConstraints.tightFor(width: width), parentUsesSize: true);
+
+    final _ReplyMessageParentData quoteParentData =
+        quote.parentData! as _ReplyMessageParentData;
+    final _ReplyMessageParentData dividerParentData =
+        divider.parentData! as _ReplyMessageParentData;
+    final _ReplyMessageParentData bodyParentData =
+        body.parentData! as _ReplyMessageParentData;
+
+    final double dividerTop = quote.size.height + _quoteToDividerGap;
+    final double bodyTop = dividerTop + divider.size.height + _dividerToBodyGap;
+
+    quoteParentData.offset = Offset.zero;
+    dividerParentData.offset = Offset(0, dividerTop);
+    bodyParentData.offset = Offset(0, bodyTop);
+
+    size = constraints.constrain(Size(width, bodyTop + body.size.height));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    defaultPaint(context, offset);
+  }
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    final _ReplyMessageParentData childParentData =
+        child.parentData! as _ReplyMessageParentData;
+
+    transform.translateByDouble(
+      childParentData.offset.dx,
+      childParentData.offset.dy,
+      0,
+      1,
+    );
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return defaultHitTestChildren(result, position: position);
   }
 }
 
@@ -8174,6 +8346,7 @@ final class _IncomingMessageRow extends StatelessWidget {
       content = _MessageBubble(
         messageId: message.id,
         measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
+        isReply: !isFileMessage && message.replyTo != null,
         backgroundColor: AppColors.grey100,
         direction: _BubbleDirection.incoming,
         showTail: showTail,
@@ -8645,6 +8818,7 @@ final class _LinkMessageContent extends StatelessWidget {
         _MessageBubble(
           messageId: message.id,
           measurementKey: measurementKey,
+          isReply: message.replyTo != null,
           backgroundColor: isOutgoing ? AppColors.blue500 : AppColors.grey100,
           direction: isOutgoing
               ? _BubbleDirection.outgoing
@@ -9096,6 +9270,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
       content = _MessageBubble(
         messageId: message.id,
         measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        isReply: message.replyTo != null,
         backgroundColor: AppColors.blue500,
         direction: _BubbleDirection.outgoing,
         showTail: showTail,
@@ -11617,6 +11792,7 @@ final class _MessageBubble extends StatefulWidget {
     required this.showTail,
     required this.isHighlighted,
     required this.child,
+    this.isReply = false,
     this.measurementKey,
   });
 
@@ -11626,6 +11802,7 @@ final class _MessageBubble extends StatefulWidget {
   final bool showTail;
   final bool isHighlighted;
   final Widget child;
+  final bool isReply;
   final Key? measurementKey;
 
   @override
@@ -11768,7 +11945,12 @@ final class _MessageBubbleState extends State<_MessageBubble>
 
   @override
   Widget build(BuildContext context) {
-    final double maxWidth = MediaQuery.sizeOf(context).width * 0.68;
+    final double screenWidth = MediaQuery.sizeOf(context).width;
+    final double minWidth = widget.isReply
+        ? screenWidth * _replyMessageMinimumWidthRatio
+        : 0;
+    final double maxWidth =
+        screenWidth * (widget.isReply ? _replyMessageMaximumWidthRatio : 0.68);
 
     final BorderRadius borderRadius = BorderRadius.only(
       topLeft: Radius.circular(!_isOutgoing && widget.showTail ? 6 : 17),
@@ -11798,7 +11980,10 @@ final class _MessageBubbleState extends State<_MessageBubble>
               clipBehavior: Clip.none,
               children: [
                 ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: maxWidth),
+                  constraints: BoxConstraints(
+                    minWidth: minWidth,
+                    maxWidth: maxWidth,
+                  ),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       color: bubbleColor,

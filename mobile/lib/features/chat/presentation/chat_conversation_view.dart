@@ -5731,6 +5731,7 @@ final class _MessageListState extends State<_MessageList> {
   static const double _replyOriginalAlignment = 0.28;
   static const double _minimumOlderMessagesPrefetchExtent = 1200;
   static const double _olderMessagesPrefetchViewportCount = 3;
+  static const int _bottomSettleRequiredStableFrames = 2;
   // 긴 번역문이 사라질 때는 AnimatedSwitcher(160ms)가 끝난 뒤
   // AnimatedSize(180ms)의 축소가 시작되므로 두 전환 전체를 덮는다.
   static const Duration _bottomAnchorPreservationDuration = Duration(
@@ -5745,6 +5746,10 @@ final class _MessageListState extends State<_MessageList> {
   bool _didResolveInitialScrollPosition = false;
   bool _olderMessagesLoadInProgress = false;
   bool _bottomPinCanceledByUserScroll = false;
+  bool _bottomSettleActive = false;
+  bool _bottomSettleFrameScheduled = false;
+  double? _bottomSettleLastMaxScrollExtent;
+  int _bottomSettleStableFrameCount = 0;
 
   Timer? _bottomAnchorPreservationTimer;
   Timer? _messageHighlightTimer;
@@ -5780,60 +5785,94 @@ final class _MessageListState extends State<_MessageList> {
     _syncMessageClockWithMessages(_messages);
     _nextMessageId = widget.nextLocalMessageId;
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _resolveInitialScrollPosition();
-    });
+    _beginBottomSettle();
   }
 
   String _nextLocalMessageId() {
     return '${_nextMessageId++}';
   }
 
-  void _resolveInitialScrollPosition() {
-    if (!mounted || _didResolveInitialScrollPosition) {
+  void _beginBottomSettle() {
+    if (!mounted || _bottomPinCanceledByUserScroll) {
+      return;
+    }
+
+    _bottomSettleActive = true;
+    _bottomSettleLastMaxScrollExtent = null;
+    _bottomSettleStableFrameCount = 0;
+    _scheduleBottomSettleFrame();
+  }
+
+  void _scheduleBottomSettleFrame() {
+    if (!mounted || !_bottomSettleActive || _bottomSettleFrameScheduled) {
+      return;
+    }
+
+    _bottomSettleFrameScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bottomSettleFrameScheduled = false;
+      _resolveBottomSettle();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _resolveBottomSettle() {
+    if (!mounted || !_bottomSettleActive || _bottomPinCanceledByUserScroll) {
+      _bottomSettleActive = false;
       return;
     }
 
     if (!_scrollController.hasClients ||
         !_scrollController.position.hasContentDimensions) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _resolveInitialScrollPosition();
-      });
+      _scheduleBottomSettleFrame();
       return;
     }
 
     final ScrollPosition position = _scrollController.position;
+    final double targetOffset = position.maxScrollExtent;
+    final double? previousMaxScrollExtent = _bottomSettleLastMaxScrollExtent;
+
+    if ((position.pixels - targetOffset).abs() >= 0.5) {
+      _scrollController.jumpTo(targetOffset);
+    }
+
+    final bool maxScrollExtentIsStable =
+        previousMaxScrollExtent != null &&
+        (previousMaxScrollExtent - targetOffset).abs() < 0.5;
+    final bool isAtBottom =
+        (_scrollController.position.pixels - targetOffset).abs() < 0.5;
+
+    _bottomSettleLastMaxScrollExtent = targetOffset;
+    _bottomSettleStableFrameCount = maxScrollExtentIsStable && isAtBottom
+        ? _bottomSettleStableFrameCount + 1
+        : 0;
+
+    if (_bottomSettleStableFrameCount < _bottomSettleRequiredStableFrames) {
+      _scheduleBottomSettleFrame();
+      return;
+    }
+
+    _bottomSettleActive = false;
+
+    if (_didResolveInitialScrollPosition) {
+      return;
+    }
 
     final bool conversationOverflows =
         position.maxScrollExtent > position.minScrollExtent + 0.5;
 
-    if (!conversationOverflows) {
-      setState(() {
-        _didResolveInitialScrollPosition = true;
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _maybeLoadOlderMessages();
-      });
-      return;
-    }
+    setState(() {
+      _didResolveInitialScrollPosition = true;
+    });
 
-    // 대화가 화면을 넘으면 최신 메시지 구간으로 이동한다.
-    _scrollController.jumpTo(position.maxScrollExtent);
-
-    // 아래쪽 항목이 새로 레이아웃되면서 maxScrollExtent가
-    // 조금 달라질 수 있으므로 다음 프레임에서 한 번 더 맞춘다.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
       }
 
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      if (!conversationOverflows) {
+        _maybeLoadOlderMessages();
       }
-
-      setState(() {
-        _didResolveInitialScrollPosition = true;
-      });
     });
   }
 
@@ -5967,11 +6006,7 @@ final class _MessageListState extends State<_MessageList> {
     _syncMessageClockWithMessages(_messages);
 
     if (shouldPinToBottomAfterUpdate) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_bottomPinCanceledByUserScroll) {
-          unawaited(scrollToBottom(animate: false));
-        }
-      });
+      _beginBottomSettle();
     }
   }
 
@@ -6389,7 +6424,7 @@ final class _MessageListState extends State<_MessageList> {
 
   bool _handleScrollMetricsChanged(ScrollMetricsNotification notification) {
     if (_bottomPinCanceledByUserScroll ||
-        !widget.pinToBottom ||
+        (!widget.pinToBottom && !_bottomSettleActive) ||
         !_scrollController.hasClients) {
       return false;
     }
@@ -6419,6 +6454,9 @@ final class _MessageListState extends State<_MessageList> {
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
       _bottomPinCanceledByUserScroll = true;
+      _bottomSettleActive = false;
+      _bottomSettleLastMaxScrollExtent = null;
+      _bottomSettleStableFrameCount = 0;
       _cancelBottomAnchorPreservation();
       widget.onUserScrollStarted();
     } else if (notification is ScrollEndNotification && isNearBottom) {

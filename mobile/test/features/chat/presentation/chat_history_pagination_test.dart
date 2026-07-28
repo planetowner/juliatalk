@@ -19,6 +19,40 @@ List<ChatMessage> _messages(int start, int end) {
   });
 }
 
+List<ChatMessage> _variableHeightMessages(int count) {
+  return List<ChatMessage>.generate(count, (int index) {
+    final int lineCount;
+
+    if (index < count ~/ 5) {
+      lineCount = 1;
+    } else if (index < (count * 2) ~/ 5) {
+      lineCount = 2;
+    } else if (index < (count * 3) ~/ 5) {
+      lineCount = 4;
+    } else if (index < (count * 4) ~/ 5) {
+      lineCount = 8;
+    } else {
+      lineCount = 16;
+    }
+
+    final String content = List<String>.generate(lineCount, (int line) {
+      if (index == count - 1 && line == lineCount - 1) {
+        return 'latest-message';
+      }
+
+      return 'message-$index line-$line';
+    }).join('\n');
+
+    return ChatMessage(
+      id: 'variable-message-$index',
+      senderId: index.isEven ? '1' : '2',
+      recipientId: index.isEven ? '2' : '1',
+      content: content,
+      createdAt: DateTime(2026, 7, 1, 10).add(Duration(minutes: index)),
+    );
+  });
+}
+
 final class _PaginationHarness extends StatefulWidget {
   const _PaginationHarness({
     required this.firstRequestStarted,
@@ -87,6 +121,48 @@ final class _PaginationHarnessState extends State<_PaginationHarness> {
 }
 
 void main() {
+  testWidgets('a recreated cached conversation settles at the actual bottom', (
+    WidgetTester tester,
+  ) async {
+    final List<ChatMessage> messages = _variableHeightMessages(300);
+
+    Widget buildConversation(Key key) {
+      return MaterialApp(
+        home: ChatConversationView(
+          key: key,
+          initialMessages: messages,
+          initialClock: DateTime(2026, 7, 2),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(
+      buildConversation(const ValueKey<String>('first-entry')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+
+    await tester.pumpWidget(
+      buildConversation(const ValueKey<String>('cached-reentry')),
+    );
+    await tester.pumpAndSettle();
+
+    final Finder listFinder = find.byKey(
+      const ValueKey<String>('message-list'),
+    );
+    final ScrollableState scrollableState = tester.state<ScrollableState>(
+      find.descendant(of: listFinder, matching: find.byType(Scrollable)),
+    );
+
+    expect(
+      scrollableState.position.pixels,
+      moreOrLessEquals(scrollableState.position.maxScrollExtent, epsilon: 0.5),
+    );
+    expect(find.textContaining('latest-message'), findsOneWidget);
+  });
+
   testWidgets(
     'loads every older page while preserving the visible message position',
     (WidgetTester tester) async {

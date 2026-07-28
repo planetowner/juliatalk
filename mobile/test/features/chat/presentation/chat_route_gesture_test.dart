@@ -31,7 +31,32 @@ ScrollView _messageList(WidgetTester tester) {
   );
 }
 
-Future<ChatRealtimeService> _pumpOpenConversation(WidgetTester tester) async {
+Map<String, dynamic> _messageJson(int index) {
+  return <String, dynamic>{
+    'id': 'message-$index',
+    'sender_id': index.isEven ? _currentUser.id : _otherUser.id,
+    'recipient_id': index.isEven ? _otherUser.id : _currentUser.id,
+    'content': 'message-$index',
+    'created_at': DateTime.utc(
+      2026,
+      7,
+      1,
+    ).add(Duration(minutes: index)).toIso8601String(),
+    'edited_at': null,
+    'read_at': null,
+    'translation_status': 'completed',
+    'translated_content': 'translated-message-$index',
+    'source_language': 'en',
+    'translated_language': 'ko',
+    'reply_to': null,
+    'message_type': 'text',
+  };
+}
+
+Future<ChatRealtimeService> _pumpConversationHome(
+  WidgetTester tester, {
+  Future<http.Response> Function(http.Request request)? conversationResponder,
+}) async {
   final MockClient client = MockClient((http.Request request) async {
     if (request.method == 'GET' && request.url.path == '/users') {
       return http.Response(
@@ -43,6 +68,10 @@ Future<ChatRealtimeService> _pumpOpenConversation(WidgetTester tester) async {
 
     if (request.method == 'GET' &&
         request.url.path == '/messages/conversation/${_otherUser.id}') {
+      if (conversationResponder != null) {
+        return conversationResponder(request);
+      }
+
       return http.Response(
         '[]',
         200,
@@ -98,6 +127,15 @@ Future<ChatRealtimeService> _pumpOpenConversation(WidgetTester tester) async {
     ),
   );
   await tester.pumpAndSettle();
+
+  return realtimeService;
+}
+
+Future<ChatRealtimeService> _pumpOpenConversation(WidgetTester tester) async {
+  final ChatRealtimeService realtimeService = await _pumpConversationHome(
+    tester,
+  );
+
   await tester.tap(find.text(_otherUser.displayName));
   await tester.pumpAndSettle();
 
@@ -129,6 +167,127 @@ Future<void> _moveRouteGestureSlowly(
 }
 
 void main() {
+  testWidgets(
+    'a paginated conversation reenters with a bounded latest-message cache',
+    (WidgetTester tester) async {
+      int olderPageRequestCount = 0;
+
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          final String? beforeMessageId =
+              request.url.queryParameters['before_message_id'];
+
+          if (beforeMessageId == null) {
+            return http.Response(
+              jsonEncode(
+                List<Map<String, dynamic>>.generate(
+                  100,
+                  (int index) => _messageJson(index + 100),
+                ),
+              ),
+              200,
+              headers: const <String, String>{
+                'content-type': 'application/json',
+                'x-has-more': 'true',
+              },
+            );
+          }
+
+          expect(beforeMessageId, 'message-100');
+          olderPageRequestCount++;
+
+          return http.Response(
+            jsonEncode(List<Map<String, dynamic>>.generate(100, _messageJson)),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json',
+              'x-has-more': 'false',
+            },
+          );
+        },
+      );
+      addTearDown(realtimeService.dispose);
+
+      Future<void> openConversation() async {
+        await tester.tap(find.text(_otherUser.displayName));
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> loadOlderPage() async {
+        final Finder listFinder = find.byKey(
+          const ValueKey<String>('message-list'),
+        );
+        await tester.drag(listFinder, const Offset(0, 10000));
+        await tester.pumpAndSettle();
+      }
+
+      await openConversation();
+      await loadOlderPage();
+
+      expect(olderPageRequestCount, 1);
+
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+
+      await openConversation();
+      await loadOlderPage();
+
+      expect(
+        olderPageRequestCount,
+        2,
+        reason:
+            'Reentry should keep only the latest page and reload older history '
+            'on demand.',
+      );
+    },
+  );
+
+  testWidgets(
+    'a cached conversation starts sliding immediately after its first frame',
+    (WidgetTester tester) async {
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+      );
+      addTearDown(realtimeService.dispose);
+
+      final double width = tester
+          .getSize(find.byType(ChatConversationHomeScreen))
+          .width;
+
+      await tester.tap(find.text(_otherUser.displayName));
+
+      // Advance past the entire route duration in the first build frame. The
+      // animation must start after that frame instead of being consumed by it.
+      await tester.pump(const Duration(milliseconds: 190));
+
+      final Finder routeTransformFinder = find.byKey(
+        const ValueKey<String>('chat-route-transform'),
+      );
+
+      double routeOffset() {
+        return tester
+            .widget<Transform>(routeTransformFinder)
+            .transform
+            .getTranslation()
+            .x;
+      }
+
+      expect(routeOffset(), moreOrLessEquals(width, epsilon: 0.5));
+
+      for (int frame = 0; frame < 10 && routeOffset() >= width - 0.5; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      expect(routeOffset(), greaterThan(0));
+      expect(routeOffset(), lessThan(width));
+
+      await tester.pumpAndSettle();
+
+      expect(routeOffset(), moreOrLessEquals(0, epsilon: 0.5));
+    },
+  );
+
   testWidgets(
     'a gesture that starts vertically never becomes a back swipe later',
     (WidgetTester tester) async {

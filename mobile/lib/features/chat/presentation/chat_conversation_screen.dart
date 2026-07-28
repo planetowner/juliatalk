@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_typography.dart';
@@ -22,6 +23,7 @@ const Duration _chatRouteCloseDuration = Duration(milliseconds: 170);
 const double _chatRouteDismissProgress = 0.5;
 const double _chatRouteFlingVelocity = 700;
 const double _chatRouteDragSlop = 8;
+const int _conversationEntryCacheMessageLimit = 100;
 
 final class ChatConversationHomeController extends ChangeNotifier {
   String? _pendingUserId;
@@ -85,6 +87,7 @@ final class _ChatConversationHomeScreenState
       <String, List<ChatMessage>>{};
   final Map<String, bool> _conversationHasMoreByUserId = <String, bool>{};
   final Set<String> _prefetchingConversationUserIds = <String>{};
+  final Set<String> _conversationCacheTrimmedUserIds = <String>{};
 
   List<_ChatListEntry>? _chatEntries;
   AppUser? _selectedUser;
@@ -305,6 +308,7 @@ final class _ChatConversationHomeScreenState
       _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
         page.messages,
       );
+      _conversationCacheTrimmedUserIds.remove(userId);
       _conversationHasMoreByUserId[userId] = page.hasMore;
     } catch (_) {
       // Prefetching should never block the chat list.
@@ -358,9 +362,21 @@ final class _ChatConversationHomeScreenState
     required String userId,
     required List<ChatMessage> messages,
   }) {
+    final bool cacheWasTrimmed =
+        messages.length > _conversationEntryCacheMessageLimit;
+    final int cacheStartIndex = cacheWasTrimmed
+        ? messages.length - _conversationEntryCacheMessageLimit
+        : 0;
+
     _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
-      messages,
+      messages.sublist(cacheStartIndex),
     );
+
+    if (cacheWasTrimmed) {
+      _conversationCacheTrimmedUserIds.add(userId);
+    } else {
+      _conversationCacheTrimmedUserIds.remove(userId);
+    }
   }
 
   void _openChat(AppUser user) {
@@ -368,6 +384,8 @@ final class _ChatConversationHomeScreenState
       return;
     }
 
+    _chatRouteController.stop();
+    _chatRouteController.value = 0;
     _chatRouteClosing = false;
     _chatRouteDragActive = false;
 
@@ -375,14 +393,28 @@ final class _ChatConversationHomeScreenState
       _selectedUser = user;
     });
     unawaited(widget.realtimeService.setActiveConversationUserId(user.id));
+  }
 
-    unawaited(
-      _chatRouteController.animateTo(
-        1,
-        duration: _chatRouteOpenDuration,
-        curve: Curves.easeOutCubic,
-      ),
-    );
+  Future<void> _startOpenChatAnimation(AppUser user) async {
+    if (!mounted ||
+        _selectedUser?.id != user.id ||
+        _chatRouteClosing ||
+        _chatRouteController.isAnimating ||
+        _chatRouteController.value >= 1) {
+      return;
+    }
+
+    try {
+      await _chatRouteController
+          .animateTo(
+            1,
+            duration: _chatRouteOpenDuration,
+            curve: Curves.easeOutCubic,
+          )
+          .orCancel;
+    } on TickerCanceled {
+      // A close gesture can legitimately replace the opening animation.
+    }
   }
 
   void _requestCloseChat() {
@@ -671,8 +703,12 @@ final class _ChatConversationHomeScreenState
               );
             },
             onHasMoreMessagesChanged: (bool hasMore) {
-              _conversationHasMoreByUserId[selectedUser.id] = hasMore;
+              _conversationHasMoreByUserId[selectedUser.id] =
+                  hasMore ||
+                  _conversationCacheTrimmedUserIds.contains(selectedUser.id);
             },
+            onReadyForRouteAnimation: () =>
+                _startOpenChatAnimation(selectedUser),
             onBack: _requestCloseChat,
           ),
         ),
@@ -681,7 +717,11 @@ final class _ChatConversationHomeScreenState
         final double width = MediaQuery.sizeOf(context).width;
         final double offset = (1 - _chatRouteController.value) * width;
 
-        return Transform.translate(offset: Offset(offset, 0), child: child);
+        return Transform.translate(
+          key: const ValueKey<String>('chat-route-transform'),
+          offset: Offset(offset, 0),
+          child: child,
+        );
       },
     );
   }
@@ -798,6 +838,7 @@ final class ChatConversationScreen extends StatefulWidget {
     required this.otherUser,
     required this.otherUserDisplayName,
     required this.onBack,
+    this.onReadyForRouteAnimation,
     this.routeNavigationDragActive = false,
     this.initialMessages,
     this.initialHasMoreMessages,
@@ -812,6 +853,7 @@ final class ChatConversationScreen extends StatefulWidget {
   final AppUser otherUser;
   final String otherUserDisplayName;
   final VoidCallback onBack;
+  final Future<void> Function()? onReadyForRouteAnimation;
   final bool routeNavigationDragActive;
   final List<ChatMessage>? initialMessages;
   final bool? initialHasMoreMessages;
@@ -832,6 +874,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   bool _loadingOlderMessages = false;
   late bool _hasMoreMessages;
   late List<ChatMessage> _messages;
+  late final bool _openedWithCachedMessages;
+  bool _didNotifyReadyForRouteAnimation = false;
 
   @override
   void initState() {
@@ -842,13 +886,23 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     _messages = initialMessages == null
         ? const <ChatMessage>[]
         : List<ChatMessage>.unmodifiable(initialMessages);
+    _openedWithCachedMessages = initialMessages != null;
     _loading = initialMessages == null;
     _hasMoreMessages =
         widget.initialHasMoreMessages ?? (initialMessages?.length == 100);
 
     _subscribeToRealtimeService();
     widget.realtimeService.addListener(_handleRealtimeStateChanged);
-    unawaited(_loadConversation(showLoading: initialMessages == null));
+
+    if (!_openedWithCachedMessages) {
+      unawaited(_loadConversation(showLoading: true));
+    }
+
+    // Start after the first route frame has built so synchronous widget
+    // construction cannot consume the animation before anything is painted.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _notifyReadyForRouteAnimation();
+    });
   }
 
   @override
@@ -880,6 +934,31 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (mounted) {
       setState(() {});
     }
+  }
+
+  void _notifyReadyForRouteAnimation() {
+    if (!mounted || _didNotifyReadyForRouteAnimation) {
+      return;
+    }
+
+    _didNotifyReadyForRouteAnimation = true;
+    unawaited(_openRouteAndRefreshCachedConversation());
+  }
+
+  Future<void> _openRouteAndRefreshCachedConversation() async {
+    final Future<void> Function()? onReady = widget.onReadyForRouteAnimation;
+
+    if (onReady != null) {
+      await onReady();
+    }
+
+    if (!mounted || !_openedWithCachedMessages) {
+      return;
+    }
+
+    // Rebuilding a long cached timeline during the 190ms route transition can
+    // starve the animation of frames, so refresh only after it has completed.
+    await _loadConversation(showLoading: false);
   }
 
   Future<void> _loadConversation({required bool showLoading}) async {

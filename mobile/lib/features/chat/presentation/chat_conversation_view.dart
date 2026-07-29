@@ -6151,7 +6151,7 @@ final class _MessageListState extends State<_MessageList> {
         _messages.any(
           (ChatMessage message) => message.id == previousFirstMessageId,
         );
-    if (olderMessagesWerePrepended) {
+    if (olderMessagesWerePrepended && _olderMessagesLoadInProgress) {
       _historyPageBoundaryMessageIds.add(previousFirstMessageId);
     }
     final int previousLastMessageIndex = previousLastMessageId == null
@@ -6162,7 +6162,7 @@ final class _MessageListState extends State<_MessageList> {
     final bool newerMessagesWereAppended =
         previousLastMessageIndex >= 0 &&
         previousLastMessageIndex + 1 < _messages.length;
-    if (newerMessagesWereAppended) {
+    if (newerMessagesWereAppended && _newerMessagesLoadInProgress) {
       _historyPageBoundaryMessageIds.add(
         _messages[previousLastMessageIndex + 1].id,
       );

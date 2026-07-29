@@ -391,13 +391,21 @@ void main() {
     'a reply quote loads its original outside the latest cached page',
     (WidgetTester tester) async {
       int contextRequestCount = 0;
+      int sentMessageCount = 0;
+      final DateTime sentAt = DateTime.utc(2026, 7, 1, 7);
       final ChatRealtimeService realtimeService = await _pumpConversationHome(
         tester,
         messageResponder: (http.Request request) async {
+          sentMessageCount += 1;
           final Map<String, dynamic> requestBody =
               jsonDecode(request.body) as Map<String, dynamic>;
-          final Map<String, dynamic> sentMessage = _messageJson(400);
+          final Map<String, dynamic> sentMessage = _messageJson(
+            399 + sentMessageCount,
+          );
           sentMessage['content'] = requestBody['content'];
+          sentMessage['created_at'] = sentAt.toIso8601String();
+          sentMessage['sender_id'] = _currentUser.id;
+          sentMessage['recipient_id'] = _otherUser.id;
 
           return http.Response(
             jsonEncode(sentMessage),
@@ -559,6 +567,34 @@ void main() {
         reason:
             'Returning from reply navigation must not leave its recentered '
             'sliver as the structural center of the latest conversation.',
+      );
+
+      for (final String content in <String>[
+        'second message in the same minute',
+        'third message in the same minute',
+      ]) {
+        await tester.enterText(
+          find.byKey(const ValueKey<String>('message-input')),
+          content,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+        await tester.pumpAndSettle();
+      }
+
+      final BuildContext timestampContext = tester.element(composerFinder);
+      final String formattedSentTime =
+          MaterialLocalizations.of(timestampContext).formatTimeOfDay(
+            TimeOfDay.fromDateTime(sentAt.toLocal()),
+            alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(
+              timestampContext,
+            ),
+          );
+
+      expect(find.text(formattedSentTime), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('outgoing-bubble-message-402')),
+        findsOneWidget,
       );
     },
   );

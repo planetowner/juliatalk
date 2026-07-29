@@ -1460,7 +1460,7 @@ async def list_conversation(
     session: SessionDependency,
     response: Response,
     before_message_id: Annotated[Optional[UUID], Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> list[MessageRead]:
     other_user = await session.get(User, other_user_id)
 

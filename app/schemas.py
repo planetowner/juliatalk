@@ -243,6 +243,12 @@ class MessageRead(BaseModel):
     translation_model: Optional[str]
 
 
+class MessageContextRead(BaseModel):
+    messages: list[MessageRead]
+    has_more_older: bool
+    has_more_newer: bool
+
+
 class MessagesMarkedReadResponse(BaseModel):
     marked_read_count: int
 

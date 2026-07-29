@@ -2,16 +2,18 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_typography.dart';
 import '../../auth/domain/app_user.dart';
 import '../../auth/domain/auth_session.dart';
 import '../data/chat_api.dart';
+import '../data/chat_api_exception.dart';
+import '../data/chat_message_cache.dart';
 import '../data/chat_realtime_service.dart';
 import '../domain/chat_message.dart';
 import 'chat_conversation_view.dart';
+import 'reply_navigation_diagnostics.dart';
 
 const double _chatListHorizontalPadding = 20;
 const double _chatListAvatarSize = 48;
@@ -52,6 +54,7 @@ final class ChatConversationHomeScreen extends StatefulWidget {
     required this.realtimeService,
     required this.session,
     required this.controller,
+    this.messageCache,
     super.key,
   });
 
@@ -59,6 +62,7 @@ final class ChatConversationHomeScreen extends StatefulWidget {
   final ChatRealtimeService realtimeService;
   final AuthSession session;
   final ChatConversationHomeController controller;
+  final ChatMessageCache? messageCache;
 
   @override
   State<ChatConversationHomeScreen> createState() {
@@ -83,6 +87,7 @@ final class _ChatConversationHomeScreenState
       };
 
   late final AnimationController _chatRouteController;
+  late final ChatMessageCache _messageCache;
   final Map<String, List<ChatMessage>> _conversationMessagesByUserId =
       <String, List<ChatMessage>>{};
   final Map<String, bool> _conversationHasMoreByUserId = <String, bool>{};
@@ -114,6 +119,12 @@ final class _ChatConversationHomeScreenState
       duration: _chatRouteOpenDuration,
       reverseDuration: _chatRouteCloseDuration,
     );
+    _messageCache =
+        widget.messageCache ??
+        ChatMessageCache(
+          chatApi: _chatApi,
+          currentUserId: widget.session.user.id,
+        );
 
     widget.controller.addListener(_openPendingConversation);
     widget.realtimeService.addListener(_handleRealtimeStateChanged);
@@ -297,6 +308,26 @@ final class _ChatConversationHomeScreenState
 
   Future<void> _prefetchConversation(String userId) async {
     try {
+      final ChatCachedConversation cachedConversation = await _messageCache
+          .readConversation(userId);
+
+      if (mounted && cachedConversation.messages.isNotEmpty) {
+        final int cacheStartIndex =
+            cachedConversation.messages.length >
+                _conversationEntryCacheMessageLimit
+            ? cachedConversation.messages.length -
+                  _conversationEntryCacheMessageLimit
+            : 0;
+        _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
+          cachedConversation.messages.sublist(cacheStartIndex),
+        );
+        _conversationHasMoreByUserId[userId] =
+            cacheStartIndex > 0 || cachedConversation.hasMoreOlder;
+        if (cacheStartIndex > 0) {
+          _conversationCacheTrimmedUserIds.add(userId);
+        }
+      }
+
       final ChatConversationPage page = await _chatApi.listConversation(
         otherUserId: userId,
       );
@@ -305,6 +336,13 @@ final class _ChatConversationHomeScreenState
         return;
       }
 
+      unawaited(
+        _messageCache.mergeLatestConversation(
+          otherUserId: userId,
+          messages: page.messages,
+          hasMoreOlder: page.hasMore,
+        ),
+      );
       _conversationMessagesByUserId[userId] = List<ChatMessage>.unmodifiable(
         page.messages,
       );
@@ -688,6 +726,7 @@ final class _ChatConversationHomeScreenState
           child: ChatConversationScreen(
             key: ValueKey<String>(selectedUser.id),
             chatApi: _chatApi,
+            messageCache: _messageCache,
             realtimeService: widget.realtimeService,
             currentUser: widget.session.user,
             otherUser: selectedUser,
@@ -833,6 +872,7 @@ final class _ChatListEntry {
 final class ChatConversationScreen extends StatefulWidget {
   const ChatConversationScreen({
     required this.chatApi,
+    required this.messageCache,
     required this.realtimeService,
     required this.currentUser,
     required this.otherUser,
@@ -848,6 +888,7 @@ final class ChatConversationScreen extends StatefulWidget {
   });
 
   final ChatApi chatApi;
+  final ChatMessageCache messageCache;
   final ChatRealtimeService realtimeService;
   final AppUser currentUser;
   final AppUser otherUser;
@@ -867,13 +908,27 @@ final class ChatConversationScreen extends StatefulWidget {
 }
 
 final class _ChatConversationScreenState extends State<ChatConversationScreen> {
+  static const int _replyNavigationContextRadius = 30;
+  static const int _conversationPageSize = 100;
+  static const List<Duration> _olderMessagesRetryDelays = <Duration>[
+    Duration(milliseconds: 400),
+    Duration(milliseconds: 1200),
+  ];
+
   StreamSubscription<Map<String, dynamic>>? _realtimeEventSubscription;
+  Future<void>? _olderMessagesLoadFuture;
+  Future<void>? _newerMessagesLoadFuture;
   late bool _loading;
   String? _errorMessage;
   bool _syncingAfterReconnect = false;
   bool _loadingOlderMessages = false;
+  bool _loadingNewerMessages = false;
   late bool _hasMoreMessages;
+  bool _hasMoreNewerMessages = false;
   late List<ChatMessage> _messages;
+  late List<ChatMessage> _latestMessages;
+  late bool _latestHasMoreMessages;
+  bool _showingLatestWindow = true;
   late final bool _openedWithCachedMessages;
   bool _didNotifyReadyForRouteAnimation = false;
 
@@ -886,10 +941,12 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     _messages = initialMessages == null
         ? const <ChatMessage>[]
         : List<ChatMessage>.unmodifiable(initialMessages);
+    _latestMessages = _messages;
     _openedWithCachedMessages = initialMessages != null;
     _loading = initialMessages == null;
     _hasMoreMessages =
         widget.initialHasMoreMessages ?? (initialMessages?.length == 100);
+    _latestHasMoreMessages = _hasMoreMessages;
 
     _subscribeToRealtimeService();
     widget.realtimeService.addListener(_handleRealtimeStateChanged);
@@ -952,13 +1009,15 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       await onReady();
     }
 
-    if (!mounted || !_openedWithCachedMessages) {
+    if (!mounted) {
       return;
     }
 
-    // Rebuilding a long cached timeline during the 190ms route transition can
-    // starve the animation of frames, so refresh only after it has completed.
-    await _loadConversation(showLoading: false);
+    if (_openedWithCachedMessages) {
+      // Rebuilding a long cached timeline during the 190ms route transition can
+      // starve the animation of frames, so refresh only after it has completed.
+      await _loadConversation(showLoading: false);
+    }
   }
 
   Future<void> _loadConversation({required bool showLoading}) async {
@@ -978,14 +1037,26 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         return;
       }
 
-      final bool hadCachedMessages = _messages.isNotEmpty;
+      final bool hadCachedMessages = _latestMessages.isNotEmpty;
+      final List<ChatMessage> untrimmedLatestMessages = hadCachedMessages
+          ? _mergeMessageLists(_latestMessages, page.messages)
+          : page.messages;
+      final List<ChatMessage> mergedLatestMessages = hadCachedMessages
+          ? _trimLatestMessages(untrimmedLatestMessages)
+          : page.messages;
+      final bool latestHasMoreMessages =
+          page.hasMore ||
+          (hadCachedMessages &&
+              untrimmedLatestMessages.length >
+                  _conversationEntryCacheMessageLimit);
 
       setState(() {
-        _messages = hadCachedMessages
-            ? _mergeMessages(page.messages)
-            : page.messages;
-        if (!hadCachedMessages) {
-          _hasMoreMessages = page.hasMore;
+        _latestMessages = List<ChatMessage>.unmodifiable(mergedLatestMessages);
+        _latestHasMoreMessages = latestHasMoreMessages;
+        if (_showingLatestWindow) {
+          _messages = _latestMessages;
+          _hasMoreMessages = latestHasMoreMessages;
+          _hasMoreNewerMessages = false;
         }
         _loading = false;
         _errorMessage = null;
@@ -1014,50 +1085,368 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
   }
 
+  Future<bool> _ensureMessageLoaded(String messageId) async {
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] ensure-start '
+      'target=$messageId loaded=${_containsMessage(messageId)} '
+      'messages=${_messages.length} '
+      'hasMoreOlder=$_hasMoreMessages '
+      'hasMoreNewer=$_hasMoreNewerMessages',
+    );
+
+    final ChatCachedConversation? cachedContext = await widget.messageCache
+        .readConversationAround(
+          otherUserId: widget.otherUser.id,
+          messageId: messageId,
+          olderLimit: _replyNavigationContextRadius,
+          newerLimit: _replyNavigationContextRadius,
+        );
+
+    if (cachedContext != null &&
+        cachedContext.messages.any(
+          (ChatMessage message) => message.id == messageId,
+        ) &&
+        mounted) {
+      _showConversationContext(cachedContext);
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] cache-result '
+        'target=$messageId result=true '
+        'messages=${cachedContext.messages.length} '
+        'hasMoreOlder=${cachedContext.hasMoreOlder} '
+        'hasMoreNewer=${cachedContext.hasMoreNewer}',
+      );
+      return true;
+    }
+
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] cache-miss target=$messageId',
+    );
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] context-request '
+      'target=$messageId older=$_replyNavigationContextRadius '
+      'newer=$_replyNavigationContextRadius',
+    );
+    final ChatConversationContext? context =
+        await _requestMessageContextWithRetry(messageId);
+
+    if (!mounted ||
+        context == null ||
+        !context.messages.any(
+          (ChatMessage message) => message.id == messageId,
+        )) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] context-result '
+        'target=$messageId result=false',
+      );
+      return false;
+    }
+
+    _showConversationContext(
+      ChatCachedConversation(
+        messages: context.messages,
+        hasMoreOlder: context.hasMoreOlder,
+        hasMoreNewer: context.hasMoreNewer,
+      ),
+    );
+    unawaited(
+      widget.messageCache.mergeConversationContext(
+        otherUserId: widget.otherUser.id,
+        messages: context.messages,
+        hasMoreOlder: context.hasMoreOlder,
+        hasMoreNewer: context.hasMoreNewer,
+      ),
+    );
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] context-result '
+      'target=$messageId result=true '
+      'messages=${context.messages.length} '
+      'hasMoreOlder=${context.hasMoreOlder} '
+      'hasMoreNewer=${context.hasMoreNewer}',
+    );
+    return true;
+  }
+
+  void _showConversationContext(ChatCachedConversation context) {
+    setState(() {
+      _showingLatestWindow = false;
+      _messages = context.messages;
+      _hasMoreMessages = context.hasMoreOlder;
+      _hasMoreNewerMessages = context.hasMoreNewer;
+    });
+  }
+
+  Future<ChatConversationContext?> _requestMessageContextWithRetry(
+    String messageId,
+  ) async {
+    int retryAttempt = 0;
+
+    while (true) {
+      try {
+        return await widget.chatApi.getConversationMessageContext(
+          otherUserId: widget.otherUser.id,
+          messageId: messageId,
+          olderLimit: _replyNavigationContextRadius,
+          newerLimit: _replyNavigationContextRadius,
+        );
+      } on ChatApiException catch (error) {
+        ReplyNavigationDiagnostics.record(
+          '[reply-navigation] context-error '
+          'target=$messageId status=${error.statusCode} '
+          'retryable=${error.retryable}',
+        );
+        if (!error.retryable ||
+            retryAttempt >= _olderMessagesRetryDelays.length) {
+          return null;
+        }
+      } catch (_) {
+        return null;
+      }
+
+      final Duration retryDelay = _olderMessagesRetryDelays[retryAttempt];
+      retryAttempt += 1;
+      await Future<void>.delayed(retryDelay);
+
+      if (!mounted) {
+        return null;
+      }
+    }
+  }
+
   Future<void> _loadOlderMessages() async {
-    if (_loadingOlderMessages || !_hasMoreMessages || _messages.isEmpty) {
+    final Future<void>? inFlightLoad = _olderMessagesLoadFuture;
+
+    if (inFlightLoad != null) {
+      await inFlightLoad;
       return;
     }
 
-    final String beforeMessageId = _messages.first.id;
+    final Future<void> loadFuture = _performOlderMessagesLoad();
+    _olderMessagesLoadFuture = loadFuture;
+
+    try {
+      await loadFuture;
+    } finally {
+      if (identical(_olderMessagesLoadFuture, loadFuture)) {
+        _olderMessagesLoadFuture = null;
+      }
+    }
+  }
+
+  Future<void> _performOlderMessagesLoad() async {
+    if (!_hasMoreMessages || _messages.isEmpty || !mounted) {
+      return;
+    }
 
     setState(() {
       _loadingOlderMessages = true;
     });
+    final String beforeMessageId = _messages.first.id;
 
     try {
-      final ChatConversationPage page = await widget.chatApi.listConversation(
-        otherUserId: widget.otherUser.id,
-        beforeMessageId: beforeMessageId,
-      );
+      final ChatCachedConversation? cachedPage = await widget.messageCache
+          .readMessagesBefore(
+            otherUserId: widget.otherUser.id,
+            beforeMessageId: beforeMessageId,
+            limit: _conversationPageSize,
+          );
 
-      if (!mounted) {
+      if (cachedPage != null && cachedPage.messages.isNotEmpty && mounted) {
+        setState(() {
+          _showingLatestWindow = false;
+          _messages = _mergeMessageLists(cachedPage.messages, _messages);
+          _hasMoreMessages = cachedPage.hasMoreOlder;
+        });
+        _notifyMessagesChanged(persistToMessageCache: false);
         return;
       }
 
-      final Set<String> existingMessageIds = _messages
-          .map((ChatMessage message) => message.id)
-          .toSet();
-      final int addedMessageCount = page.messages
-          .where(
-            (ChatMessage message) => !existingMessageIds.contains(message.id),
-          )
-          .length;
-      final List<ChatMessage> mergedMessages = _mergeMessages(page.messages);
+      final ChatConversationPage? page =
+          await _requestConversationPageWithRetry(
+            beforeMessageId: beforeMessageId,
+            limit: _conversationPageSize,
+          );
+
+      if (!mounted || page == null) {
+        return;
+      }
+
+      if (page.messages.isEmpty) {
+        setState(() {
+          _hasMoreMessages = false;
+        });
+        unawaited(
+          widget.messageCache.updateOlderBoundary(
+            otherUserId: widget.otherUser.id,
+            boundaryMessageId: beforeMessageId,
+            hasMoreOlder: false,
+          ),
+        );
+        return;
+      }
 
       setState(() {
-        _messages = mergedMessages;
-        _hasMoreMessages = page.hasMore && addedMessageCount > 0;
-        _loadingOlderMessages = false;
+        _showingLatestWindow = false;
+        _messages = _mergeMessageLists(page.messages, _messages);
+        _hasMoreMessages = page.hasMore;
       });
-      _notifyMessagesChanged();
-    } catch (_) {
+      unawaited(
+        widget.messageCache.mergeOlderPage(
+          otherUserId: widget.otherUser.id,
+          beforeMessageId: beforeMessageId,
+          messages: page.messages,
+          hasMoreOlder: page.hasMore,
+        ),
+      );
+      _notifyMessagesChanged(persistToMessageCache: false);
+    } finally {
       if (mounted) {
         setState(() {
           _loadingOlderMessages = false;
         });
+      } else {
+        _loadingOlderMessages = false;
       }
     }
+  }
+
+  Future<void> _loadNewerMessages() async {
+    final Future<void>? inFlightLoad = _newerMessagesLoadFuture;
+
+    if (inFlightLoad != null) {
+      await inFlightLoad;
+      return;
+    }
+
+    final Future<void> loadFuture = _performNewerMessagesLoad();
+    _newerMessagesLoadFuture = loadFuture;
+
+    try {
+      await loadFuture;
+    } finally {
+      if (identical(_newerMessagesLoadFuture, loadFuture)) {
+        _newerMessagesLoadFuture = null;
+      }
+    }
+  }
+
+  Future<void> _performNewerMessagesLoad() async {
+    if (!_hasMoreNewerMessages || _messages.isEmpty || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _loadingNewerMessages = true;
+    });
+    final String afterMessageId = _messages.last.id;
+
+    try {
+      final ChatCachedConversation? cachedPage = await widget.messageCache
+          .readMessagesAfter(
+            otherUserId: widget.otherUser.id,
+            afterMessageId: afterMessageId,
+            limit: _conversationPageSize,
+          );
+
+      if (cachedPage != null && cachedPage.messages.isNotEmpty && mounted) {
+        setState(() {
+          _messages = _mergeMessageLists(_messages, cachedPage.messages);
+          _hasMoreNewerMessages = cachedPage.hasMoreNewer;
+        });
+        _notifyMessagesChanged(persistToMessageCache: false);
+        return;
+      }
+
+      final ChatConversationPage? page =
+          await _requestConversationPageWithRetry(
+            afterMessageId: afterMessageId,
+            limit: _conversationPageSize,
+          );
+
+      if (!mounted || page == null) {
+        return;
+      }
+
+      if (page.messages.isEmpty) {
+        setState(() {
+          _hasMoreNewerMessages = false;
+        });
+        unawaited(
+          widget.messageCache.updateNewerBoundary(
+            otherUserId: widget.otherUser.id,
+            boundaryMessageId: afterMessageId,
+            hasMoreNewer: false,
+          ),
+        );
+        return;
+      }
+
+      setState(() {
+        _messages = _mergeMessageLists(_messages, page.messages);
+        _hasMoreNewerMessages = page.hasMore;
+      });
+      unawaited(
+        widget.messageCache.mergeNewerPage(
+          otherUserId: widget.otherUser.id,
+          afterMessageId: afterMessageId,
+          messages: page.messages,
+          hasMoreNewer: page.hasMore,
+        ),
+      );
+      _notifyMessagesChanged(persistToMessageCache: false);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingNewerMessages = false;
+        });
+      } else {
+        _loadingNewerMessages = false;
+      }
+    }
+  }
+
+  Future<ChatConversationPage?> _requestConversationPageWithRetry({
+    String? beforeMessageId,
+    String? afterMessageId,
+    required int limit,
+  }) async {
+    int retryAttempt = 0;
+    final String? cursorMessageId = beforeMessageId ?? afterMessageId;
+    final String direction = beforeMessageId == null ? 'newer' : 'older';
+
+    while (true) {
+      try {
+        return await widget.chatApi.listConversation(
+          otherUserId: widget.otherUser.id,
+          beforeMessageId: beforeMessageId,
+          afterMessageId: afterMessageId,
+          limit: limit,
+        );
+      } on ChatApiException catch (error) {
+        ReplyNavigationDiagnostics.record(
+          '[reply-navigation] page-error '
+          'direction=$direction cursor=$cursorMessageId limit=$limit '
+          'status=${error.statusCode} retryable=${error.retryable}',
+        );
+        if (!error.retryable ||
+            retryAttempt >= _olderMessagesRetryDelays.length) {
+          return null;
+        }
+      } catch (_) {
+        return null;
+      }
+
+      final Duration retryDelay = _olderMessagesRetryDelays[retryAttempt];
+      retryAttempt += 1;
+      await Future<void>.delayed(retryDelay);
+
+      if (!mounted) {
+        return null;
+      }
+    }
+  }
+
+  bool _containsMessage(String messageId) {
+    return _messages.any((ChatMessage message) => message.id == messageId);
   }
 
   Future<void> _syncConversationFromRest() async {
@@ -1076,8 +1465,25 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         return;
       }
 
+      final List<ChatMessage> untrimmedLatestMessages = _mergeMessageLists(
+        _latestMessages,
+        page.messages,
+      );
+      final List<ChatMessage> nextLatestMessages = _trimLatestMessages(
+        untrimmedLatestMessages,
+      );
+      final bool nextLatestHasMoreMessages =
+          page.hasMore ||
+          untrimmedLatestMessages.length > _conversationEntryCacheMessageLimit;
+      final bool visibleWindowIncludesNewest = !_hasMoreNewerMessages;
+
       setState(() {
-        _messages = _mergeMessages(page.messages);
+        _latestMessages = nextLatestMessages;
+        _latestHasMoreMessages = nextLatestHasMoreMessages;
+        if (visibleWindowIncludesNewest) {
+          _messages = _mergeMessageLists(_messages, page.messages);
+          _hasMoreNewerMessages = false;
+        }
         _errorMessage = null;
       });
       _notifyMessagesChanged();
@@ -1091,12 +1497,15 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
   }
 
-  List<ChatMessage> _mergeMessages(Iterable<ChatMessage> messages) {
+  List<ChatMessage> _mergeMessageLists(
+    Iterable<ChatMessage> first,
+    Iterable<ChatMessage> second,
+  ) {
     final Map<String, ChatMessage> messagesById = <String, ChatMessage>{
-      for (final ChatMessage message in _messages) message.id: message,
+      for (final ChatMessage message in first) message.id: message,
     };
 
-    for (final ChatMessage message in messages) {
+    for (final ChatMessage message in second) {
       messagesById[message.id] = message;
     }
 
@@ -1105,6 +1514,16 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     )..sort(_compareMessages);
 
     return List<ChatMessage>.unmodifiable(mergedMessages);
+  }
+
+  List<ChatMessage> _trimLatestMessages(Iterable<ChatMessage> messages) {
+    final List<ChatMessage> sortedMessages = messages.toList(growable: false)
+      ..sort(_compareMessages);
+    final int startIndex =
+        sortedMessages.length > _conversationEntryCacheMessageLimit
+        ? sortedMessages.length - _conversationEntryCacheMessageLimit
+        : 0;
+    return List<ChatMessage>.unmodifiable(sortedMessages.sublist(startIndex));
   }
 
   void _handleRealtimeEvent(Map<String, dynamic> event) {
@@ -1203,21 +1622,36 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   }
 
   void _upsertMessage(ChatMessage message) {
-    final List<ChatMessage> nextMessages = List<ChatMessage>.of(_messages);
-    final int existingIndex = nextMessages.indexWhere(
+    final bool isNewLatestMessage = !_latestMessages.any(
       (ChatMessage existingMessage) => existingMessage.id == message.id,
     );
-
-    if (existingIndex == -1) {
-      nextMessages.add(message);
-    } else {
-      nextMessages[existingIndex] = message;
-    }
-
-    nextMessages.sort(_compareMessages);
+    final List<ChatMessage> untrimmedLatestMessages = _mergeMessageLists(
+      _latestMessages,
+      <ChatMessage>[message],
+    );
+    final List<ChatMessage> nextLatestMessages = _trimLatestMessages(
+      untrimmedLatestMessages,
+    );
+    final bool revealNewestWindow =
+        _showingLatestWindow ||
+        (isNewLatestMessage && message.senderId == widget.currentUser.id);
+    final bool updateVisibleContext =
+        !revealNewestWindow &&
+        (_containsMessage(message.id) || !_hasMoreNewerMessages);
 
     setState(() {
-      _messages = List<ChatMessage>.unmodifiable(nextMessages);
+      _latestMessages = nextLatestMessages;
+      _latestHasMoreMessages =
+          _latestHasMoreMessages ||
+          untrimmedLatestMessages.length > _conversationEntryCacheMessageLimit;
+      if (revealNewestWindow) {
+        _showingLatestWindow = true;
+        _messages = _latestMessages;
+        _hasMoreMessages = _latestHasMoreMessages;
+        _hasMoreNewerMessages = false;
+      } else if (updateVisibleContext) {
+        _messages = _mergeMessageLists(_messages, <ChatMessage>[message]);
+      }
     });
     _notifyMessagesChanged();
   }
@@ -1227,24 +1661,42 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       return;
     }
 
-    final List<ChatMessage> nextMessages = List<ChatMessage>.of(_messages);
-
-    for (final ChatMessage message in messages) {
-      final int existingIndex = nextMessages.indexWhere(
-        (ChatMessage existingMessage) => existingMessage.id == message.id,
-      );
-
-      if (existingIndex == -1) {
-        nextMessages.add(message);
-      } else {
-        nextMessages[existingIndex] = message;
-      }
-    }
-
-    nextMessages.sort(_compareMessages);
+    final bool hasNewOutgoingMessage = messages.any(
+      (ChatMessage message) =>
+          message.senderId == widget.currentUser.id &&
+          !_latestMessages.any(
+            (ChatMessage existingMessage) => existingMessage.id == message.id,
+          ),
+    );
+    final List<ChatMessage> untrimmedLatestMessages = _mergeMessageLists(
+      _latestMessages,
+      messages,
+    );
+    final List<ChatMessage> nextLatestMessages = _trimLatestMessages(
+      untrimmedLatestMessages,
+    );
+    final bool revealNewestWindow =
+        _showingLatestWindow || hasNewOutgoingMessage;
+    final List<ChatMessage> visibleUpdates = messages
+        .where(
+          (ChatMessage message) =>
+              _containsMessage(message.id) || !_hasMoreNewerMessages,
+        )
+        .toList(growable: false);
 
     setState(() {
-      _messages = List<ChatMessage>.unmodifiable(nextMessages);
+      _latestMessages = nextLatestMessages;
+      _latestHasMoreMessages =
+          _latestHasMoreMessages ||
+          untrimmedLatestMessages.length > _conversationEntryCacheMessageLimit;
+      if (revealNewestWindow) {
+        _showingLatestWindow = true;
+        _messages = _latestMessages;
+        _hasMoreMessages = _latestHasMoreMessages;
+        _hasMoreNewerMessages = false;
+      } else if (visibleUpdates.isNotEmpty) {
+        _messages = _mergeMessageLists(_messages, visibleUpdates);
+      }
     });
     _notifyMessagesChanged();
   }
@@ -1254,7 +1706,16 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       _messages = List<ChatMessage>.unmodifiable(
         _messages.where((ChatMessage message) => message.id != messageId),
       );
+      _latestMessages = List<ChatMessage>.unmodifiable(
+        _latestMessages.where((ChatMessage message) => message.id != messageId),
+      );
     });
+    unawaited(
+      widget.messageCache.removeMessage(
+        otherUserId: widget.otherUser.id,
+        messageId: messageId,
+      ),
+    );
     _notifyMessagesChanged();
   }
 
@@ -1275,13 +1736,39 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
           return message.copyWith(readAt: readAt);
         }),
       );
+      _latestMessages = List<ChatMessage>.unmodifiable(
+        _latestMessages.map((ChatMessage message) {
+          if (!messageIdSet.contains(message.id)) {
+            return message;
+          }
+
+          return message.copyWith(readAt: readAt);
+        }),
+      );
     });
     _notifyMessagesChanged();
   }
 
-  void _notifyMessagesChanged() {
-    widget.onMessagesChanged?.call(_messages);
-    widget.onHasMoreMessagesChanged?.call(_hasMoreMessages);
+  void _notifyMessagesChanged({bool persistToMessageCache = true}) {
+    if (persistToMessageCache) {
+      unawaited(
+        widget.messageCache.mergeConversationContext(
+          otherUserId: widget.otherUser.id,
+          messages: _messages,
+          hasMoreOlder: _hasMoreMessages,
+          hasMoreNewer: _hasMoreNewerMessages,
+        ),
+      );
+      unawaited(
+        widget.messageCache.mergeLatestConversation(
+          otherUserId: widget.otherUser.id,
+          messages: _latestMessages,
+          hasMoreOlder: _latestHasMoreMessages,
+        ),
+      );
+    }
+    widget.onMessagesChanged?.call(_latestMessages);
+    widget.onHasMoreMessagesChanged?.call(_latestHasMoreMessages);
   }
 
   int _compareMessages(ChatMessage first, ChatMessage second) {
@@ -1485,8 +1972,13 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       child: ChatConversationView(
         initialMessages: _messages,
         hasMoreMessages: _hasMoreMessages,
+        hasMoreNewerMessages: _hasMoreNewerMessages,
         loadingOlderMessages: _loadingOlderMessages,
+        loadingNewerMessages: _loadingNewerMessages,
         onLoadOlderMessages: _loadOlderMessages,
+        onLoadNewerMessages: _loadNewerMessages,
+        onEnsureMessageLoaded: _ensureMessageLoaded,
+        showLatestReadReceipt: !_hasMoreNewerMessages,
         currentUserId: widget.currentUser.id,
         currentUserName: widget.currentUser.displayName,
         currentUserPreferredLanguage: widget.currentUser.preferredLanguage,

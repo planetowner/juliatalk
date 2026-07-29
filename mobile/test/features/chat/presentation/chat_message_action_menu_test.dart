@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:juliatalk/features/chat/domain/chat_message.dart';
+import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
 import '../../../support/juliatalk_preview_app.dart';
 
@@ -110,6 +112,35 @@ ScrollPosition _messageListPosition(WidgetTester tester) {
   );
 
   return scrollableState.position;
+}
+
+List<ChatMessage> _farReplyMessages() {
+  return List<ChatMessage>.generate(300, (int index) {
+    final bool usesTallContent = index >= 50 && index < 250;
+    final String content = index == 40
+        ? 'far-original'
+        : usesTallContent
+        ? List<String>.generate(
+            12,
+            (int line) => 'message-$index-line-$line',
+          ).join('\n')
+        : 'message-$index';
+
+    return ChatMessage(
+      id: 'far-$index',
+      senderId: index.isEven ? '2' : '1',
+      recipientId: index.isEven ? '1' : '2',
+      content: content,
+      createdAt: DateTime(2026, 7, 1).add(Duration(minutes: index)),
+      replyTo: index == 299
+          ? const ChatReplyReference(
+              messageId: 'far-40',
+              senderId: '2',
+              content: 'far-original',
+            )
+          : null,
+    );
+  });
 }
 
 void main() {
@@ -1808,6 +1839,80 @@ void main() {
       closeTo(12, 1),
     );
   });
+
+  testWidgets(
+    'a far reply quote uses the rendered original position with varied heights',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(420, 900));
+
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: _farReplyMessages(),
+            initialClock: DateTime(2026, 7, 2),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final Finder quoteAreaFinder = find.byKey(
+        const ValueKey<String>('reply-quote-area-far-299'),
+      );
+      expect(quoteAreaFinder, findsOneWidget);
+
+      final Finder messageListFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Rect initialMessageListRect = tester.getRect(messageListFinder);
+      final double initialReplyTop =
+          tester.getRect(quoteAreaFinder).top - initialMessageListRect.top;
+
+      await tester.tap(quoteAreaFinder);
+
+      final Finder originalBubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-far-40'),
+      );
+      final Finder backButtonFinder = find.byKey(
+        const ValueKey<String>('back-to-reply-message'),
+      );
+      await _pumpUntilFound(tester, backButtonFinder, maximumPumps: 80);
+
+      expect(originalBubbleFinder, findsOneWidget);
+
+      final Rect messageListRect = tester.getRect(
+        find.byKey(const ValueKey<String>('message-list')),
+      );
+      final Rect originalBubbleRect = tester.getRect(originalBubbleFinder);
+      final double originalTopRatio =
+          (originalBubbleRect.top - messageListRect.top) /
+          messageListRect.height;
+
+      expect(originalTopRatio, inInclusiveRange(0.18, 0.38));
+      expect(backButtonFinder, findsOneWidget);
+
+      await tester.tap(backButtonFinder);
+
+      for (
+        int frame = 0;
+        frame < 80 && backButtonFinder.evaluate().isNotEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(backButtonFinder, findsNothing);
+      expect(quoteAreaFinder, findsOneWidget);
+      final Rect returnedMessageListRect = tester.getRect(messageListFinder);
+      final double returnedReplyTop =
+          tester.getRect(quoteAreaFinder).top - returnedMessageListRect.top;
+
+      expect(returnedReplyTop, closeTo(initialReplyTop, 1));
+    },
+  );
 
   testWidgets(
     'reply quote navigates to the original without translating it and can return',

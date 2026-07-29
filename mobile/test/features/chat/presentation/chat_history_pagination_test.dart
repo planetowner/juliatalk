@@ -120,6 +120,65 @@ final class _PaginationHarnessState extends State<_PaginationHarness> {
   }
 }
 
+final class _NewerPaginationHarness extends StatefulWidget {
+  const _NewerPaginationHarness({
+    required this.requestStarted,
+    required this.releaseRequest,
+    super.key,
+  });
+
+  final Completer<void> requestStarted;
+  final Completer<void> releaseRequest;
+
+  @override
+  State<_NewerPaginationHarness> createState() {
+    return _NewerPaginationHarnessState();
+  }
+}
+
+final class _NewerPaginationHarnessState
+    extends State<_NewerPaginationHarness> {
+  List<ChatMessage> messages = List<ChatMessage>.unmodifiable(_messages(0, 60));
+  bool hasMoreNewerMessages = true;
+  bool loadingNewerMessages = false;
+  int loadCount = 0;
+
+  Future<void> _loadNewerMessages() async {
+    if (loadingNewerMessages || !hasMoreNewerMessages) {
+      return;
+    }
+
+    setState(() {
+      loadCount += 1;
+      loadingNewerMessages = true;
+    });
+    widget.requestStarted.complete();
+    await widget.releaseRequest.future;
+
+    setState(() {
+      messages = List<ChatMessage>.unmodifiable(<ChatMessage>[
+        ...messages,
+        ..._messages(60, 120),
+      ]);
+      hasMoreNewerMessages = false;
+      loadingNewerMessages = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: ChatConversationView(
+        initialMessages: messages,
+        hasMoreNewerMessages: hasMoreNewerMessages,
+        loadingNewerMessages: loadingNewerMessages,
+        onLoadNewerMessages: _loadNewerMessages,
+        initialClock: DateTime(2026, 7, 1, 12),
+      ),
+    );
+  }
+}
+
 void main() {
   testWidgets('a recreated cached conversation settles at the actual bottom', (
     WidgetTester tester,
@@ -197,7 +256,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(tester.getTopLeft(anchorMessage).dy, closeTo(anchorTopBefore, 1));
-      expect(harnessKey.currentState!.loadCount, 1);
+      expect(
+        harnessKey.currentState!.loadCount,
+        2,
+        reason:
+            'The expanded prefetch window should continue with the next page '
+            'before the user reaches the loaded history edge.',
+      );
 
       await tester.drag(listFinder, const Offset(0, 4000));
       await tester.pumpAndSettle();
@@ -209,6 +274,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('message-0'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('message-0')).dy,
+        lessThan(tester.getTopLeft(find.text('message-1')).dy),
+        reason:
+            'Lazy history groups must keep chronological visual ordering '
+            'before the center sliver.',
+      );
       expect(harnessKey.currentState!.loadCount, 2);
     },
   );
@@ -273,6 +345,44 @@ void main() {
 
       await gesture.up();
       await tester.pump(const Duration(milliseconds: 500));
+    },
+  );
+
+  testWidgets(
+    'keeps the visible position stable when a newer page is appended',
+    (WidgetTester tester) async {
+      final Completer<void> requestStarted = Completer<void>();
+      final Completer<void> releaseRequest = Completer<void>();
+      final GlobalKey<_NewerPaginationHarnessState> harnessKey =
+          GlobalKey<_NewerPaginationHarnessState>();
+
+      await tester.pumpWidget(
+        _NewerPaginationHarness(
+          key: harnessKey,
+          requestStarted: requestStarted,
+          releaseRequest: releaseRequest,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      await tester.drag(listFinder, const Offset(0, 40));
+      await tester.pump();
+      await requestStarted.future;
+
+      final Finder anchorMessage = find.text('message-55');
+      expect(anchorMessage, findsOneWidget);
+      final double anchorTopBefore = tester.getTopLeft(anchorMessage).dy;
+
+      releaseRequest.complete();
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.getTopLeft(anchorMessage).dy, closeTo(anchorTopBefore, 1));
+      expect(harnessKey.currentState!.loadCount, 1);
+      expect(harnessKey.currentState!.hasMoreNewerMessages, isFalse);
     },
   );
 }

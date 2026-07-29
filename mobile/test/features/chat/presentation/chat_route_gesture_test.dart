@@ -8,8 +8,10 @@ import 'package:juliatalk/core/notifications/notification_service.dart';
 import 'package:juliatalk/features/auth/domain/app_user.dart';
 import 'package:juliatalk/features/auth/domain/auth_session.dart';
 import 'package:juliatalk/features/chat/data/chat_api.dart';
+import 'package:juliatalk/features/chat/data/chat_message_cache.dart';
 import 'package:juliatalk/features/chat/data/chat_realtime_service.dart';
 import 'package:juliatalk/features/chat/presentation/chat_conversation_screen.dart';
+import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
 const AppUser _currentUser = AppUser(
   id: 'current-user',
@@ -31,7 +33,7 @@ ScrollView _messageList(WidgetTester tester) {
   );
 }
 
-Map<String, dynamic> _messageJson(int index) {
+Map<String, dynamic> _messageJson(int index, {int? replyToIndex}) {
   return <String, dynamic>{
     'id': 'message-$index',
     'sender_id': index.isEven ? _currentUser.id : _otherUser.id,
@@ -48,7 +50,13 @@ Map<String, dynamic> _messageJson(int index) {
     'translated_content': 'translated-message-$index',
     'source_language': 'en',
     'translated_language': 'ko',
-    'reply_to': null,
+    'reply_to': replyToIndex == null
+        ? null
+        : <String, dynamic>{
+            'message_id': 'message-$replyToIndex',
+            'sender_id': replyToIndex.isEven ? _currentUser.id : _otherUser.id,
+            'content': 'message-$replyToIndex',
+          },
     'message_type': 'text',
   };
 }
@@ -67,7 +75,10 @@ Future<ChatRealtimeService> _pumpConversationHome(
     }
 
     if (request.method == 'GET' &&
-        request.url.path == '/messages/conversation/${_otherUser.id}') {
+        (request.url.path == '/messages/conversation/${_otherUser.id}' ||
+            request.url.path.startsWith(
+              '/messages/conversation/${_otherUser.id}/around/',
+            ))) {
       if (conversationResponder != null) {
         return conversationResponder(request);
       }
@@ -109,6 +120,11 @@ Future<ChatRealtimeService> _pumpConversationHome(
     tokenType: 'bearer',
     user: _currentUser,
   );
+  final ChatMessageCache messageCache = ChatMessageCache(
+    chatApi: chatApi,
+    currentUserId: _currentUser.id,
+    persistenceEnabled: false,
+  );
   final ChatRealtimeService realtimeService = ChatRealtimeService(
     chatApi: chatApi,
     baseUri: baseUri,
@@ -123,6 +139,7 @@ Future<ChatRealtimeService> _pumpConversationHome(
         realtimeService: realtimeService,
         session: session,
         controller: ChatConversationHomeController(),
+        messageCache: messageCache,
       ),
     ),
   );
@@ -195,6 +212,7 @@ void main() {
           }
 
           expect(beforeMessageId, 'message-100');
+          expect(request.url.queryParameters['limit'], '100');
           olderPageRequestCount++;
 
           return http.Response(
@@ -285,6 +303,217 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(routeOffset(), moreOrLessEquals(0, epsilon: 0.5));
+    },
+  );
+
+  testWidgets(
+    'a transient older-page failure retries without another user drag',
+    (WidgetTester tester) async {
+      int olderPageRequestCount = 0;
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          final String? beforeMessageId =
+              request.url.queryParameters['before_message_id'];
+
+          if (beforeMessageId == null) {
+            return http.Response(
+              jsonEncode(
+                List<Map<String, dynamic>>.generate(
+                  100,
+                  (int index) => _messageJson(index + 100),
+                ),
+              ),
+              200,
+              headers: const <String, String>{
+                'content-type': 'application/json',
+                'x-has-more': 'true',
+              },
+            );
+          }
+
+          expect(beforeMessageId, 'message-100');
+          olderPageRequestCount += 1;
+
+          if (olderPageRequestCount == 1) {
+            return http.Response('{}', 503);
+          }
+
+          return http.Response(
+            jsonEncode(List<Map<String, dynamic>>.generate(100, _messageJson)),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json',
+              'x-has-more': 'false',
+            },
+          );
+        },
+      );
+      addTearDown(realtimeService.dispose);
+
+      await tester.tap(find.text(_otherUser.displayName));
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      await tester.drag(listFinder, const Offset(0, 10000));
+      await tester.pump();
+
+      expect(olderPageRequestCount, 1);
+
+      await tester.pump(const Duration(milliseconds: 399));
+      expect(olderPageRequestCount, 1);
+
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pumpAndSettle();
+
+      expect(olderPageRequestCount, 2);
+      final ChatConversationView conversationView = tester
+          .widget<ChatConversationView>(find.byType(ChatConversationView));
+      expect(conversationView.initialMessages, hasLength(200));
+      expect(conversationView.initialMessages!.first.id, 'message-0');
+      expect(conversationView.initialMessages!.last.id, 'message-199');
+      expect(olderPageRequestCount, 2);
+    },
+  );
+
+  testWidgets(
+    'a reply quote loads its original outside the latest cached page',
+    (WidgetTester tester) async {
+      int contextRequestCount = 0;
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          if (request.url.path.contains('/around/')) {
+            contextRequestCount += 1;
+            final String targetMessageId = request.url.pathSegments.last;
+            final int targetIndex = int.parse(
+              targetMessageId.substring('message-'.length),
+            );
+            final int startIndex = targetIndex == 21 ? 0 : 369;
+            final int endIndex = targetIndex == 21 ? 52 : 400;
+
+            expect(request.url.queryParameters['older_limit'], '30');
+            expect(request.url.queryParameters['newer_limit'], '30');
+
+            return http.Response(
+              jsonEncode(<String, Object?>{
+                'messages': List<Map<String, dynamic>>.generate(
+                  endIndex - startIndex,
+                  (int offset) {
+                    final int index = startIndex + offset;
+                    return _messageJson(
+                      index,
+                      replyToIndex: index == 399 ? 21 : null,
+                    );
+                  },
+                ),
+                'has_more_older': startIndex > 0,
+                'has_more_newer': endIndex < 400,
+              }),
+              200,
+              headers: const <String, String>{
+                'content-type': 'application/json',
+              },
+            );
+          }
+
+          final String? beforeMessageId =
+              request.url.queryParameters['before_message_id'];
+
+          if (beforeMessageId == null) {
+            return http.Response(
+              jsonEncode(
+                List<Map<String, dynamic>>.generate(100, (int offset) {
+                  final int index = offset + 300;
+
+                  return _messageJson(
+                    index,
+                    replyToIndex: index == 399 ? 21 : null,
+                  );
+                }),
+              ),
+              200,
+              headers: const <String, String>{
+                'content-type': 'application/json',
+                'x-has-more': 'true',
+              },
+            );
+          }
+
+          throw StateError('Reply navigation must use the context endpoint.');
+        },
+      );
+      addTearDown(realtimeService.dispose);
+
+      await tester.tap(find.text(_otherUser.displayName));
+      await tester.pumpAndSettle();
+
+      final Finder quoteAreaFinder = find.byKey(
+        const ValueKey<String>('reply-quote-area-message-399'),
+      );
+      expect(quoteAreaFinder, findsOneWidget);
+
+      final Finder messageListFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Rect initialMessageListRect = tester.getRect(messageListFinder);
+      final double initialReplyTop =
+          tester.getRect(quoteAreaFinder).top - initialMessageListRect.top;
+
+      await tester.tap(quoteAreaFinder);
+
+      final Finder originalBubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-message-21'),
+      );
+      final Finder backButtonFinder = find.byKey(
+        const ValueKey<String>('back-to-reply-message'),
+      );
+
+      for (
+        int frame = 0;
+        frame < 80 && backButtonFinder.evaluate().isEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(contextRequestCount, 1);
+      expect(originalBubbleFinder, findsOneWidget);
+      expect(backButtonFinder, findsOneWidget);
+
+      final Rect messageListRect = tester.getRect(
+        find.byKey(const ValueKey<String>('message-list')),
+      );
+      final Rect originalBubbleRect = tester.getRect(originalBubbleFinder);
+      final double originalTopRatio =
+          (originalBubbleRect.top - messageListRect.top) /
+          messageListRect.height;
+
+      // RenderAbstractViewport may settle on a fractional physical pixel.
+      // Keep the expected placement band while allowing that subpixel rounding.
+      expect(originalTopRatio, inInclusiveRange(0.18, 0.39));
+
+      await tester.tap(backButtonFinder);
+
+      for (
+        int frame = 0;
+        frame < 80 && backButtonFinder.evaluate().isNotEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(backButtonFinder, findsNothing);
+      expect(quoteAreaFinder, findsOneWidget);
+      expect(contextRequestCount, 2);
+
+      final Rect returnedMessageListRect = tester.getRect(messageListFinder);
+      final double returnedReplyTop =
+          tester.getRect(quoteAreaFinder).top - returnedMessageListRect.top;
+
+      expect(returnedReplyTop, closeTo(initialReplyTop, 1));
     },
   );
 

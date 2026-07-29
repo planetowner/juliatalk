@@ -26,6 +26,7 @@ import '../domain/chat_message_grouper.dart';
 import 'chat_date_formatter.dart';
 import 'chat_photo_picker.dart';
 import 'read_receipt_formatter.dart';
+import 'reply_navigation_diagnostics.dart';
 
 const double _messageHorizontalPadding = 11;
 
@@ -118,6 +119,8 @@ typedef ChatMessageTranslationRetrier =
 
 typedef ChatMessageDeleter = Future<void> Function({required String messageId});
 typedef ChatOlderMessagesLoader = Future<void> Function();
+typedef ChatNewerMessagesLoader = Future<void> Function();
+typedef ChatMessageLoader = Future<bool> Function(String messageId);
 
 enum _CallNowAction { voice, video }
 
@@ -220,8 +223,13 @@ final class ChatConversationView extends StatefulWidget {
     this.photoLibrary,
     this.initialMessages,
     this.hasMoreMessages = false,
+    this.hasMoreNewerMessages = false,
     this.loadingOlderMessages = false,
+    this.loadingNewerMessages = false,
     this.onLoadOlderMessages,
+    this.onLoadNewerMessages,
+    this.onEnsureMessageLoaded,
+    this.showLatestReadReceipt = true,
     this.currentUserId = _currentUserId,
     this.currentUserName = _currentUserName,
     this.currentUserPreferredLanguage = _currentUserPreferredLanguage,
@@ -250,8 +258,13 @@ final class ChatConversationView extends StatefulWidget {
   final ChatPhotoLibrary? photoLibrary;
   final List<ChatMessage>? initialMessages;
   final bool hasMoreMessages;
+  final bool hasMoreNewerMessages;
   final bool loadingOlderMessages;
+  final bool loadingNewerMessages;
   final ChatOlderMessagesLoader? onLoadOlderMessages;
+  final ChatNewerMessagesLoader? onLoadNewerMessages;
+  final ChatMessageLoader? onEnsureMessageLoaded;
+  final bool showLatestReadReceipt;
   final String currentUserId;
   final String currentUserName;
   final String currentUserPreferredLanguage;
@@ -2422,8 +2435,13 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       key: _messageListKey,
                       initialMessages: widget.initialMessages,
                       hasMoreMessages: widget.hasMoreMessages,
+                      hasMoreNewerMessages: widget.hasMoreNewerMessages,
                       loadingOlderMessages: widget.loadingOlderMessages,
+                      loadingNewerMessages: widget.loadingNewerMessages,
                       onLoadOlderMessages: widget.onLoadOlderMessages,
+                      onLoadNewerMessages: widget.onLoadNewerMessages,
+                      onEnsureMessageLoaded: widget.onEnsureMessageLoaded,
+                      showLatestReadReceipt: widget.showLatestReadReceipt,
                       currentUserId: widget.currentUserId,
                       currentUserPreferredLanguage:
                           widget.currentUserPreferredLanguage,
@@ -5561,6 +5579,16 @@ final class _ViewportAnchorScrollController extends ScrollController {
 
     (position as _ViewportAnchorScrollPosition).endBottomAnchorPreservation();
   }
+
+  void correctPixelsForMessageRecenter(double pixels) {
+    if (!hasClients) {
+      return;
+    }
+
+    (position as _ViewportAnchorScrollPosition).correctPixelsForMessageRecenter(
+      pixels,
+    );
+  }
 }
 
 final class _ViewportAnchorScrollPosition
@@ -5604,6 +5632,10 @@ final class _ViewportAnchorScrollPosition
   void endBottomAnchorPreservation() {
     _preserveBottomAnchor = false;
     _preservedBottomDistance = null;
+  }
+
+  void correctPixelsForMessageRecenter(double pixels) {
+    correctPixels(pixels);
   }
 
   @override
@@ -5663,8 +5695,13 @@ final class _MessageList extends StatefulWidget {
   const _MessageList({
     required this.initialMessages,
     required this.hasMoreMessages,
+    required this.hasMoreNewerMessages,
     required this.loadingOlderMessages,
+    required this.loadingNewerMessages,
     required this.onLoadOlderMessages,
+    required this.onLoadNewerMessages,
+    required this.onEnsureMessageLoaded,
+    required this.showLatestReadReceipt,
     required this.currentUserId,
     required this.currentUserPreferredLanguage,
     required this.otherParticipantId,
@@ -5694,8 +5731,13 @@ final class _MessageList extends StatefulWidget {
 
   final List<ChatMessage>? initialMessages;
   final bool hasMoreMessages;
+  final bool hasMoreNewerMessages;
   final bool loadingOlderMessages;
+  final bool loadingNewerMessages;
   final ChatOlderMessagesLoader? onLoadOlderMessages;
+  final ChatNewerMessagesLoader? onLoadNewerMessages;
+  final ChatMessageLoader? onEnsureMessageLoaded;
+  final bool showLatestReadReceipt;
   final String currentUserId;
   final String currentUserPreferredLanguage;
   final String otherParticipantId;
@@ -5729,8 +5771,13 @@ final class _MessageList extends StatefulWidget {
 
 final class _MessageListState extends State<_MessageList> {
   static const double _replyOriginalAlignment = 0.28;
-  static const double _minimumOlderMessagesPrefetchExtent = 1200;
-  static const double _olderMessagesPrefetchViewportCount = 3;
+  static const Duration _replyNavigationSnapshotTimeout = Duration(
+    milliseconds: 80,
+  );
+  static const Duration _replyNavigationMaskDelay = Duration(milliseconds: 50);
+  static const int _maximumRememberedMessageScrollOffsets = 64;
+  static const double _minimumOlderMessagesPrefetchExtent = 2400;
+  static const double _olderMessagesPrefetchViewportCount = 6;
   static const int _bottomSettleRequiredStableFrames = 2;
   // 긴 번역문이 사라질 때는 AnimatedSwitcher(160ms)가 끝난 뒤
   // AnimatedSize(180ms)의 축소가 시작되므로 두 전환 전체를 덮는다.
@@ -5741,10 +5788,14 @@ final class _MessageListState extends State<_MessageList> {
   final Set<String> _showTranslatedMessageIds = <String>{};
   final Set<String> _historyPageBoundaryMessageIds = <String>{};
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
+  final Map<String, double> _rememberedMessageScrollOffsets =
+      <String, double>{};
+  final GlobalKey _messageListRepaintBoundaryKey = GlobalKey();
   final Key _historyCenterSliverKey = UniqueKey();
   late final _ViewportAnchorScrollController _scrollController;
   bool _didResolveInitialScrollPosition = false;
   bool _olderMessagesLoadInProgress = false;
+  bool _newerMessagesLoadInProgress = false;
   bool _bottomPinCanceledByUserScroll = false;
   bool _bottomSettleActive = false;
   bool _bottomSettleFrameScheduled = false;
@@ -5756,10 +5807,17 @@ final class _MessageListState extends State<_MessageList> {
 
   String? _highlightedMessageId;
   String? _historyCenterMessageId;
-  String? _returnToReplyMessageId;
-  double? _returnToReplyScrollOffset;
+  _MessageViewportAnchor? _returnToReplyAnchor;
+  ui.Image? _replyNavigationSnapshot;
 
   bool _replyNavigationInProgress = false;
+  bool _replyNavigationMaskActive = false;
+  bool _replyNavigationActivityVisible = false;
+  double? _messageNavigationCenterAnchor;
+  List<String> _cachedTimelineMessageIds = const <String>[];
+  Set<String> _cachedTimelinePageBoundaryMessageIds = const <String>{};
+  List<_TimelineMessageGroupRange> _cachedTimelineGroupRanges =
+      const <_TimelineMessageGroupRange>[];
 
   late DateTime _messageClock;
   late List<ChatMessage> _messages;
@@ -5878,6 +5936,7 @@ final class _MessageListState extends State<_MessageList> {
 
   void _handleMessageListScroll() {
     _maybeLoadOlderMessages();
+    _maybeLoadNewerMessages();
   }
 
   void _maybeLoadOlderMessages() {
@@ -5887,6 +5946,7 @@ final class _MessageListState extends State<_MessageList> {
     if (!mounted ||
         !_didResolveInitialScrollPosition ||
         _olderMessagesLoadInProgress ||
+        _replyNavigationInProgress ||
         widget.loadingOlderMessages ||
         !widget.hasMoreMessages ||
         onLoadOlderMessages == null ||
@@ -5944,10 +6004,76 @@ final class _MessageListState extends State<_MessageList> {
     }
   }
 
+  void _maybeLoadNewerMessages() {
+    final ChatNewerMessagesLoader? onLoadNewerMessages =
+        widget.onLoadNewerMessages;
+
+    if (!mounted ||
+        !_didResolveInitialScrollPosition ||
+        _newerMessagesLoadInProgress ||
+        _replyNavigationInProgress ||
+        widget.loadingNewerMessages ||
+        !widget.hasMoreNewerMessages ||
+        onLoadNewerMessages == null ||
+        !_scrollController.hasClients) {
+      return;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    final double loadThreshold = math.max(
+      _minimumOlderMessagesPrefetchExtent,
+      position.viewportDimension * _olderMessagesPrefetchViewportCount,
+    );
+
+    if (!position.hasContentDimensions ||
+        position.extentAfter > loadThreshold) {
+      return;
+    }
+
+    unawaited(_loadNewerMessages(onLoadNewerMessages));
+  }
+
+  Future<void> _loadNewerMessages(
+    ChatNewerMessagesLoader onLoadNewerMessages,
+  ) async {
+    if (_newerMessagesLoadInProgress) {
+      return;
+    }
+
+    _newerMessagesLoadInProgress = true;
+    final String? previousLastMessageId = _messages.isEmpty
+        ? null
+        : _messages.last.id;
+    bool loadedNewerMessages = false;
+
+    try {
+      await onLoadNewerMessages();
+      WidgetsBinding.instance.scheduleFrame();
+      await WidgetsBinding.instance.endOfFrame;
+
+      if (!mounted) {
+        return;
+      }
+
+      loadedNewerMessages =
+          previousLastMessageId !=
+          (_messages.isEmpty ? null : _messages.last.id);
+    } finally {
+      _newerMessagesLoadInProgress = false;
+    }
+
+    if (loadedNewerMessages && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _maybeLoadNewerMessages();
+      });
+    }
+  }
+
   @override
   void dispose() {
     _bottomAnchorPreservationTimer?.cancel();
     _messageHighlightTimer?.cancel();
+    _replyNavigationSnapshot?.dispose();
     _scrollController.removeListener(_handleMessageListScroll);
     _scrollController.dispose();
 
@@ -5978,21 +6104,50 @@ final class _MessageListState extends State<_MessageList> {
 
     final bool shouldPinToBottomAfterUpdate =
         !_olderMessagesLoadInProgress &&
+        !_newerMessagesLoadInProgress &&
+        !_replyNavigationInProgress &&
         (!_didResolveInitialScrollPosition || isNearBottom);
     final String? previousFirstMessageId = _messages.isEmpty
         ? null
         : _messages.first.id;
+    final String? previousLastMessageId = _messages.isEmpty
+        ? null
+        : _messages.last.id;
 
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
-    if (previousFirstMessageId != null &&
+    final Set<String> currentMessageIds = _messages
+        .map((ChatMessage message) => message.id)
+        .toSet();
+    _historyPageBoundaryMessageIds.removeWhere(
+      (String messageId) => !currentMessageIds.contains(messageId),
+    );
+    _rememberedMessageScrollOffsets.removeWhere(
+      (String messageId, double _) => !currentMessageIds.contains(messageId),
+    );
+    final bool olderMessagesWerePrepended =
+        previousFirstMessageId != null &&
         _messages.isNotEmpty &&
         _messages.first.id != previousFirstMessageId &&
         _messages.any(
           (ChatMessage message) => message.id == previousFirstMessageId,
-        )) {
+        );
+    if (olderMessagesWerePrepended) {
       _historyPageBoundaryMessageIds.add(previousFirstMessageId);
+    }
+    final int previousLastMessageIndex = previousLastMessageId == null
+        ? -1
+        : _messages.indexWhere(
+            (ChatMessage message) => message.id == previousLastMessageId,
+          );
+    final bool newerMessagesWereAppended =
+        previousLastMessageIndex >= 0 &&
+        previousLastMessageIndex + 1 < _messages.length;
+    if (newerMessagesWereAppended) {
+      _historyPageBoundaryMessageIds.add(
+        _messages[previousLastMessageIndex + 1].id,
+      );
     }
     if (_messages.isEmpty) {
       _historyCenterMessageId = null;
@@ -6007,6 +6162,17 @@ final class _MessageListState extends State<_MessageList> {
 
     if (shouldPinToBottomAfterUpdate) {
       _beginBottomSettle();
+    }
+
+    if (olderMessagesWerePrepended) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _maybeLoadOlderMessages();
+      });
+    }
+    if (newerMessagesWereAppended) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _maybeLoadNewerMessages();
+      });
     }
   }
 
@@ -6484,6 +6650,475 @@ final class _MessageListState extends State<_MessageList> {
     return renderObject;
   }
 
+  void _rememberMessageScrollOffset(String messageId, double scrollOffset) {
+    if (!scrollOffset.isFinite) {
+      return;
+    }
+
+    // Remove first so that reinserting the key also refreshes its eviction order.
+    _rememberedMessageScrollOffsets.remove(messageId);
+    _rememberedMessageScrollOffsets[messageId] = scrollOffset;
+
+    while (_rememberedMessageScrollOffsets.length >
+        _maximumRememberedMessageScrollOffsets) {
+      _rememberedMessageScrollOffsets.remove(
+        _rememberedMessageScrollOffsets.keys.first,
+      );
+    }
+  }
+
+  _MessageViewportAnchor? _captureMessageViewportAnchor(String messageId) {
+    if (!_scrollController.hasClients) {
+      return null;
+    }
+
+    final RenderObject? renderObject = _messageRenderObject(messageId);
+
+    if (renderObject == null) {
+      return null;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+      renderObject,
+    );
+    final double leadingOffset = viewport
+        .getOffsetToReveal(renderObject, 0)
+        .offset;
+    _rememberMessageScrollOffset(messageId, position.pixels);
+
+    return _MessageViewportAnchor(
+      messageId: messageId,
+      leadingViewportOffset: leadingOffset - position.pixels,
+      fallbackScrollOffset: position.pixels,
+    );
+  }
+
+  Future<bool> _showReplyNavigationSnapshot({
+    bool showActivityIndicator = false,
+  }) async {
+    if (!mounted || _replyNavigationMaskActive) {
+      return _replyNavigationMaskActive;
+    }
+
+    _replyNavigationActivityVisible = showActivityIndicator;
+
+    try {
+      return await _captureReplyNavigationSnapshot();
+    } catch (error) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] snapshot-fallback '
+        'reason=outer-${error.runtimeType}',
+      );
+
+      if (!mounted) {
+        return false;
+      }
+
+      // 캡처 준비 과정 어디에서 실패하더라도 원문 탐색을 중단하지 않는다.
+      // 다음 scroll jump가 만드는 프레임에서 이 불투명 마스크가 함께
+      // 그려지므로 여기서 별도의 프레임을 기다릴 필요가 없다.
+      setState(() {
+        _replyNavigationMaskActive = true;
+      });
+      return true;
+    }
+  }
+
+  Future<bool> _captureReplyNavigationSnapshot() async {
+    final RenderObject? boundaryRenderObject = _messageListRepaintBoundaryKey
+        .currentContext
+        ?.findRenderObject();
+
+    if (boundaryRenderObject is! RenderRepaintBoundary ||
+        !boundaryRenderObject.attached) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] snapshot-fallback reason=no-boundary',
+      );
+      setState(() {
+        _replyNavigationMaskActive = true;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      return mounted;
+    }
+
+    final RenderRepaintBoundary boundary = boundaryRenderObject;
+    ui.Image? snapshot;
+    Future<ui.Image>? snapshotFuture;
+
+    try {
+      final double devicePixelRatio = math.min(
+        View.of(context).devicePixelRatio,
+        1.5,
+      );
+      final Future<ui.Image> activeSnapshotFuture = boundary.toImage(
+        pixelRatio: devicePixelRatio,
+      );
+      snapshotFuture = activeSnapshotFuture;
+      snapshot = await activeSnapshotFuture.timeout(
+        _replyNavigationSnapshotTimeout,
+      );
+    } catch (error) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] snapshot-fallback '
+        'reason=${error.runtimeType}',
+      );
+      final Future<ui.Image>? lateSnapshotFuture = snapshotFuture;
+
+      if (lateSnapshotFuture != null) {
+        unawaited(
+          lateSnapshotFuture.then<void>((ui.Image lateSnapshot) {
+            lateSnapshot.dispose();
+          }, onError: (Object _, StackTrace _) {}),
+        );
+      }
+
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        _replyNavigationMaskActive = true;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      return mounted;
+    }
+
+    final ui.Image capturedSnapshot = snapshot;
+
+    if (!mounted || !_replyNavigationInProgress) {
+      capturedSnapshot.dispose();
+      return false;
+    }
+
+    setState(() {
+      _replyNavigationMaskActive = true;
+      _replyNavigationSnapshot = capturedSnapshot;
+    });
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] snapshot-ready '
+      'size=${capturedSnapshot.width}x${capturedSnapshot.height}',
+    );
+
+    WidgetsBinding.instance.scheduleFrame();
+    await WidgetsBinding.instance.endOfFrame;
+
+    return mounted && identical(_replyNavigationSnapshot, capturedSnapshot);
+  }
+
+  void _hideReplyNavigationSnapshot() {
+    final ui.Image? snapshot = _replyNavigationSnapshot;
+
+    if (snapshot == null && !_replyNavigationMaskActive) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _replyNavigationMaskActive = false;
+        _replyNavigationActivityVisible = false;
+        _replyNavigationSnapshot = null;
+      });
+
+      if (snapshot != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          snapshot.dispose();
+        });
+      }
+      return;
+    }
+
+    _replyNavigationMaskActive = false;
+    _replyNavigationActivityVisible = false;
+    _replyNavigationSnapshot = null;
+    snapshot?.dispose();
+  }
+
+  String? _messageGroupStartIdFor(String messageId) {
+    int messageIndex = _messages.indexWhere(
+      (ChatMessage message) => message.id == messageId,
+    );
+
+    if (messageIndex == -1) {
+      return null;
+    }
+
+    while (messageIndex > 0) {
+      final ChatMessage message = _messages[messageIndex];
+      final ChatMessage previousMessage = _messages[messageIndex - 1];
+      final bool continuesPreviousGroup =
+          !_historyPageBoundaryMessageIds.contains(message.id) &&
+          message.senderId == previousMessage.senderId &&
+          isSameChatMinute(previousMessage.createdAt, message.createdAt);
+
+      if (!continuesPreviousGroup) {
+        break;
+      }
+
+      messageIndex -= 1;
+    }
+
+    return _messages[messageIndex].id;
+  }
+
+  Future<bool> _renderMessageByRecentering(
+    String messageId, {
+    required double alignment,
+  }) async {
+    if (!mounted || !_scrollController.hasClients) {
+      return false;
+    }
+
+    if (_messageRenderObject(messageId) != null) {
+      return true;
+    }
+
+    final String? centerMessageId = _messageGroupStartIdFor(messageId);
+
+    if (centerMessageId == null) {
+      return false;
+    }
+
+    final bool centerChanged = _historyCenterMessageId != centerMessageId;
+
+    _stopScrollingAtCurrentOffset();
+    setState(() {
+      if (centerChanged) {
+        _historyCenterMessageId = centerMessageId;
+        _rememberedMessageScrollOffsets.clear();
+      }
+
+      // 중심 sliver 자체를 목표 정렬 지점에 놓아 첫 레이아웃부터
+      // 대상 말풍선이 최종 위치 부근에 나타나게 한다.
+      _messageNavigationCenterAnchor = alignment.clamp(0.0, 1.0).toDouble();
+    });
+    _scrollController.correctPixelsForMessageRecenter(0);
+
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] scroll-recenter '
+      'target=$messageId center=$centerMessageId changed=$centerChanged',
+    );
+
+    await WidgetsBinding.instance.endOfFrame;
+
+    return mounted && _messageRenderObject(messageId) != null;
+  }
+
+  Future<bool> _normalizeMessageNavigationCenterAnchor(
+    double targetOffset,
+  ) async {
+    final double? navigationAnchor = _messageNavigationCenterAnchor;
+
+    if (navigationAnchor == null || !mounted || !_scrollController.hasClients) {
+      return navigationAnchor == null;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    final double viewportDimension = position.viewportDimension;
+    final double defaultCenterAnchor = viewportDimension <= 0
+        ? 0
+        : (widget.topPadding / viewportDimension).clamp(0.0, 1.0).toDouble();
+    final double normalizedOffset =
+        targetOffset +
+        ((defaultCenterAnchor - navigationAnchor) * viewportDimension);
+
+    setState(() {
+      _messageNavigationCenterAnchor = null;
+    });
+    _scrollController.correctPixelsForMessageRecenter(normalizedOffset);
+
+    await WidgetsBinding.instance.endOfFrame;
+
+    return mounted && _scrollController.hasClients;
+  }
+
+  Future<bool> _recenterAndScrollToMessage(
+    String messageId, {
+    required double alignment,
+  }) async {
+    final bool didRenderMessage = await _renderMessageByRecentering(
+      messageId,
+      alignment: alignment,
+    );
+
+    if (!didRenderMessage) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] scroll-recenter-fallback target=$messageId',
+      );
+
+      if (_messageNavigationCenterAnchor != null &&
+          mounted &&
+          _scrollController.hasClients) {
+        await _normalizeMessageNavigationCenterAnchor(
+          _scrollController.position.pixels,
+        );
+      }
+    } else if (_messageNavigationCenterAnchor != null) {
+      final RenderObject? renderObject = _messageRenderObject(messageId);
+
+      if (renderObject != null) {
+        final double targetOffset = _targetScrollOffsetForRenderedMessage(
+          renderObject,
+          alignment: alignment,
+        );
+        await _normalizeMessageNavigationCenterAnchor(targetOffset);
+      }
+    }
+
+    // 예상하지 못한 레이아웃 구성에서도 기존의 범위 탐색으로 복구한다.
+    return _scrollToMessage(messageId, alignment: alignment);
+  }
+
+  Future<bool> _restoreMessageViewportAnchor(
+    _MessageViewportAnchor anchor,
+  ) async {
+    if (!mounted || !_scrollController.hasClients) {
+      return false;
+    }
+
+    final ScrollPosition initialPosition = _scrollController.position;
+    final double initialAlignment = initialPosition.viewportDimension <= 0
+        ? _replyOriginalAlignment
+        : (anchor.leadingViewportOffset / initialPosition.viewportDimension)
+              .clamp(0.0, 1.0)
+              .toDouble();
+    final bool didRenderMessage = await _renderMessageByRecentering(
+      anchor.messageId,
+      alignment: initialAlignment,
+    );
+    if (didRenderMessage && _messageNavigationCenterAnchor != null) {
+      final RenderObject? renderObject = _messageRenderObject(anchor.messageId);
+
+      if (renderObject != null) {
+        final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+          renderObject,
+        );
+        final double leadingOffset = viewport
+            .getOffsetToReveal(renderObject, 0)
+            .offset;
+        await _normalizeMessageNavigationCenterAnchor(
+          leadingOffset - anchor.leadingViewportOffset,
+        );
+      }
+    } else if (!didRenderMessage &&
+        _messageNavigationCenterAnchor != null &&
+        mounted &&
+        _scrollController.hasClients) {
+      await _normalizeMessageNavigationCenterAnchor(
+        _scrollController.position.pixels,
+      );
+    }
+    final bool didFindMessage =
+        didRenderMessage ||
+        await _scrollToMessage(anchor.messageId, alignment: initialAlignment);
+
+    if (!didFindMessage || !mounted || !_scrollController.hasClients) {
+      final ScrollPosition position = _scrollController.position;
+      final double fallbackOffset = anchor.fallbackScrollOffset
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+
+      if ((fallbackOffset - position.pixels).abs() >= 0.5) {
+        _scrollController.jumpTo(fallbackOffset);
+        await WidgetsBinding.instance.endOfFrame;
+      }
+
+      return false;
+    }
+
+    int stableFrameCount = 0;
+
+    for (int attempt = 0; attempt < 6; attempt++) {
+      if (!mounted || !_scrollController.hasClients) {
+        return false;
+      }
+
+      final RenderObject? renderObject = _messageRenderObject(anchor.messageId);
+
+      if (renderObject == null) {
+        return false;
+      }
+
+      final ScrollPosition position = _scrollController.position;
+      final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+        renderObject,
+      );
+      final double leadingOffset = viewport
+          .getOffsetToReveal(renderObject, 0)
+          .offset;
+      final double targetOffset = (leadingOffset - anchor.leadingViewportOffset)
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+
+      if ((targetOffset - position.pixels).abs() < 0.5) {
+        stableFrameCount += 1;
+
+        if (stableFrameCount >= 2) {
+          _rememberMessageScrollOffset(anchor.messageId, position.pixels);
+          return true;
+        }
+
+        WidgetsBinding.instance.scheduleFrame();
+        await WidgetsBinding.instance.endOfFrame;
+        continue;
+      }
+
+      stableFrameCount = 0;
+      _scrollController.jumpTo(targetOffset);
+      await WidgetsBinding.instance.endOfFrame;
+    }
+
+    return false;
+  }
+
+  double _targetScrollOffsetForRenderedMessage(
+    RenderObject renderObject, {
+    required double alignment,
+  }) {
+    final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+      renderObject,
+    );
+    final ScrollPosition position = _scrollController.position;
+    final RevealedOffset leadingReveal = viewport.getOffsetToReveal(
+      renderObject,
+      0,
+    );
+    final RevealedOffset trailingReveal = viewport.getOffsetToReveal(
+      renderObject,
+      1,
+    );
+    final RevealedOffset desiredReveal = viewport.getOffsetToReveal(
+      renderObject,
+      alignment,
+    );
+    final double fullyVisibleMinimum = math.min(
+      leadingReveal.offset,
+      trailingReveal.offset,
+    );
+    final double fullyVisibleMaximum = math.max(
+      leadingReveal.offset,
+      trailingReveal.offset,
+    );
+    final double targetHeight = renderObject is RenderBox
+        ? renderObject.size.height
+        : desiredReveal.rect.height;
+    final bool canFitEntireMessage =
+        targetHeight <= position.viewportDimension + 0.5;
+    double targetOffset = desiredReveal.offset;
+
+    if (canFitEntireMessage) {
+      // 요청한 정렬을 우선하되, 긴 원문이 잘리는 경우에는
+      // 말풍선 전체가 보이는 범위 안으로 위치를 보정한다.
+      targetOffset = targetOffset
+          .clamp(fullyVisibleMinimum, fullyVisibleMaximum)
+          .toDouble();
+    }
+
+    return targetOffset
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+  }
+
   Future<bool> _scrollToMessage(
     String messageId, {
     required double alignment,
@@ -6491,14 +7126,36 @@ final class _MessageListState extends State<_MessageList> {
     final int targetIndex = _messages.indexWhere(
       (ChatMessage message) => message.id == messageId,
     );
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] scroll-start '
+      'target=$messageId index=$targetIndex messages=${_messages.length} '
+      'clients=${_scrollController.hasClients}',
+    );
 
     if (targetIndex == -1) {
+      _rememberedMessageScrollOffsets.remove(messageId);
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] scroll-stop target=$messageId missing',
+      );
       return false;
     }
 
-    bool usedEstimatedOffset = false;
+    if (!_scrollController.hasClients) {
+      return false;
+    }
 
-    for (int attempt = 0; attempt < 14; attempt++) {
+    final double initialScrollOffset = _scrollController.position.pixels;
+    final Map<String, int> messageIndexById = <String, int>{
+      for (int index = 0; index < _messages.length; index++)
+        _messages[index].id: index,
+    };
+    double lowerOffsetBound = _scrollController.position.minScrollExtent;
+    double upperOffsetBound = _scrollController.position.maxScrollExtent;
+    bool hasObservedLowerBound = false;
+    bool hasObservedUpperBound = false;
+    bool usedInitialEstimate = false;
+
+    for (int attempt = 0; attempt < 28; attempt++) {
       if (!mounted || !_scrollController.hasClients) {
         return false;
       }
@@ -6506,136 +7163,234 @@ final class _MessageListState extends State<_MessageList> {
       final RenderObject? targetRenderObject = _messageRenderObject(messageId);
 
       if (targetRenderObject != null) {
-        double targetOffsetFor(RenderObject renderObject) {
-          final RenderAbstractViewport viewport = RenderAbstractViewport.of(
-            renderObject,
-          );
-
-          final ScrollPosition position = _scrollController.position;
-
-          final RevealedOffset leadingReveal = viewport.getOffsetToReveal(
-            renderObject,
-            0,
-          );
-
-          final RevealedOffset trailingReveal = viewport.getOffsetToReveal(
-            renderObject,
-            1,
-          );
-
-          final RevealedOffset desiredReveal = viewport.getOffsetToReveal(
-            renderObject,
-            alignment,
-          );
-
-          final double fullyVisibleMinimum = math.min(
-            leadingReveal.offset,
-            trailingReveal.offset,
-          );
-
-          final double fullyVisibleMaximum = math.max(
-            leadingReveal.offset,
-            trailingReveal.offset,
-          );
-
-          final double targetHeight = renderObject is RenderBox
-              ? renderObject.size.height
-              : desiredReveal.rect.height;
-
-          final bool canFitEntireMessage =
-              targetHeight <= position.viewportDimension + 0.5;
-
-          double targetOffset = desiredReveal.offset;
-
-          if (canFitEntireMessage) {
-            // 상단 28% 배치를 우선하되, 긴 원문이 잘리는 경우에는
-            // 말풍선 전체가 보이는 범위 안으로 위치를 보정한다.
-            targetOffset = targetOffset
-                .clamp(fullyVisibleMinimum, fullyVisibleMaximum)
-                .toDouble();
-          }
-
-          return targetOffset
-              .clamp(position.minScrollExtent, position.maxScrollExtent)
-              .toDouble();
-        }
-
-        double targetOffset = targetOffsetFor(targetRenderObject);
-
-        if ((targetOffset - _scrollController.position.pixels).abs() >= 0.5) {
-          // 카카오톡처럼 중간 스크롤 과정을 보여주지 않고
-          // 계산된 원문 위치로 즉시 이동한다.
-          _scrollController.jumpTo(targetOffset);
-        }
-
-        await WidgetsBinding.instance.endOfFrame;
-
-        if (!mounted || !_scrollController.hasClients) {
-          return false;
-        }
-
-        final RenderObject? settledTargetRenderObject = _messageRenderObject(
-          messageId,
+        ReplyNavigationDiagnostics.record(
+          '[reply-navigation] scroll-rendered '
+          'target=$messageId attempt=$attempt '
+          'pixels=${_scrollController.position.pixels}',
         );
+        RenderObject? settledTargetRenderObject = targetRenderObject;
 
-        if (settledTargetRenderObject != null) {
-          targetOffset = targetOffsetFor(settledTargetRenderObject);
-
-          if ((targetOffset - _scrollController.position.pixels).abs() >= 0.5) {
-            _scrollController.jumpTo(targetOffset);
-            await WidgetsBinding.instance.endOfFrame;
+        for (int settleAttempt = 0; settleAttempt < 6; settleAttempt++) {
+          if (!mounted ||
+              !_scrollController.hasClients ||
+              settledTargetRenderObject == null) {
+            return false;
           }
+
+          final double targetOffset = _targetScrollOffsetForRenderedMessage(
+            settledTargetRenderObject,
+            alignment: alignment,
+          );
+          final double offsetDifference =
+              targetOffset - _scrollController.position.pixels;
+
+          if (offsetDifference.abs() < 0.5) {
+            _rememberMessageScrollOffset(
+              messageId,
+              _scrollController.position.pixels,
+            );
+            ReplyNavigationDiagnostics.record(
+              '[reply-navigation] scroll-success '
+              'target=$messageId settle=$settleAttempt '
+              'pixels=${_scrollController.position.pixels}',
+            );
+            return true;
+          } else {
+            _scrollController.jumpTo(targetOffset);
+          }
+
+          WidgetsBinding.instance.scheduleFrame();
+          await WidgetsBinding.instance.endOfFrame;
+          settledTargetRenderObject = _messageRenderObject(messageId);
         }
 
-        return mounted;
-      }
-
-      final ScrollPosition position = _scrollController.position;
-
-      final double scrollRange =
-          position.maxScrollExtent - position.minScrollExtent;
-
-      if (scrollRange <= 0) {
         return false;
       }
 
-      final double targetRatio = _messages.length <= 1
-          ? 0
-          : targetIndex / (_messages.length - 1);
+      final ScrollPosition position = _scrollController.position;
+      lowerOffsetBound = hasObservedLowerBound
+          ? lowerOffsetBound
+                .clamp(position.minScrollExtent, position.maxScrollExtent)
+                .toDouble()
+          : position.minScrollExtent;
+      upperOffsetBound = hasObservedUpperBound
+          ? upperOffsetBound
+                .clamp(position.minScrollExtent, position.maxScrollExtent)
+                .toDouble()
+          : position.maxScrollExtent;
 
+      final _RenderedMessageIndexRange? renderedRange =
+          _renderedMessageIndexRange(messageIndexById, position: position);
+
+      if (renderedRange != null) {
+        if (targetIndex < renderedRange.first) {
+          upperOffsetBound = math.min(upperOffsetBound, position.pixels);
+          hasObservedUpperBound = true;
+        } else if (targetIndex > renderedRange.last) {
+          lowerOffsetBound = math.max(lowerOffsetBound, position.pixels);
+          hasObservedLowerBound = true;
+        } else {
+          await WidgetsBinding.instance.endOfFrame;
+          continue;
+        }
+      }
+
+      final double scrollRange = upperOffsetBound - lowerOffsetBound;
+
+      if (scrollRange <= 0) {
+        break;
+      }
+
+      final double? renderedEstimate = renderedRange?.estimateScrollOffset(
+        targetIndex,
+      );
+      final double? usableRenderedEstimate = renderedEstimate
+          ?.clamp(lowerOffsetBound, upperOffsetBound)
+          .toDouble();
       final double targetOffset;
 
-      if (!usedEstimatedOffset) {
-        targetOffset = position.minScrollExtent + (scrollRange * targetRatio);
+      if (!usedInitialEstimate) {
+        usedInitialEstimate = true;
+        final double? rememberedOffset =
+            _rememberedMessageScrollOffsets[messageId];
+        final double? usableRememberedOffset = rememberedOffset
+            ?.clamp(lowerOffsetBound, upperOffsetBound)
+            .toDouble();
 
-        usedEstimatedOffset = true;
+        if (usableRememberedOffset != null &&
+            (usableRememberedOffset - position.pixels).abs() >= 0.5) {
+          targetOffset = usableRememberedOffset;
+          ReplyNavigationDiagnostics.record(
+            '[reply-navigation] scroll-cache-hit '
+            'target=$messageId offset=$targetOffset',
+          );
+        } else if (usableRenderedEstimate != null &&
+            (usableRenderedEstimate - position.pixels).abs() >= 0.5) {
+          targetOffset = usableRenderedEstimate;
+          ReplyNavigationDiagnostics.record(
+            '[reply-navigation] scroll-measured-estimate '
+            'target=$messageId offset=$targetOffset',
+          );
+        } else {
+          if (rememberedOffset != null) {
+            _rememberedMessageScrollOffsets.remove(messageId);
+          }
+
+          final double targetRatio = _messages.length <= 1
+              ? 0
+              : targetIndex / (_messages.length - 1);
+          targetOffset =
+              (position.minScrollExtent +
+                      ((position.maxScrollExtent - position.minScrollExtent) *
+                          targetRatio))
+                  .clamp(lowerOffsetBound, upperOffsetBound)
+                  .toDouble();
+        }
+      } else if (usableRenderedEstimate != null &&
+          (usableRenderedEstimate - position.pixels).abs() >= 0.5) {
+        targetOffset = usableRenderedEstimate;
+        ReplyNavigationDiagnostics.record(
+          '[reply-navigation] scroll-measured-estimate '
+          'target=$messageId offset=$targetOffset',
+        );
       } else {
-        final double currentRatio =
-            ((position.pixels - position.minScrollExtent) / scrollRange)
-                .clamp(0.0, 1.0)
-                .toDouble();
-
-        final double direction = targetRatio < currentRatio ? -1.0 : 1.0;
-
-        targetOffset =
-            (position.pixels + (direction * position.viewportDimension * 0.72))
-                .clamp(position.minScrollExtent, position.maxScrollExtent)
-                .toDouble();
+        targetOffset = (lowerOffsetBound + upperOffsetBound) / 2;
       }
 
       if ((targetOffset - position.pixels).abs() < 0.5) {
-        await WidgetsBinding.instance.endOfFrame;
-        continue;
+        break;
       }
 
-      // 화면 밖의 위젯이 아직 렌더링되지 않았을 때도
-      // 중간 스크롤 애니메이션 없이 예상 위치로 바로 이동한다.
+      // 화면 밖 원문은 현재 렌더링된 메시지들의 실제 픽셀 간격으로
+      // 다음 위치를 추정하고, 추정할 수 없으면 탐색 구간을 절반으로
+      // 좁힌다. 최종 위치는 실제 원문 말풍선이 생긴 뒤에만 확정한다.
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] scroll-probe '
+        'target=$messageId attempt=$attempt offset=$targetOffset '
+        'pixels=${position.pixels} min=${position.minScrollExtent} '
+        'max=${position.maxScrollExtent} '
+        'rendered=${renderedRange?.first}-${renderedRange?.last}',
+      );
       _scrollController.jumpTo(targetOffset);
 
       await WidgetsBinding.instance.endOfFrame;
     }
 
+    if (mounted && _scrollController.hasClients) {
+      final ScrollPosition position = _scrollController.position;
+      final double restoredOffset = initialScrollOffset
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+
+      if ((restoredOffset - position.pixels).abs() >= 0.5) {
+        _scrollController.jumpTo(restoredOffset);
+        await WidgetsBinding.instance.endOfFrame;
+      }
+    }
+
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] scroll-failed '
+      'target=$messageId restored=$initialScrollOffset',
+    );
     return false;
+  }
+
+  _RenderedMessageIndexRange? _renderedMessageIndexRange(
+    Map<String, int> messageIndexById, {
+    required ScrollPosition position,
+  }) {
+    int? firstIndex;
+    int? lastIndex;
+    double? firstRevealOffset;
+    double? lastRevealOffset;
+
+    for (final MapEntry<String, GlobalKey> entry
+        in _messageBubbleKeys.entries) {
+      final int? messageIndex = messageIndexById[entry.key];
+
+      final RenderObject? renderObject = _messageRenderObject(entry.key);
+
+      if (messageIndex == null || renderObject == null) {
+        continue;
+      }
+
+      final RenderAbstractViewport viewport = RenderAbstractViewport.of(
+        renderObject,
+      );
+      final double revealOffset = viewport
+          .getOffsetToReveal(renderObject, 0.5)
+          .offset;
+      final double nearbyExtent = position.viewportDimension * 1.5;
+
+      if (revealOffset < position.pixels - nearbyExtent ||
+          revealOffset > position.pixels + nearbyExtent) {
+        continue;
+      }
+
+      if (firstIndex == null || messageIndex < firstIndex) {
+        firstIndex = messageIndex;
+        firstRevealOffset = revealOffset;
+      }
+
+      if (lastIndex == null || messageIndex > lastIndex) {
+        lastIndex = messageIndex;
+        lastRevealOffset = revealOffset;
+      }
+    }
+
+    if (firstIndex == null ||
+        lastIndex == null ||
+        firstRevealOffset == null ||
+        lastRevealOffset == null) {
+      return null;
+    }
+
+    return _RenderedMessageIndexRange(
+      first: firstIndex,
+      last: lastIndex,
+      firstRevealOffset: firstRevealOffset,
+      lastRevealOffset: lastRevealOffset,
+    );
   }
 
   Future<bool> scrollToSearchMessage(String messageId) {
@@ -6700,27 +7455,128 @@ final class _MessageListState extends State<_MessageList> {
     });
   }
 
+  Future<bool> _ensureNavigationMessageAvailable(
+    String messageId, {
+    bool rebuildLoadedWindow = false,
+  }) async {
+    if (!rebuildLoadedWindow && _findMessage(messageId) != null) {
+      return true;
+    }
+
+    final ChatMessageLoader? ensureMessageLoaded = widget.onEnsureMessageLoaded;
+
+    if (ensureMessageLoaded == null) {
+      return _findMessage(messageId) != null;
+    }
+
+    // A local context switch normally completes before a screenshot can be
+    // captured. Keep the current frame frozen only for an actual disk/network
+    // wait so cached quote navigation remains immediate.
+    final Future<bool> loadMessageFuture = ensureMessageLoaded(messageId);
+    bool shouldShowMask = true;
+    bool maskCaptureStarted = false;
+    final Future<bool> maskFuture = Future<bool>.delayed(
+      _replyNavigationMaskDelay,
+      () async {
+        if (!shouldShowMask || !mounted) {
+          return false;
+        }
+
+        maskCaptureStarted = true;
+        return _showReplyNavigationSnapshot(showActivityIndicator: true);
+      },
+    );
+    final bool didLoadMessage = await loadMessageFuture;
+    shouldShowMask = false;
+
+    if (maskCaptureStarted) {
+      final bool didShowMask = await maskFuture;
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] mask-result '
+        'target=$messageId shown=$didShowMask '
+        'snapshot=${_replyNavigationSnapshot != null}',
+      );
+    } else {
+      unawaited(maskFuture.then<void>((bool _) {}));
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] mask-skipped '
+        'target=$messageId reason=fast-load',
+      );
+    }
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] load-result '
+      'target=$messageId loaded=$didLoadMessage '
+      'present=${_findMessage(messageId) != null}',
+    );
+
+    if (!didLoadMessage || !mounted) {
+      return false;
+    }
+
+    WidgetsBinding.instance.scheduleFrame();
+    await WidgetsBinding.instance.endOfFrame;
+    return mounted && _findMessage(messageId) != null;
+  }
+
   Future<void> _handleReplyQuoteTap({
     required String replyMessageId,
     required String originalMessageId,
   }) async {
+    ReplyNavigationDiagnostics.reset();
+
     if (_replyNavigationInProgress ||
         _findMessage(replyMessageId) == null ||
-        _findMessage(originalMessageId) == null ||
         !_scrollController.hasClients) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] tap-rejected '
+        'reply=$replyMessageId original=$originalMessageId '
+        'inProgress=$_replyNavigationInProgress '
+        'replyLoaded=${_findMessage(replyMessageId) != null} '
+        'clients=${_scrollController.hasClients}',
+      );
       return;
     }
+    ReplyNavigationDiagnostics.record(
+      '[reply-navigation] tap-start '
+      'reply=$replyMessageId original=$originalMessageId '
+      'originalLoaded=${_findMessage(originalMessageId) != null} '
+      'originalRendered=${_messageRenderObject(originalMessageId) != null} '
+      'pixels=${_scrollController.position.pixels}',
+    );
 
-    // 원문으로 이동하기 직전 보고 있던 화면의 정확한 스크롤 위치를
-    // 먼저 저장한다.
-    final double returnScrollOffset = _scrollController.position.pixels;
+    // 픽셀 오프셋은 lazy sliver의 측정 범위가 바뀌면 같은 메시지를
+    // 가리키지 않을 수 있다. 답장 말풍선과 현재 viewport 사이의
+    // 상대 위치를 저장해 복귀할 때 다시 계산한다.
+    final _MessageViewportAnchor? returnAnchor = _captureMessageViewportAnchor(
+      replyMessageId,
+    );
+
+    if (returnAnchor == null) {
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] tap-stop reply=$replyMessageId anchor=false',
+      );
+      return;
+    }
 
     _replyNavigationInProgress = true;
 
     try {
-      final bool didNavigate = await _scrollToMessage(
+      if (_messageRenderObject(originalMessageId) == null &&
+          !await _ensureNavigationMessageAvailable(
+            originalMessageId,
+            rebuildLoadedWindow: true,
+          )) {
+        return;
+      }
+
+      final bool didNavigate = await _recenterAndScrollToMessage(
         originalMessageId,
         alignment: _replyOriginalAlignment,
+      );
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] navigate-result '
+        'target=$originalMessageId result=$didNavigate '
+        'pixels=${_scrollController.hasClients ? _scrollController.position.pixels : null}',
       );
 
       if (!mounted || !didNavigate) {
@@ -6728,68 +7584,55 @@ final class _MessageListState extends State<_MessageList> {
       }
 
       setState(() {
-        _returnToReplyMessageId = replyMessageId;
-        _returnToReplyScrollOffset = returnScrollOffset;
+        _returnToReplyAnchor = returnAnchor;
       });
 
       // 즉시 이동한 화면이 페인트된 뒤 원문 펄스를 실행한다.
       _flashMessage(originalMessageId);
     } finally {
+      _hideReplyNavigationSnapshot();
       _replyNavigationInProgress = false;
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] tap-finished '
+        'reply=$replyMessageId original=$originalMessageId',
+      );
     }
   }
 
   Future<void> _handleBackToReplyMessage() async {
-    final String? replyMessageId = _returnToReplyMessageId;
+    final _MessageViewportAnchor? returnAnchor = _returnToReplyAnchor;
 
-    final double? returnScrollOffset = _returnToReplyScrollOffset;
-
-    if (replyMessageId == null ||
-        returnScrollOffset == null ||
-        _replyNavigationInProgress) {
+    if (returnAnchor == null || _replyNavigationInProgress) {
       return;
     }
 
-    if (_findMessage(replyMessageId) == null || !_scrollController.hasClients) {
-      if (mounted) {
-        setState(() {
-          _returnToReplyMessageId = null;
-          _returnToReplyScrollOffset = null;
-        });
-      }
-
+    if (!_scrollController.hasClients) {
       return;
     }
 
     _replyNavigationInProgress = true;
 
     try {
-      final ScrollPosition position = _scrollController.position;
+      if (!await _ensureNavigationMessageAvailable(returnAnchor.messageId)) {
+        return;
+      }
 
-      final double restoredOffset = returnScrollOffset
-          .clamp(position.minScrollExtent, position.maxScrollExtent)
-          .toDouble();
+      final bool didRestore = await _restoreMessageViewportAnchor(returnAnchor);
 
-      // 답장 메시지를 특정 위치에 정렬하지 않고,
-      // 인용문을 탭하기 직전의 화면을 그대로 복원한다.
-      _scrollController.jumpTo(restoredOffset);
-
-      await WidgetsBinding.instance.endOfFrame;
-
-      if (!mounted) {
+      if (!mounted || !didRestore) {
         return;
       }
 
       setState(() {
-        _returnToReplyMessageId = null;
-        _returnToReplyScrollOffset = null;
+        _returnToReplyAnchor = null;
       });
 
       // 원래 화면으로 복원된 뒤 해당 답장 말풍선에 같은 펄스를 준다.
-      if (_messageRenderObject(replyMessageId) != null) {
-        _flashMessage(replyMessageId);
+      if (_messageRenderObject(returnAnchor.messageId) != null) {
+        _flashMessage(returnAnchor.messageId);
       }
     } finally {
+      _hideReplyNavigationSnapshot();
       _replyNavigationInProgress = false;
     }
   }
@@ -7162,9 +8005,8 @@ final class _MessageListState extends State<_MessageList> {
         _highlightedMessageId = null;
       }
 
-      if (_returnToReplyMessageId == messageId) {
-        _returnToReplyMessageId = null;
-        _returnToReplyScrollOffset = null;
+      if (_returnToReplyAnchor?.messageId == messageId) {
+        _returnToReplyAnchor = null;
       }
     });
   }
@@ -7280,11 +8122,6 @@ final class _MessageListState extends State<_MessageList> {
         )) {
       _historyCenterMessageId = _messages.first.id;
     }
-    final String? historyCenterMessageId = _historyCenterMessageId;
-    if (historyCenterMessageId != null) {
-      _historyPageBoundaryMessageIds.add(historyCenterMessageId);
-    }
-
     final int historyCenterIndex = _historyCenterMessageId == null
         ? 0
         : _messages.indexWhere(
@@ -7293,40 +8130,37 @@ final class _MessageListState extends State<_MessageList> {
     final int resolvedHistoryCenterIndex = historyCenterIndex < 0
         ? 0
         : historyCenterIndex;
-    final List<ChatMessageGroup> olderGroups = _groupTimelineMessages(
-      _messages.take(resolvedHistoryCenterIndex).toList(growable: false),
+    final List<_TimelineMessageGroupRange> allGroupRanges =
+        _timelineMessageGroupRanges();
+    final int centerGroupRangeIndex = allGroupRanges.indexWhere(
+      (_TimelineMessageGroupRange range) =>
+          range.start == resolvedHistoryCenterIndex,
     );
-    final List<ChatMessageGroup> currentGroups = _groupTimelineMessages(
-      _messages.skip(resolvedHistoryCenterIndex).toList(growable: false),
-    );
+    final int resolvedCenterGroupRangeIndex = centerGroupRangeIndex < 0
+        ? 0
+        : centerGroupRangeIndex;
+    final List<_TimelineMessageGroupRange> olderGroupRanges = allGroupRanges
+        .sublist(0, resolvedCenterGroupRangeIndex);
+    final List<_TimelineMessageGroupRange> currentGroupRanges = allGroupRanges
+        .sublist(resolvedCenterGroupRangeIndex);
 
-    final String? latestReadMessageId = findLatestReadOutgoingMessageId(
-      messages: _messages,
-      currentUserId: widget.currentUserId,
-    );
-    final List<Widget> olderTimeline = _buildTimeline(
-      groups: olderGroups,
-      latestReadMessageId: latestReadMessageId,
-    );
-    final ChatMessageGroup? previousCenterGroup = olderGroups.isEmpty
-        ? null
-        : olderGroups.last;
-    final List<Widget> centerLeadingTimeline = currentGroups.isEmpty
+    final String? latestReadMessageId = widget.showLatestReadReceipt
+        ? findLatestReadOutgoingMessageId(
+            messages: _messages,
+            currentUserId: widget.currentUserId,
+          )
+        : null;
+    final _TimelineMessageGroupRange? previousCenterGroupRange =
+        olderGroupRanges.isEmpty ? null : olderGroupRanges.last;
+    final List<Widget> centerLeadingTimeline = currentGroupRanges.isEmpty
         ? const <Widget>[]
         : _buildTimelineLeadingDecoration(
-            previousGroup: previousCenterGroup,
-            group: currentGroups.first,
+            previousGroup: previousCenterGroupRange == null
+                ? null
+                : _messageGroupForRange(previousCenterGroupRange),
+            group: _messageGroupForRange(currentGroupRanges.first),
           );
-    final List<Widget> beforeCenterTimeline = <Widget>[
-      ...olderTimeline,
-      ...centerLeadingTimeline,
-    ];
-    final List<Widget> currentTimeline = _buildTimeline(
-      groups: currentGroups,
-      latestReadMessageId: latestReadMessageId,
-      previousGroup: previousCenterGroup,
-      includeLeadingDecoration: false,
-    );
+    final bool hasCenterLeadingTimeline = centerLeadingTimeline.isNotEmpty;
 
     final Widget messageList = IgnorePointer(
       ignoring: !_didResolveInitialScrollPosition,
@@ -7348,12 +8182,14 @@ final class _MessageListState extends State<_MessageList> {
                             .clamp(0.0, 1.0)
                             .toDouble()
                       : 0.0;
+                  final double resolvedCenterAnchor =
+                      _messageNavigationCenterAnchor ?? centerAnchor;
 
                   return CustomScrollView(
                     key: const ValueKey<String>('message-list'),
                     controller: _scrollController,
                     center: _historyCenterSliverKey,
-                    anchor: centerAnchor,
+                    anchor: resolvedCenterAnchor,
                     physics: widget.scrollLocked
                         ? const NeverScrollableScrollPhysics()
                         : null,
@@ -7365,16 +8201,68 @@ final class _MessageListState extends State<_MessageList> {
                       ),
                       SliverPadding(
                         padding: const EdgeInsets.symmetric(horizontal: 8),
-                        sliver: SliverList.list(
-                          children: beforeCenterTimeline.reversed.toList(
-                            growable: false,
+                        sliver: SliverList(
+                          delegate: SliverChildBuilderDelegate(
+                            (BuildContext context, int index) {
+                              if (hasCenterLeadingTimeline && index == 0) {
+                                return KeyedSubtree(
+                                  key: ValueKey<String>(
+                                    'history-center-leading-'
+                                    '${currentGroupRanges.first.startMessageId}',
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: centerLeadingTimeline,
+                                  ),
+                                );
+                              }
+
+                              final int groupChildIndex =
+                                  index - (hasCenterLeadingTimeline ? 1 : 0);
+                              final int groupRangeIndex =
+                                  olderGroupRanges.length - 1 - groupChildIndex;
+                              final _TimelineMessageGroupRange groupRange =
+                                  olderGroupRanges[groupRangeIndex];
+                              final _TimelineMessageGroupRange?
+                              previousGroupRange = groupRangeIndex == 0
+                                  ? null
+                                  : olderGroupRanges[groupRangeIndex - 1];
+
+                              return _buildTimelineGroupForRange(
+                                groupRange: groupRange,
+                                previousGroupRange: previousGroupRange,
+                                latestReadMessageId: latestReadMessageId,
+                              );
+                            },
+                            childCount:
+                                olderGroupRanges.length +
+                                (hasCenterLeadingTimeline ? 1 : 0),
                           ),
                         ),
                       ),
                       SliverPadding(
                         key: _historyCenterSliverKey,
                         padding: const EdgeInsets.symmetric(horizontal: 8),
-                        sliver: SliverList.list(children: currentTimeline),
+                        sliver: SliverList(
+                          delegate: SliverChildBuilderDelegate((
+                            BuildContext context,
+                            int index,
+                          ) {
+                            final _TimelineMessageGroupRange groupRange =
+                                currentGroupRanges[index];
+                            final _TimelineMessageGroupRange?
+                            previousGroupRange = index == 0
+                                ? previousCenterGroupRange
+                                : currentGroupRanges[index - 1];
+
+                            return _buildTimelineGroupForRange(
+                              groupRange: groupRange,
+                              previousGroupRange: previousGroupRange,
+                              latestReadMessageId: latestReadMessageId,
+                              includeLeadingDecoration: index > 0,
+                            );
+                          }, childCount: currentGroupRanges.length),
+                        ),
                       ),
                       SliverToBoxAdapter(
                         child: SizedBox(height: widget.bottomPadding),
@@ -7392,8 +8280,49 @@ final class _MessageListState extends State<_MessageList> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        messageList,
-        if (_returnToReplyMessageId != null)
+        RepaintBoundary(
+          key: _messageListRepaintBoundaryKey,
+          child: messageList,
+        ),
+        if (_replyNavigationMaskActive)
+          Positioned.fill(
+            key: const ValueKey<String>('reply-navigation-snapshot'),
+            child: AbsorbPointer(
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  _replyNavigationSnapshot == null
+                      ? const ColoredBox(color: AppColors.surface)
+                      : RawImage(
+                          image: _replyNavigationSnapshot!,
+                          fit: BoxFit.fill,
+                        ),
+                  if (_replyNavigationActivityVisible)
+                    Center(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: AppColors.white.withAlpha(224),
+                          shape: BoxShape.circle,
+                          boxShadow: <BoxShadow>[
+                            BoxShadow(
+                              color: AppColors.black.withAlpha(24),
+                              blurRadius: 10,
+                            ),
+                          ],
+                        ),
+                        child: const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: CupertinoActivityIndicator(
+                            color: AppColors.blue500,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        if (_returnToReplyAnchor != null)
           Positioned(
             left: 0,
             right: 0,
@@ -7410,60 +8339,55 @@ final class _MessageListState extends State<_MessageList> {
     );
   }
 
-  List<Widget> _buildTimeline({
-    required List<ChatMessageGroup> groups,
+  Widget _buildTimelineGroupForRange({
+    required _TimelineMessageGroupRange groupRange,
+    required _TimelineMessageGroupRange? previousGroupRange,
     required String? latestReadMessageId,
-    ChatMessageGroup? previousGroup,
     bool includeLeadingDecoration = true,
   }) {
-    final List<Widget> timeline = [];
-
-    for (int index = 0; index < groups.length; index++) {
-      final ChatMessageGroup group = groups[index];
-      final ChatMessageGroup? precedingGroup = index == 0
-          ? previousGroup
-          : groups[index - 1];
-
-      if (index > 0 || includeLeadingDecoration) {
-        timeline.addAll(
-          _buildTimelineLeadingDecoration(
-            previousGroup: precedingGroup,
-            group: group,
-          ),
-        );
-      }
-
-      timeline.add(
-        _MessageGroup(
+    final ChatMessageGroup group = _messageGroupForRange(groupRange);
+    final ChatMessageGroup? previousGroup = previousGroupRange == null
+        ? null
+        : _messageGroupForRange(previousGroupRange);
+    final List<Widget> timeline = <Widget>[
+      if (includeLeadingDecoration)
+        ..._buildTimelineLeadingDecoration(
+          previousGroup: previousGroup,
           group: group,
-          currentUserId: widget.currentUserId,
-          currentUserPreferredLanguage: widget.currentUserPreferredLanguage,
-          otherParticipantName: widget.otherParticipantName,
-          otherParticipantProfileImageUrl:
-              widget.otherParticipantProfileImageUrl,
-          latestReadMessageId: latestReadMessageId,
-          now: _messageClock,
-          shownTranslatedMessageIds: _showTranslatedMessageIds,
-          highlightedMessageId:
-              _highlightedMessageId ?? widget.activeSearchMessageId,
-          searchQuery: widget.searchQuery,
-          canRequestTranslation: widget.onTranslateMessage != null,
-          canRetryTranslation:
-              widget.onTranslateMessage != null ||
-              widget.onRetryTranslation != null,
-          onIncomingMessageTap: _handleIncomingMessageTap,
-          onFileMessageTap: _handleFileMessageTap,
-          onPhotoMessageTap: widget.onPhotoMessageTap,
-          onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
-          onRetryTranslation: _retryTranslation,
-          onMessageLongPress: _handleMessageLongPress,
-          onReplyQuoteTap: _handleReplyQuoteTap,
-          messageBubbleKeyFor: _messageBubbleKeyFor,
         ),
-      );
-    }
+      _MessageGroup(
+        group: group,
+        currentUserId: widget.currentUserId,
+        currentUserPreferredLanguage: widget.currentUserPreferredLanguage,
+        otherParticipantName: widget.otherParticipantName,
+        otherParticipantProfileImageUrl: widget.otherParticipantProfileImageUrl,
+        latestReadMessageId: latestReadMessageId,
+        now: _messageClock,
+        shownTranslatedMessageIds: _showTranslatedMessageIds,
+        highlightedMessageId:
+            _highlightedMessageId ?? widget.activeSearchMessageId,
+        searchQuery: widget.searchQuery,
+        canRequestTranslation: widget.onTranslateMessage != null,
+        canRetryTranslation:
+            widget.onTranslateMessage != null ||
+            widget.onRetryTranslation != null,
+        onIncomingMessageTap: _handleIncomingMessageTap,
+        onFileMessageTap: _handleFileMessageTap,
+        onPhotoMessageTap: widget.onPhotoMessageTap,
+        onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
+        onRetryTranslation: _retryTranslation,
+        onMessageLongPress: _handleMessageLongPress,
+        onReplyQuoteTap: _handleReplyQuoteTap,
+        messageBubbleKeyFor: _messageBubbleKeyFor,
+      ),
+    ];
 
-    return timeline;
+    return KeyedSubtree(
+      key: ValueKey<String>('timeline-group-${groupRange.startMessageId}'),
+      child: timeline.length == 1
+          ? timeline.single
+          : Column(mainAxisSize: MainAxisSize.min, children: timeline),
+    );
   }
 
   List<Widget> _buildTimelineLeadingDecoration({
@@ -7489,26 +8413,92 @@ final class _MessageListState extends State<_MessageList> {
     return timeline;
   }
 
-  List<ChatMessageGroup> _groupTimelineMessages(List<ChatMessage> messages) {
-    if (messages.isEmpty) {
-      return const <ChatMessageGroup>[];
+  ChatMessageGroup _messageGroupForRange(
+    _TimelineMessageGroupRange groupRange,
+  ) {
+    final List<ChatMessage> messages = List<ChatMessage>.unmodifiable(
+      _messages.getRange(groupRange.start, groupRange.end),
+    );
+
+    return ChatMessageGroup(
+      senderId: messages.first.senderId,
+      messages: messages,
+    );
+  }
+
+  List<_TimelineMessageGroupRange> _groupTimelineMessageRanges(
+    int start,
+    int end,
+  ) {
+    if (start >= end) {
+      return const <_TimelineMessageGroupRange>[];
     }
 
-    final List<ChatMessageGroup> groups = <ChatMessageGroup>[];
-    int segmentStart = 0;
+    final List<_TimelineMessageGroupRange> groupRanges =
+        <_TimelineMessageGroupRange>[];
+    int groupStart = start;
 
-    for (int index = 1; index < messages.length; index++) {
-      if (!_historyPageBoundaryMessageIds.contains(messages[index].id)) {
+    for (int index = start + 1; index < end; index++) {
+      final ChatMessage previousMessage = _messages[index - 1];
+      final ChatMessage message = _messages[index];
+      final bool continuesCurrentGroup =
+          !_historyPageBoundaryMessageIds.contains(message.id) &&
+          message.senderId == previousMessage.senderId &&
+          isSameChatMinute(previousMessage.createdAt, message.createdAt);
+
+      if (continuesCurrentGroup) {
         continue;
       }
 
-      groups.addAll(groupChatMessages(messages.sublist(segmentStart, index)));
-      segmentStart = index;
+      groupRanges.add(
+        _TimelineMessageGroupRange(
+          start: groupStart,
+          end: index,
+          startMessageId: _messages[groupStart].id,
+        ),
+      );
+      groupStart = index;
     }
 
-    groups.addAll(groupChatMessages(messages.sublist(segmentStart)));
+    groupRanges.add(
+      _TimelineMessageGroupRange(
+        start: groupStart,
+        end: end,
+        startMessageId: _messages[groupStart].id,
+      ),
+    );
 
-    return groups;
+    return groupRanges;
+  }
+
+  List<_TimelineMessageGroupRange> _timelineMessageGroupRanges() {
+    final bool messageIdsMatch =
+        _cachedTimelineMessageIds.length == _messages.length &&
+        Iterable<int>.generate(_messages.length).every(
+          (int index) =>
+              _cachedTimelineMessageIds[index] == _messages[index].id,
+        );
+    final bool pageBoundariesMatch =
+        _cachedTimelinePageBoundaryMessageIds.length ==
+            _historyPageBoundaryMessageIds.length &&
+        _cachedTimelinePageBoundaryMessageIds.containsAll(
+          _historyPageBoundaryMessageIds,
+        );
+
+    if (messageIdsMatch && pageBoundariesMatch) {
+      return _cachedTimelineGroupRanges;
+    }
+
+    _cachedTimelineMessageIds = List<String>.unmodifiable(
+      _messages.map((ChatMessage message) => message.id),
+    );
+    _cachedTimelinePageBoundaryMessageIds = Set<String>.unmodifiable(
+      _historyPageBoundaryMessageIds,
+    );
+    _cachedTimelineGroupRanges = List<_TimelineMessageGroupRange>.unmodifiable(
+      _groupTimelineMessageRanges(0, _messages.length),
+    );
+    return _cachedTimelineGroupRanges;
   }
 
   double _timelineGapBetweenGroups(
@@ -7526,6 +8516,61 @@ final class _MessageListState extends State<_MessageList> {
 
     return consecutiveCallBubbles ? 8 : 14;
   }
+}
+
+final class _TimelineMessageGroupRange {
+  const _TimelineMessageGroupRange({
+    required this.start,
+    required this.end,
+    required this.startMessageId,
+  });
+
+  final int start;
+  final int end;
+  final String startMessageId;
+}
+
+final class _RenderedMessageIndexRange {
+  const _RenderedMessageIndexRange({
+    required this.first,
+    required this.last,
+    required this.firstRevealOffset,
+    required this.lastRevealOffset,
+  });
+
+  final int first;
+  final int last;
+  final double firstRevealOffset;
+  final double lastRevealOffset;
+
+  double? estimateScrollOffset(int targetIndex) {
+    final int indexDistance = last - first;
+
+    if (indexDistance <= 0) {
+      return null;
+    }
+
+    final double averageMessageExtent =
+        (lastRevealOffset - firstRevealOffset) / indexDistance;
+
+    if (!averageMessageExtent.isFinite || averageMessageExtent.abs() < 0.5) {
+      return null;
+    }
+
+    return firstRevealOffset + ((targetIndex - first) * averageMessageExtent);
+  }
+}
+
+final class _MessageViewportAnchor {
+  const _MessageViewportAnchor({
+    required this.messageId,
+    required this.leadingViewportOffset,
+    required this.fallbackScrollOffset,
+  });
+
+  final String messageId;
+  final double leadingViewportOffset;
+  final double fallbackScrollOffset;
 }
 
 final class _BackToReplyMessageButton extends StatelessWidget {

@@ -53,6 +53,7 @@ from app.notifications import send_message_notification
 from app.schemas import (
     CallOutcomeUpdate,
     MessageCreate,
+    MessageContextRead,
     MessageReplyReferenceRead,
     MessageRead,
     MessageUpdate,
@@ -1460,6 +1461,7 @@ async def list_conversation(
     session: SessionDependency,
     response: Response,
     before_message_id: Annotated[Optional[UUID], Query()] = None,
+    after_message_id: Annotated[Optional[UUID], Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> list[MessageRead]:
     other_user = await session.get(User, other_user_id)
@@ -1497,8 +1499,17 @@ async def list_conversation(
         Message.id.not_in(hidden_message_ids),
     ]
 
-    if before_message_id is not None:
-        cursor_message = await session.get(Message, before_message_id)
+    if before_message_id is not None and after_message_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use only one conversation cursor direction",
+        )
+
+    cursor_message_id = before_message_id or after_message_id
+    cursor_message = None
+
+    if cursor_message_id is not None:
+        cursor_message = await session.get(Message, cursor_message_id)
 
         if (
             cursor_message is None
@@ -1510,6 +1521,8 @@ async def list_conversation(
                 detail="Invalid conversation cursor",
             )
 
+    if before_message_id is not None:
+        assert cursor_message is not None
         message_filters.append(
             or_(
                 Message.created_at < cursor_message.created_at,
@@ -1520,12 +1533,32 @@ async def list_conversation(
             )
         )
 
-    result = await session.scalars(
-        select(Message)
-        .where(*message_filters)
-        .order_by(desc(Message.created_at), desc(Message.id))
-        .limit(limit + 1)
-    )
+    if after_message_id is not None:
+        assert cursor_message is not None
+        message_filters.append(
+            or_(
+                Message.created_at > cursor_message.created_at,
+                and_(
+                    Message.created_at == cursor_message.created_at,
+                    Message.id > cursor_message.id,
+                ),
+            )
+        )
+        statement = (
+            select(Message)
+            .where(*message_filters)
+            .order_by(Message.created_at, Message.id)
+            .limit(limit + 1)
+        )
+    else:
+        statement = (
+            select(Message)
+            .where(*message_filters)
+            .order_by(desc(Message.created_at), desc(Message.id))
+            .limit(limit + 1)
+        )
+
+    result = await session.scalars(statement)
 
     messages = list(result)
     has_more = len(messages) > limit
@@ -1534,12 +1567,140 @@ async def list_conversation(
         messages = messages[:limit]
 
     response.headers["X-Has-More"] = "true" if has_more else "false"
-    messages.reverse()
+    if after_message_id is None:
+        messages.reverse()
 
     return await build_message_reads(
         session,
         messages,
         direct_conversation=direct_conversation,
+    )
+
+
+@router.get(
+    "/conversation/{other_user_id}/around/{message_id}",
+    response_model=MessageContextRead,
+)
+async def get_conversation_message_context(
+    other_user_id: UUID,
+    message_id: UUID,
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+    older_limit: Annotated[int, Query(ge=0, le=100)] = 30,
+    newer_limit: Annotated[int, Query(ge=0, le=100)] = 30,
+) -> MessageContextRead:
+    other_user = await session.get(User, other_user_id)
+
+    if other_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    if other_user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot open a conversation with yourself",
+        )
+
+    direct_conversation = await get_direct_conversation(
+        session,
+        current_user.id,
+        other_user.id,
+    )
+
+    if direct_conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
+    hidden_message_ids = select(MessageDeletion.message_id).where(
+        MessageDeletion.conversation_id
+        == direct_conversation.conversation_id,
+        MessageDeletion.user_id == current_user.id,
+    )
+    visible_message_filters = [
+        Message.conversation_id == direct_conversation.conversation_id,
+        Message.deleted_at.is_(None),
+        Message.id.not_in(hidden_message_ids),
+    ]
+    target_message = await session.scalar(
+        select(Message).where(
+            *visible_message_filters,
+            Message.id == message_id,
+        )
+    )
+
+    if target_message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+
+    older_messages: list[Message] = []
+    has_more_older = False
+
+    if older_limit > 0:
+        older_result = await session.scalars(
+            select(Message)
+            .where(
+                *visible_message_filters,
+                or_(
+                    Message.created_at < target_message.created_at,
+                    and_(
+                        Message.created_at == target_message.created_at,
+                        Message.id < target_message.id,
+                    ),
+                ),
+            )
+            .order_by(desc(Message.created_at), desc(Message.id))
+            .limit(older_limit + 1)
+        )
+        older_messages = list(older_result)
+        has_more_older = len(older_messages) > older_limit
+
+        if has_more_older:
+            older_messages = older_messages[:older_limit]
+
+        older_messages.reverse()
+
+    newer_messages: list[Message] = []
+    has_more_newer = False
+
+    if newer_limit > 0:
+        newer_result = await session.scalars(
+            select(Message)
+            .where(
+                *visible_message_filters,
+                or_(
+                    Message.created_at > target_message.created_at,
+                    and_(
+                        Message.created_at == target_message.created_at,
+                        Message.id > target_message.id,
+                    ),
+                ),
+            )
+            .order_by(Message.created_at, Message.id)
+            .limit(newer_limit + 1)
+        )
+        newer_messages = list(newer_result)
+        has_more_newer = len(newer_messages) > newer_limit
+
+        if has_more_newer:
+            newer_messages = newer_messages[:newer_limit]
+
+    messages = [*older_messages, target_message, *newer_messages]
+    message_reads = await build_message_reads(
+        session,
+        messages,
+        direct_conversation=direct_conversation,
+    )
+
+    return MessageContextRead(
+        messages=message_reads,
+        has_more_older=has_more_older,
+        has_more_newer=has_more_newer,
     )
 
 

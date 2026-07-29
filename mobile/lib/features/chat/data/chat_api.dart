@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -17,6 +18,18 @@ final class ChatConversationPage {
   final bool hasMore;
 }
 
+final class ChatConversationContext {
+  ChatConversationContext({
+    required List<ChatMessage> messages,
+    required this.hasMoreOlder,
+    required this.hasMoreNewer,
+  }) : messages = List<ChatMessage>.unmodifiable(messages);
+
+  final List<ChatMessage> messages;
+  final bool hasMoreOlder;
+  final bool hasMoreNewer;
+}
+
 final class ChatApi {
   const ChatApi({
     required http.Client client,
@@ -30,6 +43,7 @@ final class ChatApi {
   final Uri _baseUri;
   final String _accessToken;
 
+  static const Duration _conversationRequestTimeout = Duration(seconds: 15);
   static final RegExp _urlPattern = RegExp(
     r'''(?:(?:https?):\/\/|www\.)[^\s<>'"]+''',
     caseSensitive: false,
@@ -87,20 +101,41 @@ final class ChatApi {
     required String otherUserId,
     int limit = 100,
     String? beforeMessageId,
+    String? afterMessageId,
   }) async {
+    if (beforeMessageId != null && afterMessageId != null) {
+      throw ArgumentError(
+        'Only one conversation cursor direction can be requested.',
+      );
+    }
+
     final Uri requestUri = _baseUri
         .resolve('/messages/conversation/$otherUserId')
         .replace(
           queryParameters: <String, String>{
             'limit': limit.toString(),
             'before_message_id': ?beforeMessageId,
+            'after_message_id': ?afterMessageId,
           },
         );
 
-    final http.Response response = await _client.get(
-      requestUri,
-      headers: _headers,
-    );
+    final http.Response response;
+
+    try {
+      response = await _client
+          .get(requestUri, headers: _headers)
+          .timeout(_conversationRequestTimeout);
+    } on TimeoutException {
+      throw const ChatApiException(
+        'Conversation loading timed out.',
+        retryable: true,
+      );
+    } on http.ClientException {
+      throw const ChatApiException(
+        'Conversation loading failed because of a network error.',
+        retryable: true,
+      );
+    }
 
     if (response.statusCode != 200) {
       throw ChatApiException(
@@ -110,6 +145,10 @@ final class ChatApi {
               'Conversation loading failed with status code '
               '${response.statusCode}.',
         ),
+        retryable:
+            response.statusCode == 429 ||
+            (response.statusCode >= 500 && response.statusCode < 600),
+        statusCode: response.statusCode,
       );
     }
 
@@ -139,6 +178,84 @@ final class ChatApi {
         (hasMoreHeader == null && messages.length == limit);
 
     return ChatConversationPage(messages: messages, hasMore: hasMore);
+  }
+
+  Future<ChatConversationContext> getConversationMessageContext({
+    required String otherUserId,
+    required String messageId,
+    int olderLimit = 30,
+    int newerLimit = 30,
+  }) async {
+    final Uri requestUri = _baseUri
+        .resolve('/messages/conversation/$otherUserId/around/$messageId')
+        .replace(
+          queryParameters: <String, String>{
+            'older_limit': olderLimit.toString(),
+            'newer_limit': newerLimit.toString(),
+          },
+        );
+    final http.Response response;
+
+    try {
+      response = await _client
+          .get(requestUri, headers: _headers)
+          .timeout(_conversationRequestTimeout);
+    } on TimeoutException {
+      throw const ChatApiException(
+        'Message context loading timed out.',
+        retryable: true,
+      );
+    } on http.ClientException {
+      throw const ChatApiException(
+        'Message context loading failed because of a network error.',
+        retryable: true,
+      );
+    }
+
+    if (response.statusCode != 200) {
+      throw ChatApiException(
+        _readErrorMessage(
+          response,
+          fallback:
+              'Message context loading failed with status code '
+              '${response.statusCode}.',
+        ),
+        retryable:
+            response.statusCode == 429 ||
+            (response.statusCode >= 500 && response.statusCode < 600),
+        statusCode: response.statusCode,
+      );
+    }
+
+    final Object? decodedBody = jsonDecode(response.body);
+
+    if (decodedBody is! Map<String, dynamic> ||
+        decodedBody['messages'] is! List<dynamic> ||
+        decodedBody['has_more_older'] is! bool ||
+        decodedBody['has_more_newer'] is! bool) {
+      throw const ChatApiException(
+        'The server returned an invalid message context.',
+      );
+    }
+
+    final List<ChatMessage> messages =
+        (decodedBody['messages'] as List<dynamic>)
+            .map((dynamic item) {
+              if (item is! Map<String, dynamic>) {
+                throw const ChatApiException(
+                  'The server returned an invalid message.',
+                );
+              }
+
+              return messageFromJson(item);
+            })
+            .toList(growable: false);
+
+    return ChatConversationContext(
+      messages: messages,
+      hasMoreOlder: decodedBody['has_more_older'] as bool,
+      hasMoreNewer: decodedBody['has_more_newer'] as bool,
+    );
   }
 
   Future<List<ChatMessage>> searchConversation({
@@ -862,6 +979,108 @@ final class ChatApi {
     );
   }
 
+  Map<String, Object?> messageToCacheJson(ChatMessage message) {
+    final String messageType;
+    final Map<String, Object?>? metadata;
+
+    if (message.isPhotoMessage) {
+      messageType = 'photo';
+      metadata = <String, Object?>{
+        'photos': message.photoAttachments
+            .map(
+              (ChatPhotoAttachment photo) => <String, Object?>{
+                'asset_id': photo.assetId,
+                'media_asset_id': photo.mediaAssetId ?? photo.assetId,
+                'width': photo.width,
+                'height': photo.height,
+                'file_name': photo.fileName,
+                'mime_type': photo.mimeType,
+                'size_bytes': photo.sizeBytes,
+              },
+            )
+            .toList(growable: false),
+      };
+    } else if (message.isFileMessage) {
+      final ChatFileAttachment file = message.fileAttachment!;
+      messageType = 'file';
+      metadata = <String, Object?>{
+        'file': <String, Object?>{
+          'name': file.name,
+          'media_asset_id': file.mediaAssetId,
+          'mime_type': file.mimeType,
+          'size_bytes': file.sizeBytes,
+        },
+      };
+    } else if (message.isVoiceMemoMessage) {
+      final ChatVoiceMemoAttachment voiceMemo = message.voiceMemoAttachment!;
+      messageType = 'voice_memo';
+      metadata = <String, Object?>{
+        'duration_ms': voiceMemo.duration.inMilliseconds,
+        'media_asset_id': voiceMemo.mediaAssetId,
+        'mime_type': voiceMemo.mimeType,
+        'file_name': voiceMemo.fileName,
+        'size_bytes': voiceMemo.sizeBytes,
+        'waveform_samples': voiceMemo.waveformSamples,
+      };
+    } else if (message.isCallMessage) {
+      final ChatCallAttachment call = message.callAttachment!;
+      messageType = 'call';
+      metadata = <String, Object?>{
+        'kind': _callKindToApi(call.kind),
+        'outcome': _callOutcomeToApi(call.outcome),
+        'duration_ms': call.duration.inMilliseconds,
+      };
+    } else if (message.isLinkMessage) {
+      final ChatLinkPreview preview = message.linkPreview!;
+      messageType = 'link';
+      metadata = <String, Object?>{
+        'url': preview.url,
+        'canonical_url': preview.canonicalUrl,
+        'domain': preview.domain,
+        'title': preview.title,
+        'description': preview.description,
+        'site_name': preview.siteName,
+        'image_url': preview.imageUrl,
+      };
+    } else {
+      messageType = 'text';
+      metadata = null;
+    }
+
+    final ChatReplyReference? replyTo = message.replyTo;
+
+    return <String, Object?>{
+      'id': message.id,
+      'sender_id': message.senderId,
+      'recipient_id': message.recipientId,
+      'content': message.content,
+      'message_type': messageType,
+      'metadata': metadata,
+      'reply_to_message_id': replyTo?.messageId,
+      'reply_to': replyTo == null
+          ? null
+          : <String, Object?>{
+              'message_id': replyTo.messageId,
+              'sender_id': replyTo.senderId,
+              'content': replyTo.content,
+            },
+      'created_at': message.createdAt.toUtc().toIso8601String(),
+      'edited_at': message.editedAt?.toUtc().toIso8601String(),
+      'read_at': message.readAt?.toUtc().toIso8601String(),
+      'source_language': message.sourceLanguage,
+      'translated_content': message.translatedContent,
+      'translated_language': message.translatedLanguage,
+      'translation_status': switch (message.translationStatus) {
+        ChatTranslationStatus.none => 'none',
+        ChatTranslationStatus.translating => 'pending',
+        ChatTranslationStatus.translated => 'completed',
+        ChatTranslationStatus.failed => 'failed',
+      },
+      'translation_provider': null,
+      'translation_model': null,
+    };
+  }
+
   String? _firstUrlInText(String content) {
     final RegExpMatch? match = _urlPattern.firstMatch(content);
 
@@ -1067,6 +1286,7 @@ final class ChatApi {
 
   ChatTranslationStatus _translationStatusFromApi(String status) {
     return switch (status) {
+      'none' => ChatTranslationStatus.none,
       'pending' => ChatTranslationStatus.translating,
       'completed' => ChatTranslationStatus.translated,
       'failed' => ChatTranslationStatus.failed,

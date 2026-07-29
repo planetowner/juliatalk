@@ -64,6 +64,7 @@ Map<String, dynamic> _messageJson(int index, {int? replyToIndex}) {
 Future<ChatRealtimeService> _pumpConversationHome(
   WidgetTester tester, {
   Future<http.Response> Function(http.Request request)? conversationResponder,
+  Future<http.Response> Function(http.Request request)? messageResponder,
 }) async {
   final MockClient client = MockClient((http.Request request) async {
     if (request.method == 'GET' && request.url.path == '/users') {
@@ -93,6 +94,14 @@ Future<ChatRealtimeService> _pumpConversationHome(
     if (request.method == 'PATCH' &&
         request.url.path == '/messages/conversation/${_otherUser.id}/read') {
       return http.Response('{}', 200);
+    }
+
+    if (request.method == 'POST' && request.url.path == '/messages') {
+      if (messageResponder != null) {
+        return messageResponder(request);
+      }
+
+      throw StateError('Unexpected message send request: ${request.url}');
     }
 
     if (request.method == 'GET' &&
@@ -384,6 +393,18 @@ void main() {
       int contextRequestCount = 0;
       final ChatRealtimeService realtimeService = await _pumpConversationHome(
         tester,
+        messageResponder: (http.Request request) async {
+          final Map<String, dynamic> requestBody =
+              jsonDecode(request.body) as Map<String, dynamic>;
+          final Map<String, dynamic> sentMessage = _messageJson(400);
+          sentMessage['content'] = requestBody['content'];
+
+          return http.Response(
+            jsonEncode(sentMessage),
+            201,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        },
         conversationResponder: (http.Request request) async {
           if (request.url.path.contains('/around/')) {
             contextRequestCount += 1;
@@ -514,6 +535,31 @@ void main() {
           tester.getRect(quoteAreaFinder).top - returnedMessageListRect.top;
 
       expect(returnedReplyTop, closeTo(initialReplyTop, 1));
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('message-input')),
+        'sent after reply navigation',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey<String>('message-send')));
+      await tester.pumpAndSettle();
+
+      final Finder newestBubbleFinder = find.byKey(
+        const ValueKey<String>('outgoing-bubble-message-400'),
+      );
+      final Finder composerFinder = find.byKey(
+        const ValueKey<String>('message-composer-default'),
+      );
+
+      expect(newestBubbleFinder, findsOneWidget);
+      expect(
+        tester.getRect(composerFinder).top -
+            tester.getRect(newestBubbleFinder).bottom,
+        closeTo(12, 1),
+        reason:
+            'Returning from reply navigation must not leave its recentered '
+            'sliver as the structural center of the latest conversation.',
+      );
     },
   );
 

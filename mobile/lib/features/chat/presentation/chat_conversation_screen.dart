@@ -1971,6 +1971,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       },
       child: ChatConversationView(
         initialMessages: _messages,
+        showingLatestWindow: _showingLatestWindow,
         hasMoreMessages: _hasMoreMessages,
         hasMoreNewerMessages: _hasMoreNewerMessages,
         loadingOlderMessages: _loadingOlderMessages,

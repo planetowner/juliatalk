@@ -222,6 +222,7 @@ final class ChatConversationView extends StatefulWidget {
     super.key,
     this.photoLibrary,
     this.initialMessages,
+    this.showingLatestWindow = true,
     this.hasMoreMessages = false,
     this.hasMoreNewerMessages = false,
     this.loadingOlderMessages = false,
@@ -257,6 +258,7 @@ final class ChatConversationView extends StatefulWidget {
 
   final ChatPhotoLibrary? photoLibrary;
   final List<ChatMessage>? initialMessages;
+  final bool showingLatestWindow;
   final bool hasMoreMessages;
   final bool hasMoreNewerMessages;
   final bool loadingOlderMessages;
@@ -2434,6 +2436,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                     child: _MessageList(
                       key: _messageListKey,
                       initialMessages: widget.initialMessages,
+                      showingLatestWindow: widget.showingLatestWindow,
                       hasMoreMessages: widget.hasMoreMessages,
                       hasMoreNewerMessages: widget.hasMoreNewerMessages,
                       loadingOlderMessages: widget.loadingOlderMessages,
@@ -5694,6 +5697,7 @@ final class _ViewportAnchorScrollPosition
 final class _MessageList extends StatefulWidget {
   const _MessageList({
     required this.initialMessages,
+    required this.showingLatestWindow,
     required this.hasMoreMessages,
     required this.hasMoreNewerMessages,
     required this.loadingOlderMessages,
@@ -5730,6 +5734,7 @@ final class _MessageList extends StatefulWidget {
   });
 
   final List<ChatMessage>? initialMessages;
+  final bool showingLatestWindow;
   final bool hasMoreMessages;
   final bool hasMoreNewerMessages;
   final bool loadingOlderMessages;
@@ -6083,6 +6088,8 @@ final class _MessageListState extends State<_MessageList> {
   @override
   void didUpdateWidget(covariant _MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final bool enteredLatestWindow =
+        widget.showingLatestWindow && !oldWidget.showingLatestWindow;
 
     if (widget.scrollLocked && !oldWidget.scrollLocked) {
       _stopScrollingAtCurrentOffset();
@@ -6099,6 +6106,14 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     if (identical(widget.initialMessages, oldWidget.initialMessages)) {
+      if (enteredLatestWindow) {
+        _normalizeHistoryCenterForLatestWindow();
+
+        if (widget.pinToBottom) {
+          _bottomPinCanceledByUserScroll = false;
+          _beginBottomSettle();
+        }
+      }
       return;
     }
 
@@ -6117,6 +6132,9 @@ final class _MessageListState extends State<_MessageList> {
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
+    if (enteredLatestWindow) {
+      _normalizeHistoryCenterForLatestWindow();
+    }
     final Set<String> currentMessageIds = _messages
         .map((ChatMessage message) => message.id)
         .toSet();
@@ -6160,7 +6178,13 @@ final class _MessageListState extends State<_MessageList> {
     }
     _syncMessageClockWithMessages(_messages);
 
-    if (shouldPinToBottomAfterUpdate) {
+    final bool shouldPinLatestWindowToBottom =
+        enteredLatestWindow && widget.pinToBottom;
+    if (shouldPinLatestWindowToBottom) {
+      _bottomPinCanceledByUserScroll = false;
+    }
+
+    if (shouldPinToBottomAfterUpdate || shouldPinLatestWindowToBottom) {
       _beginBottomSettle();
     }
 
@@ -6174,6 +6198,20 @@ final class _MessageListState extends State<_MessageList> {
         _maybeLoadNewerMessages();
       });
     }
+  }
+
+  void _normalizeHistoryCenterForLatestWindow() {
+    _messageNavigationCenterAnchor = null;
+    _rememberedMessageScrollOffsets.clear();
+
+    if (_messages.isEmpty) {
+      _historyCenterMessageId = null;
+      return;
+    }
+
+    final String latestWindowCenterMessageId = _messages.first.id;
+    _historyCenterMessageId = latestWindowCenterMessageId;
+    _historyPageBoundaryMessageIds.add(latestWindowCenterMessageId);
   }
 
   void _stopScrollingAtCurrentOffset() {

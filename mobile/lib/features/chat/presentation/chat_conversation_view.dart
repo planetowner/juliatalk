@@ -329,12 +329,14 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   Timer? _keyboardTransitionTimer;
   Timer? _keyboardDismissSettleTimer;
+  Timer? _keyboardDragViewportAnchorReleaseTimer;
   Timer? _composerResizeTimer;
   Timer? _bottomSurfaceHoldTimer;
   Timer? _voiceCallConnectionTimer;
   Timer? _voiceCallTicker;
 
   bool _keyboardTransitionActive = false;
+  bool _keyboardDragViewportAnchorActive = false;
   bool _pinBottomDuringComposerResize = false;
   bool _pinBottomAfterKeyboardDismiss = false;
   bool _postSendBottomSettlePending = false;
@@ -399,6 +401,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _keyboardTransitionTimer?.cancel();
     _keyboardDismissSettleTimer?.cancel();
+    _keyboardDragViewportAnchorReleaseTimer?.cancel();
     _composerResizeTimer?.cancel();
     _bottomSurfaceHoldTimer?.cancel();
     _voiceCallConnectionTimer?.cancel();
@@ -1154,6 +1157,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       previousKeyboardHeight: previousKeyboardHeight,
       keyboardHeight: keyboardHeight,
     );
+    _handleKeyboardDragViewportMetricsChanged(keyboardHeight);
 
     if (!_keyboardTransitionActive) {
       return;
@@ -1239,7 +1243,64 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _pinBottomAfterKeyboardDismiss = true;
   }
 
+  void _beginKeyboardDragViewportAnchorPreservation() {
+    if (_searchViewportAnchorActive ||
+        _keyboardDragViewportAnchorActive ||
+        _currentKeyboardHeight() <= 0.5) {
+      return;
+    }
+
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null) {
+      return;
+    }
+
+    _keyboardDragViewportAnchorActive = true;
+    messageListState.beginViewportAnchorPreservation();
+    _scheduleKeyboardDragViewportAnchorRelease(
+      delay: const Duration(milliseconds: 700),
+    );
+  }
+
+  void _handleKeyboardDragViewportMetricsChanged(double keyboardHeight) {
+    if (!_keyboardDragViewportAnchorActive) {
+      return;
+    }
+
+    _scheduleKeyboardDragViewportAnchorRelease(
+      delay: keyboardHeight <= 0.5
+          ? Duration.zero
+          : const Duration(milliseconds: 500),
+    );
+  }
+
+  void _scheduleKeyboardDragViewportAnchorRelease({required Duration delay}) {
+    _keyboardDragViewportAnchorReleaseTimer?.cancel();
+    _keyboardDragViewportAnchorReleaseTimer = Timer(delay, () {
+      _keyboardDragViewportAnchorReleaseTimer = null;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _endKeyboardDragViewportAnchorPreservation();
+      });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    });
+  }
+
+  void _endKeyboardDragViewportAnchorPreservation() {
+    _keyboardDragViewportAnchorReleaseTimer?.cancel();
+    _keyboardDragViewportAnchorReleaseTimer = null;
+
+    if (!_keyboardDragViewportAnchorActive) {
+      return;
+    }
+
+    _messageListKey.currentState?.endViewportAnchorPreservation();
+    _keyboardDragViewportAnchorActive = false;
+  }
+
   void _handleMessageListUserScrollStarted() {
+    _beginKeyboardDragViewportAnchorPreservation();
     _keyboardTransitionTimer?.cancel();
     _keyboardTransitionTimer = null;
     _keyboardDismissSettleTimer?.cancel();
@@ -1502,6 +1563,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   void _beginSearchViewportAnchorPreservation() {
+    _endKeyboardDragViewportAnchorPreservation();
     _searchViewportAnchorActive = true;
     _searchViewportAnchorReleasePending = false;
     _searchViewportAnchorReleaseScheduled = false;
@@ -6727,6 +6789,7 @@ final class _MessageListState extends State<_MessageList> {
 
     return _MessageViewportAnchor(
       messageId: messageId,
+      historyCenterMessageId: _historyCenterMessageId,
       leadingViewportOffset: leadingOffset - position.pixels,
       fallbackScrollOffset: position.pixels,
     );
@@ -7020,10 +7083,36 @@ final class _MessageListState extends State<_MessageList> {
         : (anchor.leadingViewportOffset / initialPosition.viewportDimension)
               .clamp(0.0, 1.0)
               .toDouble();
-    final bool didRenderMessage = await _renderMessageByRecentering(
-      anchor.messageId,
-      alignment: initialAlignment,
-    );
+    final String? savedHistoryCenterMessageId =
+        anchor.historyCenterMessageId != null &&
+            _messages.any(
+              (ChatMessage message) =>
+                  message.id == anchor.historyCenterMessageId,
+            )
+        ? anchor.historyCenterMessageId
+        : null;
+    bool restoredSavedHistoryCenter = false;
+
+    if (savedHistoryCenterMessageId != null) {
+      _stopScrollingAtCurrentOffset();
+      setState(() {
+        _historyCenterMessageId = savedHistoryCenterMessageId;
+        _messageNavigationCenterAnchor = null;
+        _rememberedMessageScrollOffsets.clear();
+      });
+      _scrollController.correctPixelsForMessageRecenter(
+        anchor.fallbackScrollOffset,
+      );
+      await WidgetsBinding.instance.endOfFrame;
+      restoredSavedHistoryCenter = mounted && _scrollController.hasClients;
+    }
+
+    final bool didRenderMessage = restoredSavedHistoryCenter
+        ? _messageRenderObject(anchor.messageId) != null
+        : await _renderMessageByRecentering(
+            anchor.messageId,
+            alignment: initialAlignment,
+          );
     if (didRenderMessage && _messageNavigationCenterAnchor != null) {
       final RenderObject? renderObject = _messageRenderObject(anchor.messageId);
 
@@ -8602,11 +8691,13 @@ final class _RenderedMessageIndexRange {
 final class _MessageViewportAnchor {
   const _MessageViewportAnchor({
     required this.messageId,
+    required this.historyCenterMessageId,
     required this.leadingViewportOffset,
     required this.fallbackScrollOffset,
   });
 
   final String messageId;
+  final String? historyCenterMessageId;
   final double leadingViewportOffset;
   final double fallbackScrollOffset;
 }

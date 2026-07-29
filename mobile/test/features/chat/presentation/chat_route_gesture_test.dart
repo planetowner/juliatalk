@@ -600,6 +600,180 @@ void main() {
   );
 
   testWidgets(
+    'a cached far reply restores the original history center before scrolling',
+    (WidgetTester tester) async {
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          final List<Map<String, dynamic>> messages =
+              List<Map<String, dynamic>>.generate(100, (int offset) {
+                final int index = offset + 300;
+
+                return _messageJson(
+                  index,
+                  replyToIndex: index == 399 ? 300 : null,
+                );
+              });
+
+          if (request.url.path.contains('/around/')) {
+            return http.Response(
+              jsonEncode(<String, Object?>{
+                'messages': messages,
+                'has_more_older': true,
+                'has_more_newer': false,
+              }),
+              200,
+              headers: const <String, String>{
+                'content-type': 'application/json',
+              },
+            );
+          }
+
+          return http.Response(
+            jsonEncode(messages),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json',
+              'x-has-more': 'true',
+            },
+          );
+        },
+      );
+      addTearDown(realtimeService.dispose);
+
+      await tester.tap(find.text(_otherUser.displayName));
+      await tester.pumpAndSettle();
+
+      final Finder quoteAreaFinder = find.byKey(
+        const ValueKey<String>('reply-quote-area-message-399'),
+      );
+      final Finder messageListFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Finder backButtonFinder = find.byKey(
+        const ValueKey<String>('back-to-reply-message'),
+      );
+
+      expect(quoteAreaFinder, findsOneWidget);
+
+      await tester.tap(quoteAreaFinder);
+
+      for (
+        int frame = 0;
+        frame < 40 && backButtonFinder.evaluate().isEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(backButtonFinder, findsOneWidget);
+
+      await tester.tap(backButtonFinder);
+
+      for (
+        int frame = 0;
+        frame < 40 && backButtonFinder.evaluate().isNotEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(backButtonFinder, findsNothing);
+
+      await tester.drag(messageListFinder, const Offset(0, -500));
+      await tester.pumpAndSettle();
+
+      final Finder latestBubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-message-399'),
+      );
+      final Finder composerFinder = find.byKey(
+        const ValueKey<String>('message-composer-default'),
+      );
+
+      expect(latestBubbleFinder, findsOneWidget);
+      expect(
+        tester.getRect(composerFinder).top -
+            tester.getRect(latestBubbleFinder).bottom,
+        closeTo(12, 1),
+        reason:
+            'Returning from a cached far reply must restore the latest '
+            'conversation center so the list cannot scroll into empty space.',
+      );
+    },
+  );
+
+  testWidgets(
+    'drag dismissing the keyboard preserves the message viewport anchor',
+    (WidgetTester tester) async {
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          return http.Response(
+            jsonEncode(
+              List<Map<String, dynamic>>.generate(
+                100,
+                (int offset) => _messageJson(offset + 300),
+              ),
+            ),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json',
+              'x-has-more': 'true',
+            },
+          );
+        },
+      );
+      addTearDown(realtimeService.dispose);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.tap(find.text(_otherUser.displayName));
+      await tester.pumpAndSettle();
+
+      final Finder messageListFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Finder latestBubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-message-399'),
+      );
+      final Finder composerFinder = find.byKey(
+        const ValueKey<String>('message-composer-default'),
+      );
+      final Finder inputFinder = find.byKey(
+        const ValueKey<String>('message-input'),
+      );
+
+      await tester.tap(inputFinder);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+
+      final TestGesture gesture = await tester.startGesture(
+        tester.getCenter(messageListFinder),
+      );
+      await gesture.moveBy(const Offset(0, 24));
+      await tester.pump();
+
+      tester.view.viewInsets = const FakeViewPadding();
+
+      for (int frame = 0; frame < 20; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(latestBubbleFinder, findsOneWidget);
+      expect(
+        tester.getRect(composerFinder).top -
+            tester.getRect(latestBubbleFinder).bottom,
+        closeTo(12, 1),
+        reason:
+            'A drag that dismisses the keyboard must not leave a '
+            'keyboard-height blank region below the latest message.',
+      );
+    },
+  );
+
+  testWidgets(
     'a gesture that starts vertically never becomes a back swipe later',
     (WidgetTester tester) async {
       final ChatRealtimeService realtimeService = await _pumpOpenConversation(

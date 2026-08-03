@@ -1085,14 +1085,34 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
   }
 
-  Future<bool> _ensureMessageLoaded(String messageId) async {
+  Future<bool> _ensureMessageLoaded(
+    String messageId, {
+    required bool restoreLatestWindow,
+  }) async {
     ReplyNavigationDiagnostics.record(
       '[reply-navigation] ensure-start '
       'target=$messageId loaded=${_containsMessage(messageId)} '
       'messages=${_messages.length} '
       'hasMoreOlder=$_hasMoreMessages '
-      'hasMoreNewer=$_hasMoreNewerMessages',
+      'hasMoreNewer=$_hasMoreNewerMessages '
+      'restoreLatest=$restoreLatestWindow',
     );
+
+    if (restoreLatestWindow &&
+        _latestMessages.any((ChatMessage message) => message.id == messageId) &&
+        mounted) {
+      setState(() {
+        _showingLatestWindow = true;
+        _messages = _latestMessages;
+        _hasMoreMessages = _latestHasMoreMessages;
+        _hasMoreNewerMessages = false;
+      });
+      ReplyNavigationDiagnostics.record(
+        '[reply-navigation] latest-window-result '
+        'target=$messageId result=true messages=${_messages.length}',
+      );
+      return true;
+    }
 
     final ChatCachedConversation? cachedContext = await widget.messageCache
         .readConversationAround(

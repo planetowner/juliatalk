@@ -124,7 +124,11 @@ typedef ChatMessageTranslationRetrier =
 typedef ChatMessageDeleter = Future<void> Function({required String messageId});
 typedef ChatOlderMessagesLoader = Future<void> Function();
 typedef ChatNewerMessagesLoader = Future<void> Function();
-typedef ChatMessageLoader = Future<bool> Function(String messageId);
+typedef ChatMessageLoader =
+    Future<bool> Function(
+      String messageId, {
+      required bool restoreLatestWindow,
+    });
 
 Future<bool> _openChatLinkInSystemBrowser(Uri uri) {
   return launchUrl(
@@ -6879,6 +6883,7 @@ final class _MessageListState extends State<_MessageList> {
     return _MessageViewportAnchor(
       messageId: messageId,
       historyCenterMessageId: _historyCenterMessageId,
+      showingLatestWindow: widget.showingLatestWindow,
       leadingViewportOffset: leadingOffset - position.pixels,
       fallbackScrollOffset: position.pixels,
     );
@@ -7180,8 +7185,6 @@ final class _MessageListState extends State<_MessageList> {
             )
         ? anchor.historyCenterMessageId
         : null;
-    bool restoredSavedHistoryCenter = false;
-
     if (savedHistoryCenterMessageId != null) {
       _stopScrollingAtCurrentOffset();
       setState(() {
@@ -7193,15 +7196,36 @@ final class _MessageListState extends State<_MessageList> {
         anchor.fallbackScrollOffset,
       );
       await WidgetsBinding.instance.endOfFrame;
-      restoredSavedHistoryCenter = mounted && _scrollController.hasClients;
     }
 
-    final bool didRenderMessage = restoredSavedHistoryCenter
-        ? _messageRenderObject(anchor.messageId) != null
-        : await _renderMessageByRecentering(
-            anchor.messageId,
-            alignment: initialAlignment,
-          );
+    bool didRenderMessage = _messageRenderObject(anchor.messageId) != null;
+    final String? returnTargetGroupId = _messageGroupStartIdFor(
+      anchor.messageId,
+    );
+    final String? latestGroupId = _messages.isEmpty
+        ? null
+        : _messageGroupStartIdFor(_messages.last.id);
+    final bool returnTargetIsLatestGroup =
+        returnTargetGroupId != null && returnTargetGroupId == latestGroupId;
+
+    if (!didRenderMessage) {
+      // The small context rebuilt around a return target may no longer contain
+      // the center saved from the original window. Search within the current
+      // structural center before making the return target the new center. A
+      // target at the end of the conversation must never become the center,
+      // because that leaves a scrollable empty region after the last message.
+      didRenderMessage = await _scrollToMessage(
+        anchor.messageId,
+        alignment: initialAlignment,
+      );
+    }
+
+    if (!didRenderMessage && !returnTargetIsLatestGroup) {
+      didRenderMessage = await _renderMessageByRecentering(
+        anchor.messageId,
+        alignment: initialAlignment,
+      );
+    }
     if (didRenderMessage && _messageNavigationCenterAnchor != null) {
       final RenderObject? renderObject = _messageRenderObject(anchor.messageId);
 
@@ -7224,9 +7248,7 @@ final class _MessageListState extends State<_MessageList> {
         _scrollController.position.pixels,
       );
     }
-    final bool didFindMessage =
-        didRenderMessage ||
-        await _scrollToMessage(anchor.messageId, alignment: initialAlignment);
+    final bool didFindMessage = didRenderMessage;
 
     if (!didFindMessage || !mounted || !_scrollController.hasClients) {
       final ScrollPosition position = _scrollController.position;
@@ -7674,6 +7696,7 @@ final class _MessageListState extends State<_MessageList> {
   Future<bool> _ensureNavigationMessageAvailable(
     String messageId, {
     bool rebuildLoadedWindow = false,
+    bool restoreLatestWindow = false,
   }) async {
     if (!rebuildLoadedWindow && _findMessage(messageId) != null) {
       return true;
@@ -7688,7 +7711,10 @@ final class _MessageListState extends State<_MessageList> {
     // A local context switch normally completes before a screenshot can be
     // captured. Keep the current frame frozen only for an actual disk/network
     // wait so cached quote navigation remains immediate.
-    final Future<bool> loadMessageFuture = ensureMessageLoaded(messageId);
+    final Future<bool> loadMessageFuture = ensureMessageLoaded(
+      messageId,
+      restoreLatestWindow: restoreLatestWindow,
+    );
     bool shouldShowMask = true;
     bool maskCaptureStarted = false;
     final Future<bool> maskFuture = Future<bool>.delayed(
@@ -7829,7 +7855,11 @@ final class _MessageListState extends State<_MessageList> {
     _replyNavigationInProgress = true;
 
     try {
-      if (!await _ensureNavigationMessageAvailable(returnAnchor.messageId)) {
+      if (!await _ensureNavigationMessageAvailable(
+        returnAnchor.messageId,
+        rebuildLoadedWindow: returnAnchor.showingLatestWindow,
+        restoreLatestWindow: returnAnchor.showingLatestWindow,
+      )) {
         return;
       }
 
@@ -8781,12 +8811,14 @@ final class _MessageViewportAnchor {
   const _MessageViewportAnchor({
     required this.messageId,
     required this.historyCenterMessageId,
+    required this.showingLatestWindow,
     required this.leadingViewportOffset,
     required this.fallbackScrollOffset,
   });
 
   final String messageId;
   final String? historyCenterMessageId;
+  final bool showingLatestWindow;
   final double leadingViewportOffset;
   final double fallbackScrollOffset;
 }

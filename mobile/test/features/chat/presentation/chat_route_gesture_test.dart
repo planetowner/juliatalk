@@ -536,13 +536,39 @@ void main() {
 
       expect(backButtonFinder, findsNothing);
       expect(quoteAreaFinder, findsOneWidget);
-      expect(contextRequestCount, 2);
+      expect(
+        contextRequestCount,
+        1,
+        reason:
+            'Returning to a reply captured from the latest window must reuse '
+            'that complete window instead of requesting a 30-message context.',
+      );
 
       final Rect returnedMessageListRect = tester.getRect(messageListFinder);
       final double returnedReplyTop =
           tester.getRect(quoteAreaFinder).top - returnedMessageListRect.top;
 
       expect(returnedReplyTop, closeTo(initialReplyTop, 1));
+
+      await tester.drag(messageListFinder, const Offset(0, -500));
+      await tester.pumpAndSettle();
+
+      final Finder returnedLatestBubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-message-399'),
+      );
+      final Finder composerFinder = find.byKey(
+        const ValueKey<String>('message-composer-default'),
+      );
+
+      expect(returnedLatestBubbleFinder, findsOneWidget);
+      expect(
+        tester.getRect(composerFinder).top -
+            tester.getRect(returnedLatestBubbleFinder).bottom,
+        closeTo(12, 1),
+        reason:
+            'Returning to the actual last reply must restore the latest '
+            'structural center so no empty space can be scrolled below it.',
+      );
 
       await tester.enterText(
         find.byKey(const ValueKey<String>('message-input')),
@@ -555,10 +581,6 @@ void main() {
       final Finder newestBubbleFinder = find.byKey(
         const ValueKey<String>('outgoing-bubble-message-400'),
       );
-      final Finder composerFinder = find.byKey(
-        const ValueKey<String>('message-composer-default'),
-      );
-
       expect(newestBubbleFinder, findsOneWidget);
       expect(
         tester.getRect(composerFinder).top -

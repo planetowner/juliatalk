@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +15,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:record/record.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
@@ -106,6 +108,8 @@ typedef ChatCallOutcomeUpdater =
 typedef ChatMediaAssetAccessUrlCreator =
     Future<Uri> Function({required String mediaAssetId});
 
+typedef ChatLinkOpener = Future<bool> Function(Uri uri);
+
 typedef ChatTextMessageEditor =
     Future<ChatMessage> Function({
       required String messageId,
@@ -121,6 +125,84 @@ typedef ChatMessageDeleter = Future<void> Function({required String messageId});
 typedef ChatOlderMessagesLoader = Future<void> Function();
 typedef ChatNewerMessagesLoader = Future<void> Function();
 typedef ChatMessageLoader = Future<bool> Function(String messageId);
+
+Future<bool> _openChatLinkInSystemBrowser(Uri uri) {
+  return launchUrl(
+    uri,
+    mode: LaunchMode.inAppBrowserView,
+    browserConfiguration: const BrowserConfiguration(showTitle: true),
+  );
+}
+
+Uri? _tryParseWebUri(String? rawUrl) {
+  if (rawUrl == null) {
+    return null;
+  }
+
+  String candidate = rawUrl.trim();
+
+  if (candidate.toLowerCase().startsWith('www.')) {
+    candidate = 'https://$candidate';
+  }
+
+  final Uri? uri = Uri.tryParse(candidate);
+
+  if (uri == null ||
+      (uri.scheme != 'http' && uri.scheme != 'https') ||
+      uri.host.isEmpty) {
+    return null;
+  }
+
+  return uri;
+}
+
+Uri? _linkPreviewLaunchUri(ChatLinkPreview preview) {
+  return _tryParseWebUri(preview.url) ?? _tryParseWebUri(preview.canonicalUrl);
+}
+
+Future<void> _openChatWebUri(BuildContext context, Uri uri) async {
+  bool opened = false;
+
+  try {
+    opened = await _ChatLinkOpenerScope.read(context)(uri);
+  } catch (_) {
+    opened = false;
+  }
+
+  if (opened || !context.mounted) {
+    return;
+  }
+
+  final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(context);
+
+  if (messenger == null) {
+    return;
+  }
+
+  messenger
+    ..hideCurrentSnackBar()
+    ..showSnackBar(const SnackBar(content: Text('Unable to open this link.')));
+}
+
+final class _ChatLinkOpenerScope extends InheritedWidget {
+  const _ChatLinkOpenerScope({required this.onOpenLink, required super.child});
+
+  final ChatLinkOpener onOpenLink;
+
+  static ChatLinkOpener read(BuildContext context) {
+    final _ChatLinkOpenerScope? scope = context
+        .getInheritedWidgetOfExactType<_ChatLinkOpenerScope>();
+
+    assert(scope != null, 'No _ChatLinkOpenerScope found in context.');
+
+    return scope!.onOpenLink;
+  }
+
+  @override
+  bool updateShouldNotify(_ChatLinkOpenerScope oldWidget) {
+    return oldWidget.onOpenLink != onOpenLink;
+  }
+}
 
 enum _CallNowAction { voice, video }
 
@@ -244,6 +326,7 @@ final class ChatConversationView extends StatefulWidget {
     this.onSendCallMessage,
     this.onUpdateCallOutcome,
     this.onCreateMediaAssetAccessUrl,
+    this.onOpenLink,
     this.onEditTextMessage,
     this.onTranslateMessage,
     this.onRetryTranslation,
@@ -280,6 +363,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatCallMessageSender? onSendCallMessage;
   final ChatCallOutcomeUpdater? onUpdateCallOutcome;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatLinkOpener? onOpenLink;
   final ChatTextMessageEditor? onEditTextMessage;
   final ChatMessageTranslator? onTranslateMessage;
   final ChatMessageTranslationRetrier? onRetryTranslation;
@@ -2480,7 +2564,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
             _heldBottomSurfaceHeight != null ||
             keyboardHeight <= 0.5);
 
-    return AnnotatedRegion<SystemUiOverlayStyle>(
+    final Widget content = AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
       child: Scaffold(
         backgroundColor: showingVoiceCallScreen
@@ -2697,6 +2781,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
           ),
         ),
       ),
+    );
+
+    return _ChatLinkOpenerScope(
+      onOpenLink: widget.onOpenLink ?? _openChatLinkInSystemBrowser,
+      child: content,
     );
   }
 }
@@ -10071,7 +10160,7 @@ final class _LinkMessageContent extends StatelessWidget {
   }
 }
 
-final class _LinkifiedMessageText extends StatelessWidget {
+final class _LinkifiedMessageText extends StatefulWidget {
   const _LinkifiedMessageText({
     required this.text,
     required this.style,
@@ -10083,11 +10172,44 @@ final class _LinkifiedMessageText extends StatelessWidget {
   final Color linkColor;
 
   @override
+  State<_LinkifiedMessageText> createState() {
+    return _LinkifiedMessageTextState();
+  }
+}
+
+final class _LinkifiedMessageTextState extends State<_LinkifiedMessageText> {
+  final Map<int, TapGestureRecognizer> _linkRecognizers =
+      <int, TapGestureRecognizer>{};
+
+  @override
+  void didUpdateWidget(covariant _LinkifiedMessageText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.text != widget.text) {
+      _disposeLinkRecognizers();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposeLinkRecognizers();
+    super.dispose();
+  }
+
+  void _disposeLinkRecognizers() {
+    for (final TapGestureRecognizer recognizer in _linkRecognizers.values) {
+      recognizer.dispose();
+    }
+
+    _linkRecognizers.clear();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Text.rich(
       _buildSpan(),
       softWrap: true,
-      strutStyle: _buildMessageStrutStyle(style),
+      strutStyle: _buildMessageStrutStyle(widget.style),
       textWidthBasis: TextWidthBasis.longestLine,
       textHeightBehavior: _messageTextHeightBehavior,
     );
@@ -10097,9 +10219,13 @@ final class _LinkifiedMessageText extends StatelessWidget {
     final List<InlineSpan> children = <InlineSpan>[];
     int cursor = 0;
 
-    for (final RegExpMatch match in _messageUrlPattern.allMatches(text)) {
+    for (final RegExpMatch match in _messageUrlPattern.allMatches(
+      widget.text,
+    )) {
       if (match.start > cursor) {
-        children.add(TextSpan(text: text.substring(cursor, match.start)));
+        children.add(
+          TextSpan(text: widget.text.substring(cursor, match.start)),
+        );
       }
 
       final String rawUrl = match.group(0)!;
@@ -10114,13 +10240,25 @@ final class _LinkifiedMessageText extends StatelessWidget {
       final String trailingText = rawUrl.substring(linkEnd);
 
       if (linkText.isNotEmpty) {
+        final Uri? linkUri = _tryParseWebUri(linkText);
+        final TapGestureRecognizer? recognizer = linkUri == null
+            ? null
+            : (_linkRecognizers.putIfAbsent(
+                  match.start,
+                  TapGestureRecognizer.new,
+                )
+                ..onTap = () {
+                  unawaited(_openChatWebUri(context, linkUri));
+                });
+
         children.add(
           TextSpan(
             text: linkText,
-            style: style.copyWith(
-              color: linkColor,
+            recognizer: recognizer,
+            style: widget.style.copyWith(
+              color: widget.linkColor,
               decoration: TextDecoration.underline,
-              decorationColor: linkColor,
+              decorationColor: widget.linkColor,
               decorationThickness: 1.2,
             ),
           ),
@@ -10134,11 +10272,11 @@ final class _LinkifiedMessageText extends StatelessWidget {
       cursor = match.end;
     }
 
-    if (cursor < text.length) {
-      children.add(TextSpan(text: text.substring(cursor)));
+    if (cursor < widget.text.length) {
+      children.add(TextSpan(text: widget.text.substring(cursor)));
     }
 
-    return TextSpan(style: style, children: children);
+    return TextSpan(style: widget.style, children: children);
   }
 }
 
@@ -10168,80 +10306,94 @@ final class _LinkPreviewCard extends StatelessWidget {
     final String title = preview.title ?? preview.siteName ?? preview.domain;
     final String? description = preview.description;
     final String domain = preview.domain;
+    final Uri? launchUri = _linkPreviewLaunchUri(preview);
 
-    return SizedBox(
-      width: cardWidth,
-      child: Stack(
-        children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              color: AppColors.white,
-              borderRadius: borderRadius,
-            ),
-            child: ClipRRect(
-              borderRadius: borderRadius,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _LinkPreviewImage(preview: preview, width: cardWidth),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTypography.subTypography10.copyWith(
-                            color: AppColors.grey900,
-                            fontWeight: AppTypography.bold,
-                          ),
-                        ),
-                        if (description != null) ...[
-                          const SizedBox(height: 5),
-                          Text(
-                            description,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppTypography.subTypography12.copyWith(
-                              color: AppColors.grey600,
-                              fontWeight: AppTypography.regular,
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 8),
-                        Text(
-                          domain,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTypography.subTypography12.copyWith(
-                            color: AppColors.blue500,
-                            fontWeight: AppTypography.regular,
-                            decoration: TextDecoration.underline,
-                            decorationColor: AppColors.blue500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Positioned.fill(
-            child: IgnorePointer(
-              child: DecoratedBox(
+    return Semantics(
+      link: true,
+      label: 'Open $domain',
+      child: GestureDetector(
+        key: ValueKey<String>('link-preview-card-${preview.url}'),
+        behavior: HitTestBehavior.opaque,
+        onTap: launchUri == null
+            ? null
+            : () {
+                unawaited(_openChatWebUri(context, launchUri));
+              },
+        child: SizedBox(
+          width: cardWidth,
+          child: Stack(
+            children: [
+              DecoratedBox(
                 decoration: BoxDecoration(
+                  color: AppColors.white,
                   borderRadius: borderRadius,
-                  border: border,
+                ),
+                child: ClipRRect(
+                  borderRadius: borderRadius,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _LinkPreviewImage(preview: preview, width: cardWidth),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTypography.subTypography10.copyWith(
+                                color: AppColors.grey900,
+                                fontWeight: AppTypography.bold,
+                              ),
+                            ),
+                            if (description != null) ...[
+                              const SizedBox(height: 5),
+                              Text(
+                                description,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppTypography.subTypography12.copyWith(
+                                  color: AppColors.grey600,
+                                  fontWeight: AppTypography.regular,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 8),
+                            Text(
+                              domain,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTypography.subTypography12.copyWith(
+                                color: AppColors.blue500,
+                                fontWeight: AppTypography.regular,
+                                decoration: TextDecoration.underline,
+                                decorationColor: AppColors.blue500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: borderRadius,
+                      border: border,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

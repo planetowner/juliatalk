@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.dependencies import get_current_user
+from app.display_names import display_name_for_viewer
 from app.models import User
 from app.schemas import (
     DisplayNameUpdate,
@@ -101,9 +102,20 @@ async def change_password(
 async def list_users(
     session: SessionDependency,
     current_user: CurrentUserDependency,
-) -> list[User]:
+) -> list[UserRead]:
     result = await session.scalars(
         select(User).order_by(User.id)
     )
 
-    return list(result)
+    return [
+        UserRead.model_validate(user).model_copy(
+            update={
+                "viewer_display_name": display_name_for_viewer(
+                    viewer_username=current_user.username,
+                    subject_username=user.username,
+                    fallback=user.display_name,
+                )
+            }
+        )
+        for user in result
+    ]

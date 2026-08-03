@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
+from app.display_names import display_name_for_viewer
 from app.models import (
     CallOutcome,
     ConversationMember,
@@ -369,17 +370,22 @@ async def _send_voip_event(
     client: APNSClient,
     message: Message,
     sender: User,
-    recipient_id: UUID,
+    recipient: User,
     call_event: MessageCallEvent,
 ) -> None:
     devices = list(
         await session.scalars(
             select(UserDevice).where(
-                UserDevice.user_id == recipient_id,
+                UserDevice.user_id == recipient.id,
                 UserDevice.voip_push_token.is_not(None),
                 UserDevice.revoked_at.is_(None),
             )
         )
+    )
+    caller_name = display_name_for_viewer(
+        viewer_username=recipient.username,
+        subject_username=sender.username,
+        fallback=sender.display_name,
     )
     payload = {
         "aps": {"content-available": 1},
@@ -387,7 +393,7 @@ async def _send_voip_event(
             "action": "incoming",
             "call_uuid": str(message.id),
             "caller_id": str(sender.id),
-            "caller_name": sender.display_name,
+            "caller_name": caller_name,
             "has_video": call_event.kind.value == "video",
         },
     }
@@ -459,7 +465,7 @@ async def send_message_notification(message_id: UUID) -> None:
                 client=client,
                 message=message,
                 sender=sender,
-                recipient_id=recipient_id,
+                recipient=recipient,
                 call_event=call_event,
             )
             await session.commit()
@@ -485,11 +491,16 @@ async def send_message_notification(message_id: UUID) -> None:
             if message.kind == MessageKind.PHOTO
             else None
         )
+        sender_name = display_name_for_viewer(
+            viewer_username=recipient.username,
+            subject_username=sender.username,
+            fallback=sender.display_name,
+        )
         custom_data: dict[str, Any] = {
             "message_id": str(message.id),
             "conversation_id": str(message.conversation_id),
             "sender_id": str(sender.id),
-            "sender_name": sender.display_name,
+            "sender_name": sender_name,
             "sender_image_url": sender.profile_image_url,
             "message_type": message.kind.value,
             "language": recipient.preferred_language,
@@ -501,7 +512,7 @@ async def send_message_notification(message_id: UUID) -> None:
             {
                 "aps": {
                     "alert": {
-                        "title": sender.display_name,
+                        "title": sender_name,
                         "body": body,
                     },
                     "badge": badge,

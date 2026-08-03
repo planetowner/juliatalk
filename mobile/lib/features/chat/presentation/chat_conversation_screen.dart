@@ -79,13 +79,6 @@ final class _ChatConversationHomeScreenState
         'junebabo': <String>['liababo', 'yunjung5437'],
         'yunjung5437': <String>['junebabo', 'liababo'],
       };
-  static const Map<String, Map<String, String>> _displayNameByViewerUsername =
-      <String, Map<String, String>>{
-        'liababo': <String, String>{'junebabo': '애기🤍', 'yunjung5437': '엄마'},
-        'junebabo': <String, String>{'liababo': '오빠💙', 'yunjung5437': '阿姨'},
-        'yunjung5437': <String, String>{'junebabo': '리아', 'liababo': '준'},
-      };
-
   late final AnimationController _chatRouteController;
   late final ChatMessageCache _messageCache;
   final Map<String, List<ChatMessage>> _conversationMessagesByUserId =
@@ -251,11 +244,11 @@ final class _ChatConversationHomeScreenState
     users.sort((AppUser first, AppUser second) {
       final int firstPriority =
           priorityByName[_normalizeUserKey(first.username)] ??
-          priorityByName[_normalizeUserKey(first.displayName)] ??
+          priorityByName[_normalizeUserKey(_displayNameFor(first))] ??
           chatOrder.length;
       final int secondPriority =
           priorityByName[_normalizeUserKey(second.username)] ??
-          priorityByName[_normalizeUserKey(second.displayName)] ??
+          priorityByName[_normalizeUserKey(_displayNameFor(second))] ??
           chatOrder.length;
 
       final int priorityComparison = firstPriority.compareTo(secondPriority);
@@ -265,8 +258,8 @@ final class _ChatConversationHomeScreenState
       }
 
       return _normalizeUserKey(
-        first.displayName,
-      ).compareTo(_normalizeUserKey(second.displayName));
+        _displayNameFor(first),
+      ).compareTo(_normalizeUserKey(_displayNameFor(second)));
     });
   }
 
@@ -360,10 +353,7 @@ final class _ChatConversationHomeScreenState
   }
 
   String _displayNameFor(AppUser user) {
-    return _displayNameByViewerUsername[_normalizeUserKey(
-          widget.session.user.username,
-        )]?[_normalizeUserKey(user.username)] ??
-        user.displayName;
+    return user.effectiveDisplayName;
   }
 
   void _retryUsers() {

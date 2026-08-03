@@ -156,7 +156,10 @@ Backend:
 
 ```bash
 python -m compileall app scripts
-python -m unittest tests.test_translation tests.test_notifications
+python -m unittest \
+  tests.test_translation \
+  tests.test_notifications \
+  tests.test_display_names
 ```
 
 Flutter:

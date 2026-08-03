@@ -44,6 +44,7 @@ class UserRead(BaseModel):
     id: UUID
     username: str
     display_name: str
+    viewer_display_name: Optional[str] = None
     profile_image_url: Optional[str] = None
     preferred_language: LanguageCode
 

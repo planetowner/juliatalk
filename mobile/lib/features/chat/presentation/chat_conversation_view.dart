@@ -5931,6 +5931,7 @@ final class _MessageList extends StatefulWidget {
 
 final class _MessageListState extends State<_MessageList> {
   static const double _replyOriginalAlignment = 0.28;
+  static const double _historyCenterContentInset = 44;
   static const Duration _replyNavigationSnapshotTimeout = Duration(
     milliseconds: 80,
   );
@@ -5973,6 +5974,7 @@ final class _MessageListState extends State<_MessageList> {
   bool _replyNavigationInProgress = false;
   bool _replyNavigationMaskActive = false;
   bool _replyNavigationActivityVisible = false;
+  bool _replyOriginalViewportActive = false;
   double? _messageNavigationCenterAnchor;
   List<String> _cachedTimelineMessageIds = const <String>[];
   Set<String> _cachedTimelinePageBoundaryMessageIds = const <String>{};
@@ -6283,7 +6285,6 @@ final class _MessageListState extends State<_MessageList> {
     final String? previousLastMessageId = _messages.isEmpty
         ? null
         : _messages.last.id;
-
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
@@ -7110,9 +7111,9 @@ final class _MessageListState extends State<_MessageList> {
 
     final ScrollPosition position = _scrollController.position;
     final double viewportDimension = position.viewportDimension;
-    final double defaultCenterAnchor = viewportDimension <= 0
-        ? 0
-        : (widget.topPadding / viewportDimension).clamp(0.0, 1.0).toDouble();
+    final double defaultCenterAnchor = _defaultHistoryCenterAnchor(
+      viewportDimension,
+    );
     final double normalizedOffset =
         targetOffset +
         ((defaultCenterAnchor - navigationAnchor) * viewportDimension);
@@ -7125,6 +7126,19 @@ final class _MessageListState extends State<_MessageList> {
     await WidgetsBinding.instance.endOfFrame;
 
     return mounted && _scrollController.hasClients;
+  }
+
+  double _defaultHistoryCenterAnchor(double viewportDimension) {
+    if (viewportDimension <= 0) {
+      return 0;
+    }
+
+    final double historyCenterTop =
+        widget.topPadding +
+        (_messages.isEmpty || _replyOriginalViewportActive
+            ? 0
+            : _historyCenterContentInset);
+    return (historyCenterTop / viewportDimension).clamp(0.0, 1.0).toDouble();
   }
 
   Future<bool> _recenterAndScrollToMessage(
@@ -7801,6 +7815,9 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     _replyNavigationInProgress = true;
+    final bool previousReplyOriginalViewportActive =
+        _replyOriginalViewportActive;
+    bool didOpenOriginalMessage = false;
 
     try {
       if (_messageRenderObject(originalMessageId) == null &&
@@ -7811,6 +7828,17 @@ final class _MessageListState extends State<_MessageList> {
         return;
       }
 
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _replyOriginalViewportActive = true;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+
+      if (!mounted) {
+        return;
+      }
       final bool didNavigate = await _recenterAndScrollToMessage(
         originalMessageId,
         alignment: _replyOriginalAlignment,
@@ -7828,10 +7856,21 @@ final class _MessageListState extends State<_MessageList> {
       setState(() {
         _returnToReplyAnchor = returnAnchor;
       });
+      didOpenOriginalMessage = true;
 
       // 즉시 이동한 화면이 페인트된 뒤 원문 펄스를 실행한다.
       _flashMessage(originalMessageId);
     } finally {
+      if (!didOpenOriginalMessage &&
+          _replyOriginalViewportActive != previousReplyOriginalViewportActive) {
+        if (mounted) {
+          setState(() {
+            _replyOriginalViewportActive = previousReplyOriginalViewportActive;
+          });
+        } else {
+          _replyOriginalViewportActive = previousReplyOriginalViewportActive;
+        }
+      }
       _hideReplyNavigationSnapshot();
       _replyNavigationInProgress = false;
       ReplyNavigationDiagnostics.record(
@@ -7863,9 +7902,17 @@ final class _MessageListState extends State<_MessageList> {
         return;
       }
 
+      setState(() {
+        _replyOriginalViewportActive = false;
+      });
       final bool didRestore = await _restoreMessageViewportAnchor(returnAnchor);
 
       if (!mounted || !didRestore) {
+        if (mounted) {
+          setState(() {
+            _replyOriginalViewportActive = true;
+          });
+        }
         return;
       }
 
@@ -8253,6 +8300,7 @@ final class _MessageListState extends State<_MessageList> {
 
       if (_returnToReplyAnchor?.messageId == messageId) {
         _returnToReplyAnchor = null;
+        _replyOriginalViewportActive = false;
       }
     });
   }
@@ -8422,12 +8470,9 @@ final class _MessageListState extends State<_MessageList> {
               onNotification: _handleScrollMetricsChanged,
               child: LayoutBuilder(
                 builder: (BuildContext context, BoxConstraints constraints) {
-                  final double viewportHeight = constraints.maxHeight;
-                  final double centerAnchor = viewportHeight > 0
-                      ? (widget.topPadding / viewportHeight)
-                            .clamp(0.0, 1.0)
-                            .toDouble()
-                      : 0.0;
+                  final double centerAnchor = _defaultHistoryCenterAnchor(
+                    constraints.maxHeight,
+                  );
                   final double resolvedCenterAnchor =
                       _messageNavigationCenterAnchor ?? centerAnchor;
 

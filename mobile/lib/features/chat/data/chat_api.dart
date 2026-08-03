@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import '../../auth/domain/app_user.dart';
 import '../domain/chat_message.dart';
 import 'chat_api_exception.dart';
+import 'device_link_preview_fetcher.dart';
 
 final class ChatConversationPage {
   ChatConversationPage({
@@ -463,19 +464,32 @@ final class ChatApi {
     required String recipientId,
     required String content,
     String? replyToMessageId,
-  }) {
+  }) async {
     final String? previewUrl = _firstUrlInText(content);
+    Map<String, Object?>? metadata;
+
+    if (previewUrl != null) {
+      metadata = <String, Object?>{
+        'url': previewUrl,
+        'domain': _domainForUrl(previewUrl),
+      };
+      final Uri? previewUri = Uri.tryParse(previewUrl);
+
+      if (previewUri != null) {
+        final Map<String, Object?>? devicePreview =
+            await DeviceLinkPreviewFetcher(client: _client).fetch(previewUri);
+
+        if (devicePreview != null) {
+          metadata.addAll(devicePreview);
+        }
+      }
+    }
 
     return _createMessage(
       recipientId: recipientId,
       content: content,
       messageType: previewUrl == null ? 'text' : 'link',
-      metadata: previewUrl == null
-          ? null
-          : <String, Object?>{
-              'url': previewUrl,
-              'domain': _domainForUrl(previewUrl),
-            },
+      metadata: metadata,
       replyToMessageId: replyToMessageId,
     );
   }

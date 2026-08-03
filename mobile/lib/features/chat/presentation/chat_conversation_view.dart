@@ -10250,8 +10250,6 @@ final class _LinkPreviewCard extends StatelessWidget {
 final class _LinkPreviewImage extends StatelessWidget {
   const _LinkPreviewImage({required this.preview, required this.width});
 
-  static const double _height = 128;
-
   final ChatLinkPreview preview;
   final double width;
 
@@ -10259,42 +10257,51 @@ final class _LinkPreviewImage extends StatelessWidget {
   Widget build(BuildContext context) {
     final String? imageUrl = preview.imageUrl;
     final Uri? imageUri = imageUrl == null ? null : Uri.tryParse(imageUrl);
+    final double height = width / 2;
+    final Widget child;
 
     if (imageUri == null ||
         (imageUri.scheme != 'http' && imageUri.scheme != 'https')) {
-      return _buildPlaceholder();
+      child = _buildPlaceholder(height);
+    } else {
+      child = Image.network(
+        imageUri.toString(),
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        loadingBuilder:
+            (
+              BuildContext context,
+              Widget child,
+              ImageChunkEvent? loadingProgress,
+            ) {
+              if (loadingProgress == null) {
+                return child;
+              }
+
+              return _buildPlaceholder(height);
+            },
+        errorBuilder: (_, _, _) {
+          return _buildPlaceholder(height);
+        },
+      );
     }
 
-    return Image.network(
-      imageUri.toString(),
+    return SizedBox(
+      key: ValueKey<String>('link-preview-image-${preview.url}'),
       width: width,
-      height: _height,
-      fit: BoxFit.cover,
-      gaplessPlayback: true,
-      loadingBuilder:
-          (
-            BuildContext context,
-            Widget child,
-            ImageChunkEvent? loadingProgress,
-          ) {
-            if (loadingProgress == null) {
-              return child;
-            }
-
-            return _buildPlaceholder();
-          },
-      errorBuilder: (_, _, _) {
-        return _buildPlaceholder();
-      },
+      height: height,
+      child: child,
     );
   }
 
-  Widget _buildPlaceholder() {
+  Widget _buildPlaceholder(double height) {
     final String label = preview.siteName ?? preview.domain;
 
     return Container(
       width: width,
-      height: _height,
+      height: height,
       alignment: Alignment.center,
       color: AppColors.grey50,
       padding: const EdgeInsets.symmetric(horizontal: 18),

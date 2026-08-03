@@ -107,7 +107,13 @@ CALL_KINDS = {
 
 UNSEND_WINDOW = timedelta(minutes=5)
 LINK_PREVIEW_FETCH_TIMEOUT_SECONDS = 4
-LINK_PREVIEW_MAX_BYTES = 256 * 1024
+LINK_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+LINK_PREVIEW_READ_CHUNK_BYTES = 64 * 1024
+LINK_PREVIEW_USER_AGENT = (
+    "facebookexternalhit/1.1; kakaotalk-scrap/1.0; "
+    "+https://devtalk.kakao.com/t/scrap/33984"
+)
+LINK_PREVIEW_ACCEPT_LANGUAGE = "ko-KR,ko;q=0.8,en-US;q=0.6,en;q=0.4"
 URL_PATTERN = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>'\"]+")
 TRAILING_URL_PUNCTUATION = ".,!?;:)]}…"
 
@@ -266,6 +272,80 @@ def build_fallback_link_preview(
     return {key: value for key, value in preview.items() if value}
 
 
+def read_link_preview_html(response: Any) -> bytes:
+    chunks: list[bytes] = []
+    previous_tail = b""
+    total_bytes = 0
+
+    while total_bytes < LINK_PREVIEW_MAX_BYTES:
+        remaining_bytes = LINK_PREVIEW_MAX_BYTES - total_bytes
+        chunk = response.read(
+            min(LINK_PREVIEW_READ_CHUNK_BYTES, remaining_bytes)
+        )
+
+        if not chunk:
+            break
+
+        chunks.append(chunk)
+        total_bytes += len(chunk)
+        searchable_chunk = (previous_tail + chunk).lower()
+
+        if b"</head" in searchable_chunk:
+            break
+
+        previous_tail = searchable_chunk[-16:]
+
+    return b"".join(chunks)
+
+
+def parse_link_preview_html(
+    raw_body: bytes,
+    *,
+    charset: str,
+) -> LinkPreviewHTMLParser:
+    parser = LinkPreviewHTMLParser()
+
+    try:
+        parser.feed(raw_body.decode(charset, errors="replace"))
+    except (LookupError, UnicodeDecodeError):
+        parser.feed(raw_body.decode("utf-8", errors="replace"))
+
+    return parser
+
+
+def fetch_link_preview_html(
+    url: str,
+) -> tuple[str, LinkPreviewHTMLParser]:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": LINK_PREVIEW_USER_AGENT,
+            "Accept": "*/*",
+            "Accept-Language": LINK_PREVIEW_ACCEPT_LANGUAGE,
+        },
+    )
+
+    with urlopen(
+        request,
+        timeout=LINK_PREVIEW_FETCH_TIMEOUT_SECONDS,
+    ) as response:
+        content_type = response.headers.get("Content-Type", "")
+
+        if (
+            "html" not in content_type.lower()
+            and "text" not in content_type.lower()
+        ):
+            raise ValueError(
+                f"Unsupported link preview content type: {content_type}"
+            )
+
+        charset = response.headers.get_content_charset() or "utf-8"
+        raw_body = read_link_preview_html(response)
+        response_url = response.geturl() or url
+
+    return response_url, parse_link_preview_html(raw_body, charset=charset)
+
+
 def build_link_preview_metadata(
     content: str,
     metadata: Optional[dict[str, Any]],
@@ -282,46 +362,22 @@ def build_link_preview_metadata(
         return fallback
 
     try:
-        request = Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; JuliaTalkLinkPreview/1.0)"
-                ),
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        )
-
-        with urlopen(
-            request,
-            timeout=LINK_PREVIEW_FETCH_TIMEOUT_SECONDS,
-        ) as response:
-            content_type = response.headers.get("Content-Type", "")
-
-            if (
-                "html" not in content_type.lower()
-                and "text" not in content_type.lower()
-            ):
-                return fallback
-
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw_body = response.read(LINK_PREVIEW_MAX_BYTES)
+        fetched_url, parser = fetch_link_preview_html(url)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-        logger.info("Link preview fetch failed for %s: %s", url, error)
+        logger.warning(
+            "Link preview fetch failed for %s: %s: %s",
+            url,
+            type(error).__name__,
+            error,
+        )
         return fallback
 
-    parser = LinkPreviewHTMLParser()
-
-    try:
-        parser.feed(raw_body.decode(charset, errors="replace"))
-    except (LookupError, UnicodeDecodeError):
-        parser.feed(raw_body.decode("utf-8", errors="replace"))
-
     meta = parser.meta
-    canonical_url = clean_preview_text(
-        meta.get("og:url") or fallback.get("canonical_url") or url,
+    canonical_reference = clean_preview_text(
+        meta.get("og:url") or fetched_url or fallback.get("canonical_url") or url,
         max_length=1000,
     )
+    canonical_url = urljoin(fetched_url, canonical_reference or url)
     title = clean_preview_text(
         meta.get("og:title") or meta.get("twitter:title") or parser.title,
         max_length=180,
@@ -344,13 +400,13 @@ def build_link_preview_metadata(
     )
 
     if image_url is not None:
-        image_url = urljoin(url, image_url)
+        image_url = urljoin(fetched_url, image_url)
 
     preview = {
         **fallback,
         "url": url,
-        "canonical_url": canonical_url or url,
-        "domain": domain_for_url(canonical_url or url),
+        "canonical_url": canonical_url,
+        "domain": domain_for_url(url),
     }
 
     if title is not None:

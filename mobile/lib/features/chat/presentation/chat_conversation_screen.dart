@@ -908,6 +908,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   StreamSubscription<Map<String, dynamic>>? _realtimeEventSubscription;
   Future<void>? _olderMessagesLoadFuture;
   Future<void>? _newerMessagesLoadFuture;
+  int _messageWindowGeneration = 0;
   late bool _loading;
   String? _errorMessage;
   bool _syncingAfterReconnect = false;
@@ -1091,6 +1092,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (restoreLatestWindow &&
         _latestMessages.any((ChatMessage message) => message.id == messageId) &&
         mounted) {
+      _messageWindowGeneration += 1;
       setState(() {
         _showingLatestWindow = true;
         _messages = _latestMessages;
@@ -1177,12 +1179,34 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   }
 
   void _showConversationContext(ChatCachedConversation context) {
+    _messageWindowGeneration += 1;
     setState(() {
       _showingLatestWindow = false;
       _messages = context.messages;
       _hasMoreMessages = context.hasMoreOlder;
       _hasMoreNewerMessages = context.hasMoreNewer;
     });
+  }
+
+  Future<void> _showLatestMessages() async {
+    if (!mounted) {
+      return;
+    }
+
+    _messageWindowGeneration += 1;
+
+    if (_showingLatestWindow && !_hasMoreNewerMessages) {
+      return;
+    }
+
+    setState(() {
+      _showingLatestWindow = true;
+      _messages = _latestMessages;
+      _hasMoreMessages = _latestHasMoreMessages;
+      _hasMoreNewerMessages = false;
+    });
+
+    await WidgetsBinding.instance.endOfFrame;
   }
 
   Future<ChatConversationContext?> _requestMessageContextWithRetry(
@@ -1247,6 +1271,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       return;
     }
 
+    final int messageWindowGeneration = _messageWindowGeneration;
     setState(() {
       _loadingOlderMessages = true;
     });
@@ -1260,7 +1285,11 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
             limit: _conversationPageSize,
           );
 
-      if (cachedPage != null && cachedPage.messages.isNotEmpty && mounted) {
+      if (!mounted || messageWindowGeneration != _messageWindowGeneration) {
+        return;
+      }
+
+      if (cachedPage != null && cachedPage.messages.isNotEmpty) {
         setState(() {
           _showingLatestWindow = false;
           _messages = _mergeMessageLists(cachedPage.messages, _messages);
@@ -1276,7 +1305,9 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
             limit: _conversationPageSize,
           );
 
-      if (!mounted || page == null) {
+      if (!mounted ||
+          page == null ||
+          messageWindowGeneration != _messageWindowGeneration) {
         return;
       }
 
@@ -1344,6 +1375,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       return;
     }
 
+    final int messageWindowGeneration = _messageWindowGeneration;
     setState(() {
       _loadingNewerMessages = true;
     });
@@ -1357,7 +1389,11 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
             limit: _conversationPageSize,
           );
 
-      if (cachedPage != null && cachedPage.messages.isNotEmpty && mounted) {
+      if (!mounted || messageWindowGeneration != _messageWindowGeneration) {
+        return;
+      }
+
+      if (cachedPage != null && cachedPage.messages.isNotEmpty) {
         setState(() {
           _messages = _mergeMessageLists(_messages, cachedPage.messages);
           _hasMoreNewerMessages = cachedPage.hasMoreNewer;
@@ -1372,7 +1408,9 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
             limit: _conversationPageSize,
           );
 
-      if (!mounted || page == null) {
+      if (!mounted ||
+          page == null ||
+          messageWindowGeneration != _messageWindowGeneration) {
         return;
       }
 
@@ -1988,6 +2026,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         loadingNewerMessages: _loadingNewerMessages,
         onLoadOlderMessages: _loadOlderMessages,
         onLoadNewerMessages: _loadNewerMessages,
+        onShowLatestMessages: _showLatestMessages,
         onEnsureMessageLoaded: _ensureMessageLoaded,
         showLatestReadReceipt: !_hasMoreNewerMessages,
         currentUserId: widget.currentUser.id,

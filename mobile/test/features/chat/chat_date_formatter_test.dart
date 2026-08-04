@@ -9,4 +9,8 @@ void main() {
   test('formats a single-digit day without a leading zero', () {
     expect(formatChatDate(DateTime(2026, 7, 4)), 'Saturday, July 4, 2026');
   });
+
+  test('formats the compact date used beside the chat scrollbar', () {
+    expect(formatChatScrollDate(DateTime(2026, 7, 28)), 'Tue, 7/28');
+  });
 }

@@ -53,6 +53,25 @@ List<ChatMessage> _variableHeightMessages(int count) {
   });
 }
 
+Animation<double> _messageScrollbarOpacity(WidgetTester tester) {
+  final CustomPaint scrollbar = tester.widget<CustomPaint>(
+    find.byKey(const ValueKey<String>('message-scrollbar')),
+  );
+  final dynamic painter = scrollbar.painter;
+
+  return painter.opacity as Animation<double>;
+}
+
+double? _retainedMessageScrollbarThumbLength(WidgetTester tester) {
+  final CustomPaint scrollbar = tester.widget<CustomPaint>(
+    find.byKey(const ValueKey<String>('message-scrollbar')),
+  );
+  final dynamic painter = scrollbar.painter;
+  final dynamic metrics = painter.metricsListenable.value;
+
+  return metrics.retainedThumbLength as double?;
+}
+
 final class _PaginationHarness extends StatefulWidget {
   const _PaginationHarness({
     required this.firstRequestStarted,
@@ -179,6 +198,60 @@ final class _NewerPaginationHarnessState
   }
 }
 
+final class _OlderPageAvalancheHarness extends StatefulWidget {
+  const _OlderPageAvalancheHarness({super.key});
+
+  @override
+  State<_OlderPageAvalancheHarness> createState() {
+    return _OlderPageAvalancheHarnessState();
+  }
+}
+
+final class _OlderPageAvalancheHarnessState
+    extends State<_OlderPageAvalancheHarness> {
+  List<ChatMessage> messages = List<ChatMessage>.unmodifiable(
+    _messages(1000, 1100),
+  );
+  bool loadingOlderMessages = false;
+  int loadCount = 0;
+
+  Future<void> _loadOlderMessages() async {
+    if (loadingOlderMessages) {
+      return;
+    }
+
+    final int pageEnd = 1000 - (loadCount * 100);
+    final int pageStart = pageEnd - 100;
+
+    setState(() {
+      loadingOlderMessages = true;
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    setState(() {
+      loadCount += 1;
+      messages = List<ChatMessage>.unmodifiable(<ChatMessage>[
+        ..._messages(pageStart, pageEnd),
+        ...messages,
+      ]);
+      loadingOlderMessages = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: ChatConversationView(
+        initialMessages: messages,
+        hasMoreMessages: true,
+        loadingOlderMessages: loadingOlderMessages,
+        onLoadOlderMessages: _loadOlderMessages,
+        initialClock: DateTime(2026, 7, 2),
+      ),
+    );
+  }
+}
+
 void main() {
   testWidgets('a recreated cached conversation settles at the actual bottom', (
     WidgetTester tester,
@@ -223,7 +296,7 @@ void main() {
   });
 
   testWidgets(
-    'loads every older page while preserving the visible message position',
+    'loads each older page near its stable boundary while preserving position',
     (WidgetTester tester) async {
       final Completer<void> firstRequestStarted = Completer<void>();
       final Completer<void> releaseFirstRequest = Completer<void>();
@@ -260,11 +333,11 @@ void main() {
         harnessKey.currentState!.loadCount,
         2,
         reason:
-            'The expanded prefetch window should continue with the next page '
-            'before the user reaches the loaded history edge.',
+            'The first 60-message page does not fill the six-viewport prefetch '
+            'window, so the remaining 40-message page should also be loaded.',
       );
 
-      await tester.drag(listFinder, const Offset(0, 4000));
+      await tester.drag(listFinder, const Offset(0, 10000));
       await tester.pumpAndSettle();
 
       expect(harnessKey.currentState!.loadCount, 2);
@@ -349,6 +422,35 @@ void main() {
   );
 
   testWidgets(
+    'does not cascade through older pages before the inserted page is scrolled',
+    (WidgetTester tester) async {
+      final GlobalKey<_OlderPageAvalancheHarnessState> harnessKey =
+          GlobalKey<_OlderPageAvalancheHarnessState>();
+
+      await tester.pumpWidget(_OlderPageAvalancheHarness(key: harnessKey));
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      await tester.drag(listFinder, const Offset(0, 10000));
+      await tester.pumpAndSettle();
+
+      expect(
+        harnessKey.currentState!.loadCount,
+        1,
+        reason:
+            'A newly prepended 100-message page must move the stable prefetch '
+            'boundary away from the viewport instead of triggering the next '
+            'page from a stale lazy-sliver extent.',
+      );
+
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(harnessKey.currentState!.loadCount, 1);
+    },
+  );
+
+  testWidgets(
     'keeps the visible position stable when a newer page is appended',
     (WidgetTester tester) async {
       final Completer<void> requestStarted = Completer<void>();
@@ -383,6 +485,155 @@ void main() {
       expect(tester.getTopLeft(anchorMessage).dy, closeTo(anchorTopBefore, 1));
       expect(harnessKey.currentState!.loadCount, 1);
       expect(harnessKey.currentState!.hasMoreNewerMessages, isFalse);
+    },
+  );
+
+  testWidgets(
+    'scrolling to latest retains a visible scrollbar before fading it',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: _messages(0, 200),
+            initialClock: DateTime(2026, 7, 1, 12),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Finder latestButtonFinder = find.byKey(
+        const ValueKey<String>('scroll-to-latest-message'),
+      );
+
+      await tester.drag(listFinder, const Offset(0, 1000));
+      await tester.pumpAndSettle();
+
+      final BuildContext listContext = tester.element(listFinder);
+      final ScrollableState scrollableState = tester.state<ScrollableState>(
+        find.descendant(of: listFinder, matching: find.byType(Scrollable)),
+      );
+      ScrollStartNotification(
+        metrics: scrollableState.position,
+        context: listContext,
+        dragDetails: DragStartDetails(),
+      ).dispatch(listContext);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(latestButtonFinder, findsOneWidget);
+      expect(_messageScrollbarOpacity(tester).value, closeTo(1, 0.001));
+      expect(_retainedMessageScrollbarThumbLength(tester), isNull);
+
+      ScrollEndNotification(
+        metrics: scrollableState.position,
+        context: listContext,
+        dragDetails: DragEndDetails(),
+      ).dispatch(listContext);
+      await tester.pump();
+      await tester.tap(latestButtonFinder);
+      await tester.pump();
+
+      final double retainedThumbLength = _retainedMessageScrollbarThumbLength(
+        tester,
+      )!;
+
+      expect(retainedThumbLength, greaterThan(0));
+
+      await tester.pump(const Duration(milliseconds: 900));
+
+      expect(_messageScrollbarOpacity(tester).value, closeTo(1, 0.001));
+      expect(_retainedMessageScrollbarThumbLength(tester), retainedThumbLength);
+
+      await tester.pump(const Duration(milliseconds: 120));
+
+      expect(_messageScrollbarOpacity(tester).value, closeTo(1, 0.001));
+      expect(_retainedMessageScrollbarThumbLength(tester), retainedThumbLength);
+
+      await tester.pump(const Duration(milliseconds: 40));
+
+      expect(_messageScrollbarOpacity(tester).value, inExclusiveRange(0, 1));
+      expect(_retainedMessageScrollbarThumbLength(tester), retainedThumbLength);
+
+      await tester.pump(const Duration(milliseconds: 260));
+      await tester.pump();
+
+      expect(_messageScrollbarOpacity(tester).value, 0);
+      expect(_retainedMessageScrollbarThumbLength(tester), isNull);
+    },
+  );
+
+  testWidgets(
+    'scrolling to latest does not revive an already hidden scrollbar',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: _messages(0, 200),
+            initialClock: DateTime(2026, 7, 1, 12),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Finder latestButtonFinder = find.byKey(
+        const ValueKey<String>('scroll-to-latest-message'),
+      );
+
+      await tester.drag(listFinder, const Offset(0, 1000));
+      await tester.pump(const Duration(milliseconds: 800));
+
+      expect(latestButtonFinder, findsOneWidget);
+      expect(_messageScrollbarOpacity(tester).value, 0);
+
+      await tester.tap(latestButtonFinder);
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(_messageScrollbarOpacity(tester).value, 0);
+      expect(_retainedMessageScrollbarThumbLength(tester), isNull);
+    },
+  );
+
+  testWidgets(
+    'shows the latest button only after scrolling one screen from the bottom',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: _messages(0, 200),
+            initialClock: DateTime(2026, 7, 1, 12),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final Finder listFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Finder latestButtonFinder = find.byKey(
+        const ValueKey<String>('scroll-to-latest-message'),
+      );
+      final ScrollableState scrollableState = tester.state<ScrollableState>(
+        find.descendant(of: listFinder, matching: find.byType(Scrollable)),
+      );
+      final ScrollPosition position = scrollableState.position;
+      final double screenHeight = MediaQuery.sizeOf(
+        tester.element(listFinder),
+      ).height;
+
+      position.jumpTo(position.maxScrollExtent - screenHeight);
+      await tester.pump();
+
+      expect(latestButtonFinder, findsNothing);
+
+      position.jumpTo(position.maxScrollExtent - screenHeight - 1);
+      await tester.pump();
+
+      expect(latestButtonFinder, findsOneWidget);
     },
   );
 }

@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -27,6 +28,7 @@ import '../domain/chat_message_group.dart';
 import '../domain/chat_message_grouper.dart';
 import 'chat_date_formatter.dart';
 import 'chat_photo_picker.dart';
+import 'chat_scrollbar_range_tracker.dart';
 import 'read_receipt_formatter.dart';
 import 'reply_navigation_diagnostics.dart';
 
@@ -124,6 +126,7 @@ typedef ChatMessageTranslationRetrier =
 typedef ChatMessageDeleter = Future<void> Function({required String messageId});
 typedef ChatOlderMessagesLoader = Future<void> Function();
 typedef ChatNewerMessagesLoader = Future<void> Function();
+typedef ChatLatestWindowRestorer = Future<void> Function();
 typedef ChatMessageLoader =
     Future<bool> Function(
       String messageId, {
@@ -315,6 +318,7 @@ final class ChatConversationView extends StatefulWidget {
     this.loadingNewerMessages = false,
     this.onLoadOlderMessages,
     this.onLoadNewerMessages,
+    this.onShowLatestMessages,
     this.onEnsureMessageLoaded,
     this.showLatestReadReceipt = true,
     this.currentUserId = _currentUserId,
@@ -352,6 +356,7 @@ final class ChatConversationView extends StatefulWidget {
   final bool loadingNewerMessages;
   final ChatOlderMessagesLoader? onLoadOlderMessages;
   final ChatNewerMessagesLoader? onLoadNewerMessages;
+  final ChatLatestWindowRestorer? onShowLatestMessages;
   final ChatMessageLoader? onEnsureMessageLoaded;
   final bool showLatestReadReceipt;
   final String currentUserId;
@@ -2593,6 +2598,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       loadingNewerMessages: widget.loadingNewerMessages,
                       onLoadOlderMessages: widget.onLoadOlderMessages,
                       onLoadNewerMessages: widget.onLoadNewerMessages,
+                      onShowLatestMessages: widget.onShowLatestMessages,
                       onEnsureMessageLoaded: widget.onEnsureMessageLoaded,
                       showLatestReadReceipt: widget.showLatestReadReceipt,
                       currentUserId: widget.currentUserId,
@@ -5859,6 +5865,7 @@ final class _MessageList extends StatefulWidget {
     required this.loadingNewerMessages,
     required this.onLoadOlderMessages,
     required this.onLoadNewerMessages,
+    required this.onShowLatestMessages,
     required this.onEnsureMessageLoaded,
     required this.showLatestReadReceipt,
     required this.currentUserId,
@@ -5896,6 +5903,7 @@ final class _MessageList extends StatefulWidget {
   final bool loadingNewerMessages;
   final ChatOlderMessagesLoader? onLoadOlderMessages;
   final ChatNewerMessagesLoader? onLoadNewerMessages;
+  final ChatLatestWindowRestorer? onShowLatestMessages;
   final ChatMessageLoader? onEnsureMessageLoaded;
   final bool showLatestReadReceipt;
   final String currentUserId;
@@ -5929,7 +5937,8 @@ final class _MessageList extends StatefulWidget {
   }
 }
 
-final class _MessageListState extends State<_MessageList> {
+final class _MessageListState extends State<_MessageList>
+    with TickerProviderStateMixin {
   static const double _replyOriginalAlignment = 0.28;
   static const double _historyCenterContentInset = 44;
   static const Duration _replyNavigationSnapshotTimeout = Duration(
@@ -5945,7 +5954,12 @@ final class _MessageListState extends State<_MessageList> {
   static const Duration _bottomAnchorPreservationDuration = Duration(
     milliseconds: 400,
   );
-
+  static const Duration _scrollDateRefreshInterval = Duration(milliseconds: 50);
+  static const Duration _scrollDateHideDelay = Duration(milliseconds: 120);
+  static const Duration _scrollbarHideDelay = Duration(milliseconds: 520);
+  static const Duration _scrollToLatestScrollbarHoldDuration = Duration(
+    seconds: 1,
+  );
   final Set<String> _showTranslatedMessageIds = <String>{};
   final Set<String> _historyPageBoundaryMessageIds = <String>{};
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
@@ -5954,6 +5968,14 @@ final class _MessageListState extends State<_MessageList> {
   final GlobalKey _messageListRepaintBoundaryKey = GlobalKey();
   final Key _historyCenterSliverKey = UniqueKey();
   late final _ViewportAnchorScrollController _scrollController;
+  late final AnimationController _scrollbarOpacityController;
+  late final AnimationController _scrollDateOpacityController;
+  late final Animation<double> _scrollDateOpacityAnimation;
+  late final ValueNotifier<_MessageScrollOverlayMetrics?>
+  _scrollOverlayMetricsNotifier;
+  late final ValueNotifier<bool> _showScrollToLatestButtonNotifier;
+  final ChatScrollbarRangeTracker _scrollbarRangeTracker =
+      ChatScrollbarRangeTracker();
   bool _didResolveInitialScrollPosition = false;
   bool _olderMessagesLoadInProgress = false;
   bool _newerMessagesLoadInProgress = false;
@@ -5962,9 +5984,13 @@ final class _MessageListState extends State<_MessageList> {
   bool _bottomSettleFrameScheduled = false;
   double? _bottomSettleLastMaxScrollExtent;
   int _bottomSettleStableFrameCount = 0;
+  Completer<void>? _bottomSettleCompletion;
 
   Timer? _bottomAnchorPreservationTimer;
   Timer? _messageHighlightTimer;
+  Timer? _scrollDateRefreshTimer;
+  Timer? _scrollDateHideTimer;
+  Timer? _scrollbarHideTimer;
 
   String? _highlightedMessageId;
   String? _historyCenterMessageId;
@@ -5975,7 +6001,12 @@ final class _MessageListState extends State<_MessageList> {
   bool _replyNavigationMaskActive = false;
   bool _replyNavigationActivityVisible = false;
   bool _replyOriginalViewportActive = false;
+  bool _scrollToLatestInProgress = false;
+  bool _manualScrollSessionActive = false;
+  bool _manualScrollHasMoved = false;
+  double? _scrollToLatestRetainedThumbLength;
   double? _messageNavigationCenterAnchor;
+  DateTime? _activeScrollDate;
   List<String> _cachedTimelineMessageIds = const <String>[];
   Set<String> _cachedTimelinePageBoundaryMessageIds = const <String>{};
   List<_TimelineMessageGroupRange> _cachedTimelineGroupRanges =
@@ -5988,6 +6019,25 @@ final class _MessageListState extends State<_MessageList> {
   @override
   void initState() {
     super.initState();
+
+    _scrollbarOpacityController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 90),
+      reverseDuration: const Duration(milliseconds: 260),
+    );
+    _scrollDateOpacityController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 90),
+      reverseDuration: const Duration(milliseconds: 170),
+    );
+    _scrollDateOpacityAnimation = CurvedAnimation(
+      parent: _scrollDateOpacityController,
+      curve: Curves.easeOut,
+      reverseCurve: Curves.easeOut,
+    );
+    _scrollOverlayMetricsNotifier =
+        ValueNotifier<_MessageScrollOverlayMetrics?>(null);
+    _showScrollToLatestButtonNotifier = ValueNotifier<bool>(false);
 
     _scrollController = _ViewportAnchorScrollController(
       bottomPadding: () => widget.bottomPadding,
@@ -6023,6 +6073,35 @@ final class _MessageListState extends State<_MessageList> {
     _scheduleBottomSettleFrame();
   }
 
+  Future<void> _settleAtBottom() {
+    if (!mounted || _bottomPinCanceledByUserScroll) {
+      return Future<void>.value();
+    }
+
+    final Completer<void> completion = Completer<void>();
+    final Completer<void>? previousCompletion = _bottomSettleCompletion;
+    if (previousCompletion != null && !previousCompletion.isCompleted) {
+      previousCompletion.complete();
+    }
+    _bottomSettleCompletion = completion;
+    _beginBottomSettle();
+
+    if (!_bottomSettleActive) {
+      _completeBottomSettle();
+    }
+
+    return completion.future;
+  }
+
+  void _completeBottomSettle() {
+    final Completer<void>? completion = _bottomSettleCompletion;
+    _bottomSettleCompletion = null;
+
+    if (completion != null && !completion.isCompleted) {
+      completion.complete();
+    }
+  }
+
   void _scheduleBottomSettleFrame() {
     if (!mounted || !_bottomSettleActive || _bottomSettleFrameScheduled) {
       return;
@@ -6039,6 +6118,7 @@ final class _MessageListState extends State<_MessageList> {
   void _resolveBottomSettle() {
     if (!mounted || !_bottomSettleActive || _bottomPinCanceledByUserScroll) {
       _bottomSettleActive = false;
+      _completeBottomSettle();
       return;
     }
 
@@ -6073,6 +6153,7 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     _bottomSettleActive = false;
+    _completeBottomSettle();
 
     if (_didResolveInitialScrollPosition) {
       return;
@@ -6084,6 +6165,8 @@ final class _MessageListState extends State<_MessageList> {
     setState(() {
       _didResolveInitialScrollPosition = true;
     });
+    _updateScrollOverlayMetrics();
+    _updateScrollToLatestButtonVisibility();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
@@ -6097,8 +6180,241 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   void _handleMessageListScroll() {
+    _updateScrollOverlayMetrics();
     _maybeLoadOlderMessages();
     _maybeLoadNewerMessages();
+    _updateScrollToLatestButtonVisibility();
+
+    if (_manualScrollSessionActive) {
+      _scheduleActiveScrollDateRefresh();
+    }
+  }
+
+  void _updateScrollOverlayMetrics() {
+    if (!mounted ||
+        !_scrollController.hasClients ||
+        !_scrollController.position.hasContentDimensions) {
+      return;
+    }
+
+    final ScrollPosition position = _scrollController.position;
+    if (!_didResolveInitialScrollPosition) {
+      _scrollbarRangeTracker.reset();
+    }
+    final ChatScrollbarRangeSnapshot stableRange = _scrollbarRangeTracker
+        .update(
+          rawMinimumExtent: position.minScrollExtent,
+          rawMaximumExtent: position.maxScrollExtent,
+          rawPixels: position.pixels,
+          viewportDimension: position.viewportDimension,
+          messageCount: _messages.length,
+          hasMoreBefore: widget.hasMoreMessages,
+          hasMoreAfter: widget.hasMoreNewerMessages,
+        );
+    _scrollOverlayMetricsNotifier.value = _MessageScrollOverlayMetrics(
+      minScrollExtent: stableRange.minimumExtent,
+      maxScrollExtent: stableRange.maximumExtent,
+      pixels: stableRange.pixels,
+      viewportDimension: stableRange.viewportDimension,
+      messageCountScale: stableRange.messageCountScale,
+      retainedThumbLength: _scrollToLatestRetainedThumbLength,
+      topPadding: widget.topPadding,
+      bottomPadding: widget.bottomPadding,
+      date: _activeScrollDate,
+    );
+  }
+
+  void _updateScrollToLatestButtonVisibility() {
+    if (!mounted ||
+        !_didResolveInitialScrollPosition ||
+        _replyNavigationInProgress ||
+        _scrollToLatestInProgress ||
+        !_scrollController.hasClients ||
+        !_scrollController.position.hasContentDimensions) {
+      _showScrollToLatestButtonNotifier.value = false;
+      return;
+    }
+
+    final ChatScrollbarRangeSnapshot? stableRange =
+        _scrollbarRangeTracker.currentSnapshot;
+    if (stableRange == null) {
+      _showScrollToLatestButtonNotifier.value = false;
+      return;
+    }
+
+    final double latestButtonBottomDistanceThreshold = MediaQuery.sizeOf(
+      context,
+    ).height;
+    final bool isAwayFromLatest =
+        widget.hasMoreNewerMessages ||
+        stableRange.maximumExtent - stableRange.pixels >
+            latestButtonBottomDistanceThreshold;
+    _showScrollToLatestButtonNotifier.value = isAwayFromLatest;
+  }
+
+  void _showManualScrollChrome({bool showDate = true}) {
+    _scrollbarHideTimer?.cancel();
+    _scrollToLatestRetainedThumbLength = null;
+    unawaited(_scrollbarOpacityController.forward());
+
+    if (showDate) {
+      _scrollDateHideTimer?.cancel();
+      unawaited(_scrollDateOpacityController.forward());
+      _refreshActiveScrollDate();
+    }
+
+    _updateScrollOverlayMetrics();
+  }
+
+  void _retainVisibleScrollbarForScrollToLatest() {
+    _scrollbarHideTimer?.cancel();
+
+    final _MessageScrollOverlayMetrics? metrics =
+        _scrollOverlayMetricsNotifier.value;
+
+    if (_scrollbarOpacityController.value <= 0 || metrics == null) {
+      _scrollToLatestRetainedThumbLength = null;
+      return;
+    }
+
+    final _MessageScrollGeometry geometry = _MessageScrollGeometry.resolve(
+      metrics,
+      Size(1, metrics.viewportDimension),
+    );
+
+    if (!geometry.canPaint) {
+      _scrollToLatestRetainedThumbLength = null;
+      return;
+    }
+
+    _scrollbarOpacityController.stop();
+    _scrollToLatestRetainedThumbLength = geometry.thumbRect.height;
+    _updateScrollOverlayMetrics();
+    _scrollbarHideTimer = Timer(_scrollToLatestScrollbarHoldDuration, () {
+      _scrollbarHideTimer = null;
+
+      if (!mounted || _manualScrollSessionActive) {
+        return;
+      }
+
+      unawaited(_hideScrollToLatestRetainedScrollbar());
+    });
+  }
+
+  Future<void> _hideScrollToLatestRetainedScrollbar() async {
+    await _scrollbarOpacityController.reverse();
+
+    if (!mounted || _manualScrollSessionActive) {
+      return;
+    }
+
+    _scrollToLatestRetainedThumbLength = null;
+    _updateScrollOverlayMetrics();
+  }
+
+  void _scheduleManualScrollChromeHide() {
+    _scrollDateHideTimer?.cancel();
+    _scrollbarHideTimer?.cancel();
+
+    _scrollDateHideTimer = Timer(_scrollDateHideDelay, () {
+      _scrollDateHideTimer = null;
+      if (mounted && !_manualScrollSessionActive) {
+        unawaited(_scrollDateOpacityController.reverse());
+      }
+    });
+    _scrollbarHideTimer = Timer(_scrollbarHideDelay, () {
+      _scrollbarHideTimer = null;
+      if (mounted && !_manualScrollSessionActive) {
+        unawaited(_scrollbarOpacityController.reverse());
+      }
+    });
+  }
+
+  void _scheduleActiveScrollDateRefresh() {
+    if (_scrollDateRefreshTimer != null) {
+      return;
+    }
+
+    _scrollDateRefreshTimer = Timer(_scrollDateRefreshInterval, () {
+      _scrollDateRefreshTimer = null;
+      if (!mounted || !_manualScrollSessionActive) {
+        return;
+      }
+
+      _refreshActiveScrollDate();
+      _updateScrollOverlayMetrics();
+    });
+  }
+
+  void _refreshActiveScrollDate() {
+    final DateTime? visibleDate = _topVisibleMessageDate();
+
+    if (visibleDate != null) {
+      _activeScrollDate = visibleDate;
+    }
+  }
+
+  DateTime? _topVisibleMessageDate() {
+    if (!_scrollController.hasClients) {
+      return null;
+    }
+
+    final RenderObject? listRenderObject = _messageListRepaintBoundaryKey
+        .currentContext
+        ?.findRenderObject();
+
+    if (listRenderObject == null || !listRenderObject.attached) {
+      return null;
+    }
+
+    final double visibleTop = widget.topPadding;
+    final double visibleBottom =
+        _scrollController.position.viewportDimension - widget.bottomPadding;
+    ChatMessage? topMessage;
+    double topMessageOffset = double.infinity;
+
+    for (final MapEntry<String, GlobalKey> entry
+        in _messageBubbleKeys.entries) {
+      final BuildContext? messageContext = entry.value.currentContext;
+      final RenderObject? messageRenderObject = messageContext
+          ?.findRenderObject();
+
+      if (messageRenderObject is! RenderBox ||
+          !messageRenderObject.attached ||
+          !messageRenderObject.hasSize) {
+        continue;
+      }
+
+      final Rect messageRect = MatrixUtils.transformRect(
+        messageRenderObject.getTransformTo(listRenderObject),
+        Offset.zero & messageRenderObject.size,
+      );
+
+      if (messageRect.bottom <= visibleTop ||
+          messageRect.top >= visibleBottom ||
+          messageRect.top >= topMessageOffset) {
+        continue;
+      }
+
+      final ChatMessage? message = _findMessage(entry.key);
+
+      if (message != null) {
+        topMessage = message;
+        topMessageOffset = messageRect.top;
+      }
+    }
+
+    return topMessage?.createdAt;
+  }
+
+  void _dismissReplyReturnForManualScroll() {
+    if (_returnToReplyAnchor == null) {
+      return;
+    }
+
+    setState(() {
+      _returnToReplyAnchor = null;
+    });
   }
 
   void _maybeLoadOlderMessages() {
@@ -6109,6 +6425,7 @@ final class _MessageListState extends State<_MessageList> {
         !_didResolveInitialScrollPosition ||
         _olderMessagesLoadInProgress ||
         _replyNavigationInProgress ||
+        _scrollToLatestInProgress ||
         widget.loadingOlderMessages ||
         !widget.hasMoreMessages ||
         onLoadOlderMessages == null ||
@@ -6117,13 +6434,16 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     final ScrollPosition position = _scrollController.position;
+    final ChatScrollbarRangeSnapshot? stableRange =
+        _scrollbarRangeTracker.currentSnapshot;
     final double loadThreshold = math.max(
       _minimumOlderMessagesPrefetchExtent,
       position.viewportDimension * _olderMessagesPrefetchViewportCount,
     );
 
     if (!position.hasContentDimensions ||
-        position.extentBefore > loadThreshold) {
+        stableRange == null ||
+        stableRange.pixels - stableRange.minimumExtent > loadThreshold) {
       return;
     }
 
@@ -6174,6 +6494,7 @@ final class _MessageListState extends State<_MessageList> {
         !_didResolveInitialScrollPosition ||
         _newerMessagesLoadInProgress ||
         _replyNavigationInProgress ||
+        _scrollToLatestInProgress ||
         widget.loadingNewerMessages ||
         !widget.hasMoreNewerMessages ||
         onLoadNewerMessages == null ||
@@ -6182,13 +6503,16 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     final ScrollPosition position = _scrollController.position;
+    final ChatScrollbarRangeSnapshot? stableRange =
+        _scrollbarRangeTracker.currentSnapshot;
     final double loadThreshold = math.max(
       _minimumOlderMessagesPrefetchExtent,
       position.viewportDimension * _olderMessagesPrefetchViewportCount,
     );
 
     if (!position.hasContentDimensions ||
-        position.extentAfter > loadThreshold) {
+        stableRange == null ||
+        stableRange.maximumExtent - stableRange.pixels > loadThreshold) {
       return;
     }
 
@@ -6233,11 +6557,19 @@ final class _MessageListState extends State<_MessageList> {
 
   @override
   void dispose() {
+    _completeBottomSettle();
     _bottomAnchorPreservationTimer?.cancel();
     _messageHighlightTimer?.cancel();
+    _scrollDateRefreshTimer?.cancel();
+    _scrollDateHideTimer?.cancel();
+    _scrollbarHideTimer?.cancel();
     _replyNavigationSnapshot?.dispose();
     _scrollController.removeListener(_handleMessageListScroll);
     _scrollController.dispose();
+    _scrollbarOpacityController.dispose();
+    _scrollDateOpacityController.dispose();
+    _scrollOverlayMetricsNotifier.dispose();
+    _showScrollToLatestButtonNotifier.dispose();
 
     super.dispose();
   }
@@ -6245,6 +6577,14 @@ final class _MessageListState extends State<_MessageList> {
   @override
   void didUpdateWidget(covariant _MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      _updateScrollOverlayMetrics();
+      _updateScrollToLatestButtonVisibility();
+    });
     final bool enteredLatestWindow =
         widget.showingLatestWindow && !oldWidget.showingLatestWindow;
 
@@ -6285,15 +6625,23 @@ final class _MessageListState extends State<_MessageList> {
     final String? previousLastMessageId = _messages.isEmpty
         ? null
         : _messages.last.id;
+    final List<String> previousMessageIds = _messages
+        .map((ChatMessage message) => message.id)
+        .toList(growable: false);
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
     if (enteredLatestWindow) {
       _normalizeHistoryCenterForLatestWindow();
+    } else {
+      _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
     }
     final Set<String> currentMessageIds = _messages
         .map((ChatMessage message) => message.id)
         .toSet();
+    _messageBubbleKeys.removeWhere(
+      (String messageId, GlobalKey _) => !currentMessageIds.contains(messageId),
+    );
     _historyPageBoundaryMessageIds.removeWhere(
       (String messageId) => !currentMessageIds.contains(messageId),
     );
@@ -6343,22 +6691,12 @@ final class _MessageListState extends State<_MessageList> {
     if (shouldPinToBottomAfterUpdate || shouldPinLatestWindowToBottom) {
       _beginBottomSettle();
     }
-
-    if (olderMessagesWerePrepended) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _maybeLoadOlderMessages();
-      });
-    }
-    if (newerMessagesWereAppended) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _maybeLoadNewerMessages();
-      });
-    }
   }
 
   void _normalizeHistoryCenterForLatestWindow() {
     _messageNavigationCenterAnchor = null;
     _rememberedMessageScrollOffsets.clear();
+    _scrollbarRangeTracker.reset();
 
     if (_messages.isEmpty) {
       _historyCenterMessageId = null;
@@ -6368,6 +6706,51 @@ final class _MessageListState extends State<_MessageList> {
     final String latestWindowCenterMessageId = _messages.first.id;
     _historyCenterMessageId = latestWindowCenterMessageId;
     _historyPageBoundaryMessageIds.add(latestWindowCenterMessageId);
+  }
+
+  void _reconcileScrollbarRangeAfterMessageChange(
+    List<String> previousMessageIds,
+  ) {
+    if (previousMessageIds.isEmpty || _messages.isEmpty) {
+      _scrollbarRangeTracker.reset();
+      return;
+    }
+
+    final int previousRangeStart = _messages.indexWhere(
+      (ChatMessage message) => message.id == previousMessageIds.first,
+    );
+    bool previousRangeStillContiguous =
+        previousRangeStart >= 0 &&
+        previousRangeStart + previousMessageIds.length <= _messages.length;
+
+    if (previousRangeStillContiguous) {
+      for (int index = 0; index < previousMessageIds.length; index++) {
+        if (_messages[previousRangeStart + index].id !=
+            previousMessageIds[index]) {
+          previousRangeStillContiguous = false;
+          break;
+        }
+      }
+    }
+
+    if (!previousRangeStillContiguous) {
+      _scrollbarRangeTracker.reset();
+      return;
+    }
+
+    final int messagesAfter =
+        _messages.length - previousRangeStart - previousMessageIds.length;
+    _scrollbarRangeTracker.extend(
+      messagesBefore: previousRangeStart,
+      messagesAfter: messagesAfter,
+      totalMessageCount: _messages.length,
+    );
+  }
+
+  List<String> _messageIdsSnapshot() {
+    return _messages
+        .map((ChatMessage message) => message.id)
+        .toList(growable: false);
   }
 
   void _stopScrollingAtCurrentOffset() {
@@ -6404,6 +6787,8 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   void addMessage(ChatMessage message) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+
     setState(() {
       final int existingIndex = _messages.indexWhere(
         (ChatMessage existingMessage) => existingMessage.id == message.id,
@@ -6418,12 +6803,15 @@ final class _MessageListState extends State<_MessageList> {
       _messages.sort(_compareMessages);
       _syncMessageClockWith(message);
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   void addMessages(List<ChatMessage> messages) {
     if (messages.isEmpty) {
       return;
     }
+
+    final List<String> previousMessageIds = _messageIdsSnapshot();
 
     setState(() {
       for (final ChatMessage message in messages) {
@@ -6441,6 +6829,7 @@ final class _MessageListState extends State<_MessageList> {
       _messages.sort(_compareMessages);
       _syncMessageClockWithMessages(messages);
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   bool replaceMessage(ChatMessage message) {
@@ -6475,6 +6864,8 @@ final class _MessageListState extends State<_MessageList> {
     required String content,
     ChatReplyReference? replyTo,
   }) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+
     setState(() {
       final DateTime createdAt = DateTime.now();
       _messageClock = createdAt;
@@ -6492,6 +6883,7 @@ final class _MessageListState extends State<_MessageList> {
         ),
       );
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   void addOutgoingPhotoMessages({
@@ -6501,6 +6893,8 @@ final class _MessageListState extends State<_MessageList> {
     if (attachments.isEmpty) {
       return;
     }
+
+    final List<String> previousMessageIds = _messageIdsSnapshot();
 
     setState(() {
       final DateTime baseCreatedAt = DateTime.now();
@@ -6540,9 +6934,12 @@ final class _MessageListState extends State<_MessageList> {
         _messageClock = createdAt;
       }
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   void addOutgoingFileMessage({required String name, required int sizeBytes}) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+
     setState(() {
       final DateTime createdAt = DateTime.now();
       _messageClock = createdAt;
@@ -6558,11 +6955,14 @@ final class _MessageListState extends State<_MessageList> {
         ),
       );
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   void addOutgoingVoiceMemoMessage({
     required ChatVoiceMemoAttachment voiceMemo,
   }) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+
     setState(() {
       final DateTime createdAt = DateTime.now();
       _messageClock = createdAt;
@@ -6578,6 +6978,7 @@ final class _MessageListState extends State<_MessageList> {
         ),
       );
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   ChatMessage addOutgoingCallMessage({
@@ -6598,11 +6999,13 @@ final class _MessageListState extends State<_MessageList> {
         duration: duration,
       ),
     );
+    final List<String> previousMessageIds = _messageIdsSnapshot();
 
     setState(() {
       _messageClock = createdAt;
       _messages.add(message);
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
     return message;
   }
 
@@ -6760,6 +7163,52 @@ final class _MessageListState extends State<_MessageList> {
     );
   }
 
+  Future<void> _handleScrollToLatestMessage() async {
+    if (!mounted || _replyNavigationInProgress || _scrollToLatestInProgress) {
+      return;
+    }
+
+    _scrollToLatestInProgress = true;
+    _updateScrollToLatestButtonVisibility();
+
+    try {
+      _bottomPinCanceledByUserScroll = false;
+      _bottomSettleActive = false;
+      _completeBottomSettle();
+      _manualScrollSessionActive = false;
+      _scrollDateHideTimer?.cancel();
+      unawaited(_scrollDateOpacityController.reverse());
+      _retainVisibleScrollbarForScrollToLatest();
+
+      if (_returnToReplyAnchor != null || _replyOriginalViewportActive) {
+        setState(() {
+          _returnToReplyAnchor = null;
+          _replyOriginalViewportActive = false;
+        });
+      }
+
+      final ChatLatestWindowRestorer? showLatestMessages =
+          widget.onShowLatestMessages;
+
+      if (showLatestMessages != null) {
+        await showLatestMessages();
+      } else if (!widget.showingLatestWindow || widget.hasMoreNewerMessages) {
+        return;
+      }
+
+      if (!mounted || !_scrollController.hasClients) {
+        return;
+      }
+
+      await scrollToBottom(animate: true);
+      await _settleAtBottom();
+      _updateScrollOverlayMetrics();
+    } finally {
+      _scrollToLatestInProgress = false;
+      _updateScrollToLatestButtonVisibility();
+    }
+  }
+
   void _preserveBottomDuringNextContentResize() {
     if (!mounted || _bottomPinCanceledByUserScroll || !isNearBottom) {
       return;
@@ -6783,6 +7232,9 @@ final class _MessageListState extends State<_MessageList> {
   }
 
   bool _handleScrollMetricsChanged(ScrollMetricsNotification notification) {
+    _updateScrollOverlayMetrics();
+    _updateScrollToLatestButtonVisibility();
+
     if (_bottomPinCanceledByUserScroll ||
         (!widget.pinToBottom && !_bottomSettleActive) ||
         !_scrollController.hasClients) {
@@ -6815,13 +7267,40 @@ final class _MessageListState extends State<_MessageList> {
         notification.dragDetails != null) {
       _bottomPinCanceledByUserScroll = true;
       _bottomSettleActive = false;
+      _completeBottomSettle();
       _bottomSettleLastMaxScrollExtent = null;
       _bottomSettleStableFrameCount = 0;
       _cancelBottomAnchorPreservation();
+      _manualScrollSessionActive = true;
+      _manualScrollHasMoved = false;
+      _showManualScrollChrome();
       widget.onUserScrollStarted();
-    } else if (notification is ScrollEndNotification && isNearBottom) {
-      _bottomPinCanceledByUserScroll = false;
+    } else if (_manualScrollSessionActive &&
+        ((notification is ScrollUpdateNotification &&
+                (notification.scrollDelta?.abs() ?? 0) > 0.5) ||
+            (notification is OverscrollNotification &&
+                notification.overscroll.abs() > 0.5))) {
+      if (!_manualScrollHasMoved) {
+        _manualScrollHasMoved = true;
+        _dismissReplyReturnForManualScroll();
+      }
+
+      _showManualScrollChrome();
+      _scheduleActiveScrollDateRefresh();
+    } else if (notification is ScrollEndNotification) {
+      if (isNearBottom) {
+        _bottomPinCanceledByUserScroll = false;
+      }
+
+      if (_manualScrollSessionActive) {
+        _manualScrollSessionActive = false;
+        _refreshActiveScrollDate();
+        _updateScrollOverlayMetrics();
+        _scheduleManualScrollChromeHide();
+      }
     }
+
+    _updateScrollToLatestButtonVisibility();
 
     return false;
   }
@@ -7078,6 +7557,9 @@ final class _MessageListState extends State<_MessageList> {
     final bool centerChanged = _historyCenterMessageId != centerMessageId;
 
     _stopScrollingAtCurrentOffset();
+    if (centerChanged) {
+      _scrollbarRangeTracker.reset();
+    }
     setState(() {
       if (centerChanged) {
         _historyCenterMessageId = centerMessageId;
@@ -7089,6 +7571,7 @@ final class _MessageListState extends State<_MessageList> {
       _messageNavigationCenterAnchor = alignment.clamp(0.0, 1.0).toDouble();
     });
     _scrollController.correctPixelsForMessageRecenter(0);
+    _scrollbarRangeTracker.rebaseRawPixels(_scrollController.position.pixels);
 
     ReplyNavigationDiagnostics.record(
       '[reply-navigation] scroll-recenter '
@@ -7122,6 +7605,7 @@ final class _MessageListState extends State<_MessageList> {
       _messageNavigationCenterAnchor = null;
     });
     _scrollController.correctPixelsForMessageRecenter(normalizedOffset);
+    _scrollbarRangeTracker.rebaseRawPixels(position.pixels);
 
     await WidgetsBinding.instance.endOfFrame;
 
@@ -7201,6 +7685,7 @@ final class _MessageListState extends State<_MessageList> {
         : null;
     if (savedHistoryCenterMessageId != null) {
       _stopScrollingAtCurrentOffset();
+      _scrollbarRangeTracker.reset();
       setState(() {
         _historyCenterMessageId = savedHistoryCenterMessageId;
         _messageNavigationCenterAnchor = null;
@@ -7815,6 +8300,7 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     _replyNavigationInProgress = true;
+    _updateScrollToLatestButtonVisibility();
     final bool previousReplyOriginalViewportActive =
         _replyOriginalViewportActive;
     bool didOpenOriginalMessage = false;
@@ -7873,6 +8359,7 @@ final class _MessageListState extends State<_MessageList> {
       }
       _hideReplyNavigationSnapshot();
       _replyNavigationInProgress = false;
+      _updateScrollToLatestButtonVisibility();
       ReplyNavigationDiagnostics.record(
         '[reply-navigation] tap-finished '
         'reply=$replyMessageId original=$originalMessageId',
@@ -7892,6 +8379,7 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     _replyNavigationInProgress = true;
+    _updateScrollToLatestButtonVisibility();
 
     try {
       if (!await _ensureNavigationMessageAvailable(
@@ -7927,6 +8415,7 @@ final class _MessageListState extends State<_MessageList> {
     } finally {
       _hideReplyNavigationSnapshot();
       _replyNavigationInProgress = false;
+      _updateScrollToLatestButtonVisibility();
     }
   }
 
@@ -8104,6 +8593,7 @@ final class _MessageListState extends State<_MessageList> {
     }
 
     _preserveBottomDuringNextContentResize();
+    bool retriedMessageWasAdded = false;
 
     setState(() {
       final int retriedIndex = _messages.indexWhere(
@@ -8112,6 +8602,7 @@ final class _MessageListState extends State<_MessageList> {
 
       if (retriedIndex == -1) {
         _messages.add(retriedMessage);
+        retriedMessageWasAdded = true;
       } else {
         _messages[retriedIndex] = retriedMessage;
       }
@@ -8126,6 +8617,9 @@ final class _MessageListState extends State<_MessageList> {
         _showTranslatedMessageIds.remove(messageId);
       }
     });
+    if (retriedMessageWasAdded) {
+      _scrollbarRangeTracker.reset();
+    }
   }
 
   String _displayedContentFor(ChatMessage message) {
@@ -8288,6 +8782,8 @@ final class _MessageListState extends State<_MessageList> {
       _messageHighlightTimer?.cancel();
     }
 
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+
     setState(() {
       _messages.removeWhere((ChatMessage message) => message.id == messageId);
 
@@ -8303,6 +8799,7 @@ final class _MessageListState extends State<_MessageList> {
         _replyOriginalViewportActive = false;
       }
     });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
   Future<void> _startTranslation(String messageId) async {
@@ -8575,6 +9072,25 @@ final class _MessageListState extends State<_MessageList> {
           key: _messageListRepaintBoundaryKey,
           child: messageList,
         ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: CustomPaint(
+              key: const ValueKey<String>('message-scrollbar'),
+              painter: _MessageScrollbarPainter(
+                metricsListenable: _scrollOverlayMetricsNotifier,
+                opacity: _scrollbarOpacityController,
+              ),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: _MessageScrollDateBubbleOverlay(
+              metricsListenable: _scrollOverlayMetricsNotifier,
+              opacity: _scrollDateOpacityAnimation,
+            ),
+          ),
+        ),
         if (_replyNavigationMaskActive)
           Positioned.fill(
             key: const ValueKey<String>('reply-navigation-snapshot'),
@@ -8626,6 +9142,45 @@ final class _MessageListState extends State<_MessageList> {
               ),
             ),
           ),
+        Positioned(
+          right: 8,
+          bottom: 8,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _showScrollToLatestButtonNotifier,
+            builder: (BuildContext context, bool showButton, Widget? child) {
+              return AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                reverseDuration: const Duration(milliseconds: 140),
+                switchInCurve: Curves.easeOutBack,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (Widget child, Animation<double> animation) {
+                  return FadeTransition(
+                    opacity: animation,
+                    child: ScaleTransition(
+                      scale: Tween<double>(
+                        begin: 0.74,
+                        end: 1,
+                      ).animate(animation),
+                      child: child,
+                    ),
+                  );
+                },
+                child: showButton
+                    ? _ScrollToLatestMessageButton(
+                        key: const ValueKey<String>('scroll-to-latest-message'),
+                        onPressed: () {
+                          unawaited(_handleScrollToLatestMessage());
+                        },
+                      )
+                    : const SizedBox(
+                        key: ValueKey<String>(
+                          'scroll-to-latest-message-hidden',
+                        ),
+                      ),
+              );
+            },
+          ),
+        ),
       ],
     );
   }
@@ -8866,6 +9421,309 @@ final class _MessageViewportAnchor {
   final bool showingLatestWindow;
   final double leadingViewportOffset;
   final double fallbackScrollOffset;
+}
+
+final class _MessageScrollOverlayMetrics {
+  const _MessageScrollOverlayMetrics({
+    required this.minScrollExtent,
+    required this.maxScrollExtent,
+    required this.pixels,
+    required this.viewportDimension,
+    required this.messageCountScale,
+    required this.retainedThumbLength,
+    required this.topPadding,
+    required this.bottomPadding,
+    required this.date,
+  });
+
+  final double minScrollExtent;
+  final double maxScrollExtent;
+  final double pixels;
+  final double viewportDimension;
+  final double messageCountScale;
+  final double? retainedThumbLength;
+  final double topPadding;
+  final double bottomPadding;
+  final DateTime? date;
+}
+
+final class _MessageScrollGeometry {
+  const _MessageScrollGeometry({
+    required this.trackTop,
+    required this.trackBottom,
+    required this.thumbRect,
+    required this.rightMargin,
+    required this.thickness,
+  });
+
+  static const double minimumOverscrollThumbLength = 8;
+  static const double defaultThickness = 3;
+  static const double defaultRightMargin = 2;
+
+  final double trackTop;
+  final double trackBottom;
+  final Rect thumbRect;
+  final double rightMargin;
+  final double thickness;
+
+  bool get canPaint =>
+      trackBottom > trackTop && thumbRect.height > 0 && thumbRect.width > 0;
+
+  static _MessageScrollGeometry resolve(
+    _MessageScrollOverlayMetrics metrics,
+    Size size,
+  ) {
+    final double trackTop = metrics.topPadding
+        .clamp(0.0, size.height)
+        .toDouble();
+    final double trackBottom = (size.height - metrics.bottomPadding)
+        .clamp(trackTop, size.height)
+        .toDouble();
+    final double trackExtent = math.max(0.0, trackBottom - trackTop);
+    final double scrollableExtent = math.max(
+      0.0,
+      metrics.maxScrollExtent - metrics.minScrollExtent,
+    );
+
+    if (trackExtent <= 0 || scrollableExtent <= 0) {
+      return _MessageScrollGeometry(
+        trackTop: trackTop,
+        trackBottom: trackBottom,
+        thumbRect: Rect.zero,
+        rightMargin: defaultRightMargin,
+        thickness: defaultThickness,
+      );
+    }
+
+    final double contentExtent = trackExtent + scrollableExtent;
+    final double proportionalThumbLength =
+        trackExtent * trackExtent / contentExtent;
+    final double normalThumbLength = metrics.retainedThumbLength == null
+        ? ChatScrollbarThumbLengthResolver.resolve(
+            trackExtent: trackExtent,
+            proportionalLength: proportionalThumbLength,
+            messageCountScale: metrics.messageCountScale,
+          )
+        : metrics.retainedThumbLength!.clamp(0.0, trackExtent).toDouble();
+    final double overscrollBefore = math.max(
+      0.0,
+      metrics.minScrollExtent - metrics.pixels,
+    );
+    final double overscrollAfter = math.max(
+      0.0,
+      metrics.pixels - metrics.maxScrollExtent,
+    );
+    final double overscroll = math.max(overscrollBefore, overscrollAfter);
+    final double thumbLength = overscroll <= 0
+        ? normalThumbLength
+        : (normalThumbLength - overscroll)
+              .clamp(
+                math.min(minimumOverscrollThumbLength, normalThumbLength),
+                normalThumbLength,
+              )
+              .toDouble();
+    final double availableTravel = math.max(0.0, trackExtent - thumbLength);
+    final double scrollFraction =
+        ((metrics.pixels - metrics.minScrollExtent) / scrollableExtent)
+            .clamp(0.0, 1.0)
+            .toDouble();
+    final double thumbTop = overscrollBefore > 0
+        ? trackTop
+        : overscrollAfter > 0
+        ? trackBottom - thumbLength
+        : trackTop + (availableTravel * scrollFraction);
+    final double thumbRight = size.width - defaultRightMargin;
+
+    return _MessageScrollGeometry(
+      trackTop: trackTop,
+      trackBottom: trackBottom,
+      thumbRect: Rect.fromLTWH(
+        thumbRight - defaultThickness,
+        thumbTop,
+        defaultThickness,
+        thumbLength,
+      ),
+      rightMargin: defaultRightMargin,
+      thickness: defaultThickness,
+    );
+  }
+}
+
+final class _MessageScrollbarPainter extends CustomPainter {
+  _MessageScrollbarPainter({
+    required this.metricsListenable,
+    required this.opacity,
+  }) : super(
+         repaint: Listenable.merge(<Listenable>[metricsListenable, opacity]),
+       );
+
+  final ValueListenable<_MessageScrollOverlayMetrics?> metricsListenable;
+  final Animation<double> opacity;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final _MessageScrollOverlayMetrics? metrics = metricsListenable.value;
+    final double resolvedOpacity = opacity.value;
+
+    if (metrics == null || resolvedOpacity <= 0) {
+      return;
+    }
+
+    final _MessageScrollGeometry geometry = _MessageScrollGeometry.resolve(
+      metrics,
+      size,
+    );
+
+    if (!geometry.canPaint) {
+      return;
+    }
+
+    final Paint paint = Paint()
+      ..color = AppColors.grey700.withAlpha(
+        (190 * resolvedOpacity).round().clamp(0, 255).toInt(),
+      );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        geometry.thumbRect,
+        Radius.circular(geometry.thickness / 2),
+      ),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _MessageScrollbarPainter oldDelegate) {
+    return oldDelegate.metricsListenable != metricsListenable ||
+        oldDelegate.opacity != opacity;
+  }
+}
+
+final class _MessageScrollDateBubbleOverlay extends StatelessWidget {
+  const _MessageScrollDateBubbleOverlay({
+    required this.metricsListenable,
+    required this.opacity,
+  });
+
+  static const double _height = 24;
+  static const double _scrollbarGap = 3;
+
+  final ValueListenable<_MessageScrollOverlayMetrics?> metricsListenable;
+  final Animation<double> opacity;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge(<Listenable>[metricsListenable, opacity]),
+      builder: (BuildContext context, Widget? child) {
+        final _MessageScrollOverlayMetrics? metrics = metricsListenable.value;
+
+        if (metrics == null || metrics.date == null || opacity.value <= 0) {
+          return const SizedBox.shrink();
+        }
+
+        return LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints constraints) {
+            final Size size = constraints.biggest;
+            final _MessageScrollGeometry geometry =
+                _MessageScrollGeometry.resolve(metrics, size);
+
+            if (!geometry.canPaint) {
+              return const SizedBox.shrink();
+            }
+
+            final double bubbleTop =
+                (geometry.thumbRect.center.dy - _height / 2)
+                    .clamp(
+                      geometry.trackTop,
+                      math.max(
+                        geometry.trackTop,
+                        geometry.trackBottom - _height,
+                      ),
+                    )
+                    .toDouble();
+
+            return Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                Positioned(
+                  top: bubbleTop,
+                  right:
+                      geometry.rightMargin + geometry.thickness + _scrollbarGap,
+                  height: _height,
+                  child: Opacity(
+                    opacity: opacity.value,
+                    child: DecoratedBox(
+                      key: const ValueKey<String>('message-scroll-date-bubble'),
+                      decoration: BoxDecoration(
+                        color: AppColors.black.withAlpha(105),
+                        borderRadius: AppRadius.borderRadiusFull,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Center(
+                          child: Text(
+                            formatChatScrollDate(metrics.date!),
+                            maxLines: 1,
+                            style: AppTypography.typography7.copyWith(
+                              color: AppColors.white,
+                              fontWeight: AppTypography.regular,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+final class _ScrollToLatestMessageButton extends StatelessWidget {
+  const _ScrollToLatestMessageButton({required this.onPressed, super.key});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Scroll to latest message',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: AppColors.black.withAlpha(31),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Material(
+          color: AppColors.white,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onPressed,
+            customBorder: const CircleBorder(),
+            child: const SizedBox.square(
+              dimension: 44,
+              child: Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 28,
+                color: AppColors.grey900,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 final class _BackToReplyMessageButton extends StatelessWidget {

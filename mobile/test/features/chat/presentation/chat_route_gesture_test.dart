@@ -499,6 +499,9 @@ void main() {
       final Finder backButtonFinder = find.byKey(
         const ValueKey<String>('back-to-reply-message'),
       );
+      final Finder latestButtonFinder = find.byKey(
+        const ValueKey<String>('scroll-to-latest-message'),
+      );
 
       for (
         int frame = 0;
@@ -511,6 +514,7 @@ void main() {
       expect(contextRequestCount, 1);
       expect(originalBubbleFinder, findsOneWidget);
       expect(backButtonFinder, findsOneWidget);
+      expect(latestButtonFinder, findsOneWidget);
 
       final Rect messageListRect = tester.getRect(
         find.byKey(const ValueKey<String>('message-list')),
@@ -618,6 +622,26 @@ void main() {
         find.byKey(const ValueKey<String>('outgoing-bubble-message-402')),
         findsOneWidget,
       );
+
+      await tester.tap(quoteAreaFinder);
+
+      for (
+        int frame = 0;
+        frame < 80 && latestButtonFinder.evaluate().isEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(backButtonFinder, findsOneWidget);
+      expect(latestButtonFinder, findsOneWidget);
+
+      await tester.tap(latestButtonFinder);
+      await tester.pumpAndSettle();
+
+      expect(backButtonFinder, findsNothing);
+      expect(latestButtonFinder, findsNothing);
+      expect(newestBubbleFinder, findsOneWidget);
     },
   );
 
@@ -720,6 +744,152 @@ void main() {
         reason:
             'Returning from a cached far reply must restore the latest '
             'conversation center so the list cannot scroll into empty space.',
+      );
+    },
+  );
+
+  testWidgets(
+    'manual scrolling dismisses reply return but keeps the latest action',
+    (WidgetTester tester) async {
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          final List<Map<String, dynamic>> messages =
+              List<Map<String, dynamic>>.generate(100, (int offset) {
+                final int index = offset + 300;
+
+                return _messageJson(
+                  index,
+                  replyToIndex: index == 399 ? 300 : null,
+                );
+              });
+
+          if (request.url.path.contains('/around/')) {
+            return http.Response(
+              jsonEncode(<String, Object?>{
+                'messages': messages,
+                'has_more_older': true,
+                'has_more_newer': false,
+              }),
+              200,
+              headers: const <String, String>{
+                'content-type': 'application/json',
+              },
+            );
+          }
+
+          return http.Response(
+            jsonEncode(messages),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json',
+              'x-has-more': 'true',
+            },
+          );
+        },
+      );
+      addTearDown(realtimeService.dispose);
+
+      await tester.tap(find.text(_otherUser.displayName));
+      await tester.pumpAndSettle();
+
+      final Finder quoteAreaFinder = find.byKey(
+        const ValueKey<String>('reply-quote-area-message-399'),
+      );
+      final Finder messageListFinder = find.byKey(
+        const ValueKey<String>('message-list'),
+      );
+      final Finder backButtonFinder = find.byKey(
+        const ValueKey<String>('back-to-reply-message'),
+      );
+      final Finder latestButtonFinder = find.byKey(
+        const ValueKey<String>('scroll-to-latest-message'),
+      );
+      final Finder dateBubbleFinder = find.byKey(
+        const ValueKey<String>('message-scroll-date-bubble'),
+      );
+
+      await tester.tap(quoteAreaFinder);
+
+      for (
+        int frame = 0;
+        frame < 40 && backButtonFinder.evaluate().isEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      expect(backButtonFinder, findsOneWidget);
+      expect(latestButtonFinder, findsOneWidget);
+
+      final TestGesture gesture = await tester.startGesture(
+        tester.getCenter(messageListFinder),
+      );
+      await gesture.moveBy(const Offset(0, -90));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 16));
+
+      expect(
+        dateBubbleFinder,
+        findsOneWidget,
+        reason: 'The date bubble should begin appearing with the first drag.',
+      );
+
+      await gesture.moveBy(const Offset(0, -30));
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(backButtonFinder, findsNothing);
+      expect(latestButtonFinder, findsOneWidget);
+      expect(dateBubbleFinder, findsOneWidget);
+      expect(tester.getSize(dateBubbleFinder).height, closeTo(24, 0.01));
+      expect(
+        tester.getRect(messageListFinder).right -
+            tester.getRect(dateBubbleFinder).right,
+        closeTo(8, 0.01),
+      );
+      final DecoratedBox dateBubble = tester.widget<DecoratedBox>(
+        dateBubbleFinder,
+      );
+      expect(
+        (dateBubble.decoration as BoxDecoration).color,
+        const Color.fromARGB(105, 0, 0, 0),
+      );
+
+      await gesture.up();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
+      await tester.pump(const Duration(milliseconds: 140));
+
+      expect(
+        dateBubbleFinder,
+        findsOneWidget,
+        reason:
+            'The date bubble should fade out instead of disappearing early.',
+      );
+
+      await tester.pump(const Duration(milliseconds: 40));
+      await tester.pumpAndSettle();
+
+      expect(dateBubbleFinder, findsNothing);
+      expect(latestButtonFinder, findsOneWidget);
+
+      await tester.tap(latestButtonFinder);
+
+      for (
+        int frame = 0;
+        frame < 40 && latestButtonFinder.evaluate().isNotEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+
+      await tester.pumpAndSettle();
+
+      expect(latestButtonFinder, findsNothing);
+      expect(
+        find.byKey(const ValueKey<String>('incoming-bubble-message-399')),
+        findsOneWidget,
       );
     },
   );

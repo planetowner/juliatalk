@@ -7,6 +7,30 @@ String formatChatDate(DateTime date) {
       '${localDate.year}';
 }
 
+String formatChatScrollDate(DateTime date) {
+  final DateTime localDate = date.toLocal();
+
+  return '${_shortWeekdayName(localDate.weekday)}, '
+      '${localDate.month}/${localDate.day}';
+}
+
+String _shortWeekdayName(int weekday) {
+  return switch (weekday) {
+    DateTime.monday => 'Mon',
+    DateTime.tuesday => 'Tue',
+    DateTime.wednesday => 'Wed',
+    DateTime.thursday => 'Thu',
+    DateTime.friday => 'Fri',
+    DateTime.saturday => 'Sat',
+    DateTime.sunday => 'Sun',
+    _ => throw ArgumentError.value(
+      weekday,
+      'weekday',
+      'Weekday must be between 1 and 7.',
+    ),
+  };
+}
+
 String _weekdayName(int weekday) {
   return switch (weekday) {
     DateTime.monday => 'Monday',

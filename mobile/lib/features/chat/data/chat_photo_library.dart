@@ -529,7 +529,7 @@ final class PhotoManagerChatPhotoLibrary
     return ChatPhotoFile(
       bytes: bytes,
       fileName: fileName,
-      mimeType: _imageMimeTypeForFileName(fileName),
+      mimeType: imageMimeTypeForFileName(fileName),
       sizeBytes: bytes.length,
     );
   }
@@ -556,8 +556,17 @@ final class PhotoManagerChatPhotoLibrary
   }
 }
 
-String _imageMimeTypeForFileName(String fileName) {
+String imageMimeTypeForFileName(String fileName) {
+  final String mimeType = mimeTypeForFileName(fileName);
+  return mimeType.startsWith('image/') ? mimeType : 'image/jpeg';
+}
+
+String mimeTypeForFileName(String fileName) {
   final String lowerCase = fileName.toLowerCase();
+
+  if (lowerCase.endsWith('.jpg') || lowerCase.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
 
   if (lowerCase.endsWith('.png')) {
     return 'image/png';
@@ -571,5 +580,25 @@ String _imageMimeTypeForFileName(String fileName) {
     return 'image/webp';
   }
 
-  return 'image/jpeg';
+  if (lowerCase.endsWith('.mp4')) {
+    return 'video/mp4';
+  }
+
+  if (lowerCase.endsWith('.mov')) {
+    return 'video/quicktime';
+  }
+
+  if (lowerCase.endsWith('.m4a')) {
+    return 'audio/mp4';
+  }
+
+  if (lowerCase.endsWith('.mp3')) {
+    return 'audio/mpeg';
+  }
+
+  if (lowerCase.endsWith('.pdf')) {
+    return 'application/pdf';
+  }
+
+  return 'application/octet-stream';
 }

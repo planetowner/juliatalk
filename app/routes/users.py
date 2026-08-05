@@ -1,11 +1,7 @@
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_session
-from app.dependencies import get_current_user
+from app.dependencies import CurrentUserDependency, SessionDependency
 from app.display_names import display_name_for_viewer
 from app.models import User
 from app.schemas import (
@@ -20,16 +16,6 @@ router = APIRouter(
     prefix="/users",
     tags=["users"],
 )
-
-SessionDependency = Annotated[
-    AsyncSession,
-    Depends(get_session),
-]
-
-CurrentUserDependency = Annotated[
-    User,
-    Depends(get_current_user),
-]
 
 
 @router.get(

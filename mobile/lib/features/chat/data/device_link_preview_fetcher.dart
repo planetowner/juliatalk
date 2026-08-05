@@ -6,6 +6,8 @@ import 'package:html/dom.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 
+import '../domain/chat_link.dart';
+
 final class DeviceLinkPreviewFetcher {
   const DeviceLinkPreviewFetcher({required http.Client client})
     : _client = client;
@@ -119,7 +121,7 @@ final class DeviceLinkPreviewFetcher {
     return <String, Object?>{
       'url': uri.toString(),
       'canonical_url': canonicalUrl,
-      'domain': _domainForUrl(uri),
+      'domain': chatDomainForUrl(uri.toString()).toLowerCase(),
       'title': ?title,
       'description': ?description,
       'site_name': ?siteName,
@@ -218,15 +220,5 @@ final class DeviceLinkPreviewFetcher {
     }
 
     return resolvedUri.toString();
-  }
-
-  String _domainForUrl(Uri uri) {
-    final String host = uri.host.toLowerCase();
-
-    if (host.startsWith('www.')) {
-      return host.substring(4);
-    }
-
-    return host;
   }
 }

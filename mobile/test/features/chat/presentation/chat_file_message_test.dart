@@ -72,47 +72,48 @@ void main() {
     expect(find.text('File preview is not available yet.'), findsOneWidget);
   });
 
-  testWidgets('incoming file messages use incoming colors without translation', (
-    WidgetTester tester,
-  ) async {
-    await tester.pumpWidget(
-      _buildFileMessageScreen(_fileMessage(senderId: '2', recipientId: '1')),
-    );
-    await tester.pumpAndSettle();
+  testWidgets(
+    'incoming file messages use incoming colors without translation',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        _buildFileMessageScreen(_fileMessage(senderId: '2', recipientId: '1')),
+      );
+      await tester.pumpAndSettle();
 
-    final Finder bubbleFinder = find.byKey(
-      const ValueKey<String>('incoming-bubble-1'),
-    );
+      final Finder bubbleFinder = find.byKey(
+        const ValueKey<String>('incoming-bubble-1'),
+      );
 
-    expect(bubbleFinder, findsOneWidget);
-    expect(
-      find.descendant(of: bubbleFinder, matching: find.text('Report_v2.bin')),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(of: bubbleFinder, matching: find.text('350 KB')),
-      findsOneWidget,
-    );
+      expect(bubbleFinder, findsOneWidget);
+      expect(
+        find.descendant(of: bubbleFinder, matching: find.text('Report_v2.bin')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: bubbleFinder, matching: find.text('350 KB')),
+        findsOneWidget,
+      );
 
-    final Text title = tester.widget<Text>(find.text('Report_v2.bin'));
-    final Text metadata = tester.widget<Text>(find.text('350 KB'));
-    final Icon icon = tester.widget<Icon>(
-      find.descendant(
-        of: bubbleFinder,
-        matching: find.byIcon(Icons.insert_drive_file_rounded),
-      ),
-    );
+      final Text title = tester.widget<Text>(find.text('Report_v2.bin'));
+      final Text metadata = tester.widget<Text>(find.text('350 KB'));
+      final Icon icon = tester.widget<Icon>(
+        find.descendant(
+          of: bubbleFinder,
+          matching: find.byIcon(Icons.insert_drive_file_rounded),
+        ),
+      );
 
-    expect(title.style?.color, AppColors.grey900);
-    expect(title.style?.fontSize, AppTypography.typography6.fontSize);
-    expect(title.style?.fontWeight, AppTypography.medium);
-    expect(metadata.style?.color, AppColors.grey500);
-    expect(icon.color, AppColors.blue500);
+      expect(title.style?.color, AppColors.grey900);
+      expect(title.style?.fontSize, AppTypography.typography6.fontSize);
+      expect(title.style?.fontWeight, AppTypography.medium);
+      expect(metadata.style?.color, AppColors.grey500);
+      expect(icon.color, AppColors.blue500);
 
-    await tester.tap(find.text('Report_v2.bin'));
-    await tester.pump();
+      await tester.tap(find.text('Report_v2.bin'));
+      await tester.pump();
 
-    expect(find.text('File preview is not available yet.'), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-  });
+      expect(find.text('File preview is not available yet.'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    },
+  );
 }

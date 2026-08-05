@@ -61,3 +61,9 @@ async def get_current_user(
         raise authentication_error
 
     return user
+
+
+CurrentUserDependency = Annotated[
+    User,
+    Depends(get_current_user),
+]

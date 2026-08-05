@@ -14,7 +14,7 @@ from uuid import UUID
 import httpx
 import jwt
 from jwt.exceptions import PyJWTError
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
@@ -27,13 +27,12 @@ from app.models import (
     Message,
     MessageAttachment,
     MessageCallEvent,
-    MessageDeletion,
     MessageKind,
-    MessageReadReceipt,
     User,
     UserDevice,
 )
 from app.object_storage import get_object_storage_client
+from app.unread_counts import load_unread_counts_by_sender
 
 
 logger = logging.getLogger(__name__)
@@ -276,30 +275,6 @@ def localized_message_body(
     return None
 
 
-async def _unread_count(session: AsyncSession, user_id: UUID) -> int:
-    member_conversation_ids = select(
-        ConversationMember.conversation_id
-    ).where(ConversationMember.user_id == user_id)
-    read_message_ids = select(MessageReadReceipt.message_id).where(
-        MessageReadReceipt.user_id == user_id
-    )
-    hidden_message_ids = select(MessageDeletion.message_id).where(
-        MessageDeletion.user_id == user_id
-    )
-    count = await session.scalar(
-        select(func.count())
-        .select_from(Message)
-        .where(
-            Message.conversation_id.in_(member_conversation_ids),
-            Message.sender_id != user_id,
-            Message.deleted_at.is_(None),
-            Message.id.not_in(read_message_ids),
-            Message.id.not_in(hidden_message_ids),
-        )
-    )
-    return int(count or 0)
-
-
 async def _photo_url(
     session: AsyncSession,
     message_id: UUID,
@@ -485,7 +460,11 @@ async def send_message_notification(message_id: UUID) -> None:
         if body is None:
             return
 
-        badge = await _unread_count(session, recipient_id)
+        unread_counts = await load_unread_counts_by_sender(
+            session,
+            user_id=recipient_id,
+        )
+        badge = sum(unread_counts.values())
         photo_url = (
             await _photo_url(session, message.id)
             if message.kind == MessageKind.PHOTO

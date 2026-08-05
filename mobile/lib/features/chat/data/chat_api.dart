@@ -5,8 +5,10 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import '../../auth/domain/app_user.dart';
+import '../domain/chat_link.dart';
 import '../domain/chat_message.dart';
 import 'chat_api_exception.dart';
+import 'chat_realtime_event_state.dart';
 import 'device_link_preview_fetcher.dart';
 
 final class ChatConversationPage {
@@ -45,12 +47,6 @@ final class ChatApi {
   final String _accessToken;
 
   static const Duration _conversationRequestTimeout = Duration(seconds: 15);
-  static final RegExp _urlPattern = RegExp(
-    r'''(?:(?:https?):\/\/|www\.)[^\s<>'"]+''',
-    caseSensitive: false,
-  );
-  static const String _trailingUrlPunctuation = '.,!?;:)]}…';
-
   Map<String, String> get _headers {
     return <String, String>{
       'Accept': 'application/json',
@@ -393,37 +389,17 @@ final class ChatApi {
     final Object? rawCounts = decodedBody['counts_by_sender_id'];
     final Object? rawTotal = decodedBody['total_unread_count'];
 
-    if (rawCounts is! Map || rawTotal is! int || rawTotal < 0) {
+    if (rawTotal is! int) {
       throw const ChatApiException(
         'The server returned invalid unread counts.',
       );
     }
 
-    final Map<String, int> counts = <String, int>{};
-
-    for (final MapEntry<dynamic, dynamic> entry in rawCounts.entries) {
-      final dynamic senderId = entry.key;
-      final dynamic unreadCount = entry.value;
-
-      if (senderId is! String ||
-          senderId.isEmpty ||
-          unreadCount is! int ||
-          unreadCount < 0) {
-        throw const ChatApiException(
-          'The server returned invalid unread counts.',
-        );
-      }
-
-      if (unreadCount > 0) {
-        counts[senderId] = unreadCount;
-      }
-    }
-
-    final int calculatedTotal = counts.values.fold<int>(
-      0,
-      (int total, int count) => total + count,
+    final Map<String, int>? counts = tryParseUnreadCounts(
+      rawCounts,
+      total: rawTotal,
     );
-    if (calculatedTotal != rawTotal) {
+    if (counts == null) {
       throw const ChatApiException(
         'The server returned invalid unread counts.',
       );
@@ -465,13 +441,13 @@ final class ChatApi {
     required String content,
     String? replyToMessageId,
   }) async {
-    final String? previewUrl = _firstUrlInText(content);
+    final String? previewUrl = firstChatUrlInText(content);
     Map<String, Object?>? metadata;
 
     if (previewUrl != null) {
       metadata = <String, Object?>{
         'url': previewUrl,
-        'domain': _domainForUrl(previewUrl),
+        'domain': chatDomainForUrl(previewUrl),
       };
       final Uri? previewUri = Uri.tryParse(previewUrl);
 
@@ -1095,42 +1071,6 @@ final class ChatApi {
     };
   }
 
-  String? _firstUrlInText(String content) {
-    final RegExpMatch? match = _urlPattern.firstMatch(content);
-
-    if (match == null) {
-      return null;
-    }
-
-    String url = match.group(0)!.trimRight();
-
-    while (url.isNotEmpty &&
-        _trailingUrlPunctuation.contains(url[url.length - 1])) {
-      url = url.substring(0, url.length - 1);
-    }
-
-    if (url.toLowerCase().startsWith('www.')) {
-      return 'https://$url';
-    }
-
-    return url;
-  }
-
-  String _domainForUrl(String url) {
-    final Uri? parsedUrl = Uri.tryParse(url);
-    String domain = parsedUrl?.host ?? '';
-
-    if (domain.isEmpty) {
-      return url;
-    }
-
-    if (domain.startsWith('www.')) {
-      domain = domain.substring(4);
-    }
-
-    return domain;
-  }
-
   ChatLinkPreview? _linkPreviewFromMetadata(
     Map<String, dynamic>? metadata,
     String content,
@@ -1151,7 +1091,7 @@ final class ChatApi {
         ? null
         : metadata['image_url'];
     final String? url =
-        _optionalString(metadataUrl) ?? _firstUrlInText(content);
+        _optionalString(metadataUrl) ?? firstChatUrlInText(content);
 
     if (url == null) {
       return null;
@@ -1159,7 +1099,8 @@ final class ChatApi {
 
     final String? canonicalUrl = _optionalString(metadataCanonicalUrl);
     final String domain =
-        _optionalString(metadataDomain) ?? _domainForUrl(canonicalUrl ?? url);
+        _optionalString(metadataDomain) ??
+        chatDomainForUrl(canonicalUrl ?? url);
 
     return ChatLinkPreview(
       url: url,

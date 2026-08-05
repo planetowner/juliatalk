@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_typography.dart';
+import '../../../design_system/components/app_profile_image.dart';
 import '../../auth/domain/app_user.dart';
 import '../../auth/domain/auth_session.dart';
 import '../data/chat_api.dart';
@@ -1559,14 +1560,14 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
 
     final List<ChatMessage> mergedMessages = messagesById.values.toList(
       growable: false,
-    )..sort(_compareMessages);
+    )..sort(compareChatMessages);
 
     return List<ChatMessage>.unmodifiable(mergedMessages);
   }
 
   List<ChatMessage> _trimLatestMessages(Iterable<ChatMessage> messages) {
     final List<ChatMessage> sortedMessages = messages.toList(growable: false)
-      ..sort(_compareMessages);
+      ..sort(compareChatMessages);
     final int startIndex =
         sortedMessages.length > _conversationEntryCacheMessageLimit
         ? sortedMessages.length - _conversationEntryCacheMessageLimit
@@ -1819,16 +1820,6 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     widget.onHasMoreMessagesChanged?.call(_latestHasMoreMessages);
   }
 
-  int _compareMessages(ChatMessage first, ChatMessage second) {
-    final int createdAtComparison = first.createdAt.compareTo(second.createdAt);
-
-    if (createdAtComparison != 0) {
-      return createdAtComparison;
-    }
-
-    return first.id.compareTo(second.id);
-  }
-
   Future<ChatMessage> _sendTextMessage({
     required String content,
     ChatReplyReference? replyTo,
@@ -2068,8 +2059,9 @@ final class _ChatUserAvatar extends StatelessWidget {
         clipBehavior: Clip.none,
         children: [
           Positioned.fill(
-            child: _ProfileImageBox(
+            child: AppProfileImage(
               imageUrl: imageUrl,
+              size: _chatListAvatarSize,
               borderRadius: 16,
               iconSize: 30,
             ),
@@ -2112,69 +2104,6 @@ final class _ChatUnreadBadge extends StatelessWidget {
           fontSize: 11,
         ),
       ),
-    );
-  }
-}
-
-final class _ProfileImageBox extends StatelessWidget {
-  const _ProfileImageBox({
-    required this.imageUrl,
-    required this.borderRadius,
-    required this.iconSize,
-  });
-
-  final String? imageUrl;
-  final double borderRadius;
-  final double iconSize;
-
-  @override
-  Widget build(BuildContext context) {
-    final String? resolvedImageUrl = imageUrl?.trim();
-    final BorderRadius resolvedBorderRadius = BorderRadius.circular(
-      borderRadius,
-    );
-
-    if (resolvedImageUrl != null && resolvedImageUrl.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: resolvedBorderRadius,
-        child: Image.network(
-          resolvedImageUrl,
-          fit: BoxFit.cover,
-          errorBuilder:
-              (BuildContext context, Object error, StackTrace? stackTrace) {
-                return _DefaultProfileIcon(
-                  borderRadius: resolvedBorderRadius,
-                  iconSize: iconSize,
-                );
-              },
-        ),
-      );
-    }
-
-    return _DefaultProfileIcon(
-      borderRadius: resolvedBorderRadius,
-      iconSize: iconSize,
-    );
-  }
-}
-
-final class _DefaultProfileIcon extends StatelessWidget {
-  const _DefaultProfileIcon({
-    required this.borderRadius,
-    required this.iconSize,
-  });
-
-  final BorderRadius borderRadius;
-  final double iconSize;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.blue100,
-        borderRadius: borderRadius,
-      ),
-      child: Icon(Icons.person_rounded, color: AppColors.white, size: iconSize),
     );
   }
 }

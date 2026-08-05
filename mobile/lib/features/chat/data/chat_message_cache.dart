@@ -285,7 +285,7 @@ final class ChatMessageCache {
   }) async {
     final List<ChatMessage> incomingMessages =
         messages.where(_isPersistableServerMessage).toList(growable: false)
-          ..sort(_compareMessages);
+          ..sort(compareChatMessages);
 
     if (incomingMessages.isEmpty) {
       return;
@@ -316,7 +316,7 @@ final class ChatMessageCache {
 
     final List<String> sortedCombinedIds = combinedIds.toList(growable: false)
       ..sort(
-        (String firstId, String secondId) => _compareMessages(
+        (String firstId, String secondId) => compareChatMessages(
           entry.messagesById[firstId]!,
           entry.messagesById[secondId]!,
         ),
@@ -431,7 +431,7 @@ final class ChatMessageCache {
                   .toSet()
                   .toList(growable: false)
                 ..sort(
-                  (String firstId, String secondId) => _compareMessages(
+                  (String firstId, String secondId) => compareChatMessages(
                     messagesById[firstId]!,
                     messagesById[secondId]!,
                   ),
@@ -452,7 +452,7 @@ final class ChatMessageCache {
       } else if (messagesById.isNotEmpty) {
         final List<String> migratedMessageIds =
             messagesById.keys.toList(growable: false)..sort(
-              (String firstId, String secondId) => _compareMessages(
+              (String firstId, String secondId) => compareChatMessages(
                 messagesById[firstId]!,
                 messagesById[secondId]!,
               ),
@@ -510,7 +510,7 @@ final class ChatMessageCache {
           };
           final List<String> sortedIds = combinedIds.toList(growable: false)
             ..sort(
-              (String firstId, String secondId) => _compareMessages(
+              (String firstId, String secondId) => compareChatMessages(
                 entry.messagesById[firstId]!,
                 entry.messagesById[secondId]!,
               ),
@@ -562,7 +562,7 @@ final class ChatMessageCache {
 
     return newestEdgeSegments.reduce(
       (_ChatMessageCacheSegment first, _ChatMessageCacheSegment second) =>
-          _compareMessages(
+          compareChatMessages(
                 entry.messagesById[first.messageIds.last]!,
                 entry.messagesById[second.messageIds.last]!,
               ) >=
@@ -608,7 +608,7 @@ final class ChatMessageCache {
   void _sortSegments(_ChatMessageCacheEntry entry) {
     entry.segments.sort(
       (_ChatMessageCacheSegment first, _ChatMessageCacheSegment second) =>
-          _compareMessages(
+          compareChatMessages(
             entry.messagesById[first.messageIds.first]!,
             entry.messagesById[second.messageIds.first]!,
           ),
@@ -638,7 +638,7 @@ final class ChatMessageCache {
         _discardUnreferencedMessages(entry);
         final List<ChatMessage> sortedMessages =
             entry.messagesById.values.toList(growable: false)
-              ..sort(_compareMessages);
+              ..sort(compareChatMessages);
         final String encoded = jsonEncode(<String, Object?>{
           'version': _formatVersion,
           'messages': sortedMessages
@@ -694,16 +694,6 @@ final class ChatMessageCache {
       r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-'
       r'[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
     ).hasMatch(value);
-  }
-
-  int _compareMessages(ChatMessage first, ChatMessage second) {
-    final int createdAtComparison = first.createdAt.compareTo(second.createdAt);
-
-    if (createdAtComparison != 0) {
-      return createdAtComparison;
-    }
-
-    return first.id.compareTo(second.id);
   }
 }
 

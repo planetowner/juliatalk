@@ -4,7 +4,6 @@ import asyncio
 import base64
 import html
 import logging
-import math
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -18,7 +17,6 @@ from uuid import UUID
 from fastapi import (
     APIRouter,
     BackgroundTasks,
-    Depends,
     HTTPException,
     Query,
     Response,
@@ -27,8 +25,9 @@ from fastapi import (
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import SessionLocal, get_session
-from app.dependencies import get_current_user
+from app.database import SessionLocal
+from app.dependencies import CurrentUserDependency, SessionDependency
+from app.media_metadata import normalize_waveform_samples
 from app.models import (
     CallKind,
     CallOutcome,
@@ -81,16 +80,6 @@ router = APIRouter(
     prefix="/messages",
     tags=["messages"],
 )
-
-SessionDependency = Annotated[
-    AsyncSession,
-    Depends(get_session),
-]
-
-CurrentUserDependency = Annotated[
-    User,
-    Depends(get_current_user),
-]
 
 CALL_OUTCOMES = {
     "started",
@@ -542,31 +531,6 @@ def require_media_asset_ids(
     return media_asset_ids
 
 
-def normalized_waveform_samples(metadata: Optional[dict[str, Any]]) -> list[float]:
-    if metadata is None:
-        return []
-
-    value = metadata.get("waveform_samples")
-
-    if not isinstance(value, list):
-        return []
-
-    samples: list[float] = []
-
-    for item in value[:80]:
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
-            continue
-
-        sample = float(item)
-
-        if not math.isfinite(sample):
-            continue
-
-        samples.append(max(0.0, min(1.0, sample)))
-
-    return samples
-
-
 def message_metadata_for_storage(
     message_type: str,
     metadata: Optional[dict[str, Any]],
@@ -575,7 +539,7 @@ def message_metadata_for_storage(
         return metadata
 
     if message_type == "voice_memo":
-        waveform_samples = normalized_waveform_samples(metadata)
+        waveform_samples = normalize_waveform_samples(metadata)
 
         if waveform_samples:
             return {"waveform_samples": waveform_samples}
@@ -737,10 +701,12 @@ def build_metadata(
 
         _, media_asset = attachments[0]
         metadata = media_asset_metadata(media_asset)
-        waveform_samples = normalized_waveform_samples(message.metadata_json)
+        waveform_samples = normalize_waveform_samples(message.metadata_json)
 
         if not waveform_samples:
-            waveform_samples = normalized_waveform_samples(media_asset.metadata_json)
+            waveform_samples = normalize_waveform_samples(
+                media_asset.metadata_json
+            )
 
         if waveform_samples:
             metadata["waveform_samples"] = waveform_samples

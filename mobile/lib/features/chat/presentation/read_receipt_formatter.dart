@@ -1,3 +1,5 @@
+import 'chat_date_formatter.dart';
+
 String formatReadReceipt({required DateTime readAt, required DateTime now}) {
   final DateTime localReadAt = readAt.toLocal();
   final DateTime localNow = now.toLocal();
@@ -25,7 +27,7 @@ String formatReadReceipt({required DateTime readAt, required DateTime now}) {
   }
 
   if (elapsed < const Duration(days: 7)) {
-    return 'Seen ${_weekdayName(localReadAt.weekday)}';
+    return 'Seen ${chatWeekdayName(localReadAt.weekday)}';
   }
 
   if (elapsed < const Duration(days: 14)) {
@@ -33,21 +35,4 @@ String formatReadReceipt({required DateTime readAt, required DateTime now}) {
   }
 
   return 'Seen';
-}
-
-String _weekdayName(int weekday) {
-  return switch (weekday) {
-    DateTime.monday => 'Monday',
-    DateTime.tuesday => 'Tuesday',
-    DateTime.wednesday => 'Wednesday',
-    DateTime.thursday => 'Thursday',
-    DateTime.friday => 'Friday',
-    DateTime.saturday => 'Saturday',
-    DateTime.sunday => 'Sunday',
-    _ => throw ArgumentError.value(
-      weekday,
-      'weekday',
-      'Weekday must be between 1 and 7.',
-    ),
-  };
 }

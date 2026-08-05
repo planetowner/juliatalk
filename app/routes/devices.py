@@ -1,20 +1,13 @@
 from datetime import datetime, timezone
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_session
-from app.dependencies import get_current_user
-from app.models import DevicePlatform, User, UserDevice
+from app.dependencies import CurrentUserDependency, SessionDependency
+from app.models import DevicePlatform, UserDevice
 from app.schemas import DeviceRegistrationRead, DeviceRegistrationUpdate
 
 
 router = APIRouter(prefix="/devices", tags=["devices"])
-
-SessionDependency = Annotated[AsyncSession, Depends(get_session)]
-CurrentUserDependency = Annotated[User, Depends(get_current_user)]
 
 
 @router.put(

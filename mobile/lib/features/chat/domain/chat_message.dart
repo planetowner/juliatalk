@@ -6,6 +6,13 @@ enum ChatCallKind { voice, video }
 
 enum ChatCallOutcome { started, ended, cancelled, missed, noAnswer }
 
+int compareChatMessages(ChatMessage first, ChatMessage second) {
+  final int createdAtComparison = first.createdAt.compareTo(second.createdAt);
+  return createdAtComparison != 0
+      ? createdAtComparison
+      : first.id.compareTo(second.id);
+}
+
 final class ChatReplyReference {
   const ChatReplyReference({
     required this.messageId,

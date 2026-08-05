@@ -1,5 +1,36 @@
 import 'dart:collection';
 
+Map<String, int>? tryParseUnreadCounts(
+  Object? rawCounts, {
+  required int total,
+}) {
+  if (rawCounts is! Map || total < 0) {
+    return null;
+  }
+
+  final Map<String, int> counts = <String, int>{};
+  for (final MapEntry<dynamic, dynamic> entry in rawCounts.entries) {
+    final dynamic senderId = entry.key;
+    final dynamic unreadCount = entry.value;
+
+    if (senderId is! String ||
+        senderId.isEmpty ||
+        unreadCount is! int ||
+        unreadCount < 0) {
+      return null;
+    }
+
+    if (unreadCount > 0) {
+      counts[senderId] = unreadCount;
+    }
+  }
+
+  return counts.values.fold<int>(0, (int sum, int count) => sum + count) ==
+          total
+      ? counts
+      : null;
+}
+
 final class UnreadCountsSnapshot {
   const UnreadCountsSnapshot({
     required this.userId,
@@ -29,35 +60,16 @@ final class UnreadCountsSnapshot {
         rawStreamId.isEmpty ||
         rawSequence is! int ||
         rawSequence <= 0 ||
-        rawCounts is! Map ||
         rawTotal is! int ||
         rawTotal < 0) {
       return null;
     }
 
-    final Map<String, int> countsBySenderId = <String, int>{};
-
-    for (final MapEntry<dynamic, dynamic> entry in rawCounts.entries) {
-      final dynamic senderId = entry.key;
-      final dynamic unreadCount = entry.value;
-
-      if (senderId is! String ||
-          senderId.isEmpty ||
-          unreadCount is! int ||
-          unreadCount < 0) {
-        return null;
-      }
-
-      if (unreadCount > 0) {
-        countsBySenderId[senderId] = unreadCount;
-      }
-    }
-
-    final int calculatedTotal = countsBySenderId.values.fold<int>(
-      0,
-      (int total, int count) => total + count,
+    final Map<String, int>? countsBySenderId = tryParseUnreadCounts(
+      rawCounts,
+      total: rawTotal,
     );
-    if (calculatedTotal != rawTotal) {
+    if (countsBySenderId == null) {
       return null;
     }
 

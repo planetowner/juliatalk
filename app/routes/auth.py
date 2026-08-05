@@ -1,10 +1,7 @@
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_session
+from app.dependencies import SessionDependency
 from app.models import User
 from app.schemas import (
     LoginRequest,
@@ -19,11 +16,6 @@ router = APIRouter(
     prefix="/auth",
     tags=["auth"],
 )
-
-SessionDependency = Annotated[
-    AsyncSession,
-    Depends(get_session),
-]
 
 
 @router.post(

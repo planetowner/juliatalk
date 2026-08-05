@@ -21,7 +21,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
 import '../../../design_system/app_typography.dart';
+import '../../../design_system/components/app_profile_image.dart';
 import '../data/chat_photo_library.dart';
+import '../domain/chat_link.dart';
 import '../domain/chat_message_action.dart';
 import '../domain/chat_message.dart';
 import '../domain/chat_message_group.dart';
@@ -37,13 +39,6 @@ const double _messageHorizontalPadding = 11;
 const double _replyMessageMinimumWidthRatio = 0.36;
 
 const double _replyMessageMaximumWidthRatio = 0.70;
-
-final RegExp _messageUrlPattern = RegExp(
-  r'''(?:(?:https?):\/\/|www\.)[^\s<>'"]+''',
-  caseSensitive: false,
-);
-
-const String _trailingUrlPunctuation = '.,!?;:)]}…';
 
 const double _messageToComposerGap = 12;
 
@@ -1012,7 +1007,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       width: width > 0 ? width : 1080,
       height: height > 0 ? height : 1440,
       fileName: capture.name,
-      mimeType: capture.mimeType ?? _mimeTypeForFileName(capture.name),
+      mimeType: capture.mimeType ?? mimeTypeForFileName(capture.name),
       sizeBytes: bytes.length,
       uploadBytes: bytes,
     );
@@ -1101,7 +1096,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final ChatFileAttachment attachment = ChatFileAttachment(
       name: file.name,
       sizeBytes: fileBytes.length,
-      mimeType: _mimeTypeForFileName(file.name),
+      mimeType: mimeTypeForFileName(file.name),
       uploadBytes: fileBytes,
     );
 
@@ -3681,7 +3676,7 @@ final class _SearchDateSheetState extends State<_SearchDateSheet> {
                         for (final int month in months)
                           Center(
                             child: Text(
-                              _monthName(month),
+                              chatMonthName(month),
                               style: AppTypography.typography3.copyWith(
                                 color: month == _temporaryMonth
                                     ? AppColors.grey900
@@ -3718,24 +3713,6 @@ final class _SearchDateSheetState extends State<_SearchDateSheet> {
         ),
       ],
     );
-  }
-
-  String _monthName(int month) {
-    return switch (month) {
-      1 => 'January',
-      2 => 'February',
-      3 => 'March',
-      4 => 'April',
-      5 => 'May',
-      6 => 'June',
-      7 => 'July',
-      8 => 'August',
-      9 => 'September',
-      10 => 'October',
-      11 => 'November',
-      12 => 'December',
-      _ => '$month',
-    };
   }
 }
 
@@ -5170,7 +5147,7 @@ final class _VoiceCallScreen extends StatelessWidget {
                               )
                             : const _ConnectingDots(),
                         SizedBox(height: constraints.maxHeight * 0.08),
-                        _ProfilePlaceholder(
+                        AppProfileImage(
                           imageUrl: participantProfileImageUrl,
                           size: 112,
                           borderRadius: 32,
@@ -5474,50 +5451,14 @@ String _formatSearchMonth(DateTime month) {
   return '${month.year}.${month.month.toString().padLeft(2, '0')}';
 }
 
-String? _firstUrlInMessageText(String content) {
-  final RegExpMatch? match = _messageUrlPattern.firstMatch(content);
-
-  if (match == null) {
-    return null;
-  }
-
-  String url = match.group(0)!.trimRight();
-
-  while (url.isNotEmpty &&
-      _trailingUrlPunctuation.contains(url[url.length - 1])) {
-    url = url.substring(0, url.length - 1);
-  }
-
-  if (url.toLowerCase().startsWith('www.')) {
-    return 'https://$url';
-  }
-
-  return url;
-}
-
-String _domainForLinkUrl(String url) {
-  final Uri? uri = Uri.tryParse(url);
-  String domain = uri?.host ?? '';
-
-  if (domain.isEmpty) {
-    return url;
-  }
-
-  if (domain.startsWith('www.')) {
-    domain = domain.substring(4);
-  }
-
-  return domain;
-}
-
 ChatLinkPreview? _linkPreviewForContent(String content) {
-  final String? url = _firstUrlInMessageText(content);
+  final String? url = firstChatUrlInText(content);
 
   if (url == null) {
     return null;
   }
 
-  return ChatLinkPreview(url: url, domain: _domainForLinkUrl(url));
+  return ChatLinkPreview(url: url, domain: chatDomainForUrl(url));
 }
 
 bool _isLinkOnlyMessage(ChatMessage message) {
@@ -5526,7 +5467,7 @@ bool _isLinkOnlyMessage(ChatMessage message) {
   }
 
   final String remainingText = message.content
-      .replaceAll(_messageUrlPattern, '')
+      .replaceAll(chatUrlPattern, '')
       .replaceAll(RegExp(r'[\s.,!?;:()\[\]{}…]+'), '');
 
   return remainingText.isEmpty;
@@ -6800,7 +6741,7 @@ final class _MessageListState extends State<_MessageList>
         _messages[existingIndex] = message;
       }
 
-      _messages.sort(_compareMessages);
+      _messages.sort(compareChatMessages);
       _syncMessageClockWith(message);
     });
     _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
@@ -6826,7 +6767,7 @@ final class _MessageListState extends State<_MessageList>
         }
       }
 
-      _messages.sort(_compareMessages);
+      _messages.sort(compareChatMessages);
       _syncMessageClockWithMessages(messages);
     });
     _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
@@ -6843,21 +6784,11 @@ final class _MessageListState extends State<_MessageList>
 
     setState(() {
       _messages[messageIndex] = message;
-      _messages.sort(_compareMessages);
+      _messages.sort(compareChatMessages);
       _syncMessageClockWith(message);
     });
 
     return true;
-  }
-
-  int _compareMessages(ChatMessage first, ChatMessage second) {
-    final int createdAtComparison = first.createdAt.compareTo(second.createdAt);
-
-    if (createdAtComparison != 0) {
-      return createdAtComparison;
-    }
-
-    return first.id.compareTo(second.id);
   }
 
   void addOutgoingMessage({
@@ -8607,7 +8538,7 @@ final class _MessageListState extends State<_MessageList>
         _messages[retriedIndex] = retriedMessage;
       }
 
-      _messages.sort(_compareMessages);
+      _messages.sort(compareChatMessages);
 
       if (retriedMessage.translationStatus ==
               ChatTranslationStatus.translated &&
@@ -10428,7 +10359,12 @@ final class _IncomingMessageGroup extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _ProfilePlaceholder(imageUrl: otherParticipantProfileImageUrl),
+        AppProfileImage(
+          imageUrl: otherParticipantProfileImageUrl,
+          size: 36,
+          borderRadius: 12,
+          iconSize: 22,
+        ),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
@@ -11154,9 +11090,7 @@ final class _LinkifiedMessageTextState extends State<_LinkifiedMessageText> {
     final List<InlineSpan> children = <InlineSpan>[];
     int cursor = 0;
 
-    for (final RegExpMatch match in _messageUrlPattern.allMatches(
-      widget.text,
-    )) {
+    for (final RegExpMatch match in chatUrlPattern.allMatches(widget.text)) {
       if (match.start > cursor) {
         children.add(
           TextSpan(text: widget.text.substring(cursor, match.start)),
@@ -11167,7 +11101,7 @@ final class _LinkifiedMessageTextState extends State<_LinkifiedMessageText> {
       int linkEnd = rawUrl.length;
 
       while (linkEnd > 0 &&
-          _trailingUrlPunctuation.contains(rawUrl[linkEnd - 1])) {
+          chatTrailingUrlPunctuation.contains(rawUrl[linkEnd - 1])) {
         linkEnd--;
       }
 
@@ -12979,48 +12913,6 @@ String _formatFileSize(int bytes) {
   return '${gb.toStringAsFixed(1)} GB';
 }
 
-String _mimeTypeForFileName(String fileName) {
-  final String lowerCase = fileName.toLowerCase();
-
-  if (lowerCase.endsWith('.jpg') || lowerCase.endsWith('.jpeg')) {
-    return 'image/jpeg';
-  }
-
-  if (lowerCase.endsWith('.png')) {
-    return 'image/png';
-  }
-
-  if (lowerCase.endsWith('.heic')) {
-    return 'image/heic';
-  }
-
-  if (lowerCase.endsWith('.webp')) {
-    return 'image/webp';
-  }
-
-  if (lowerCase.endsWith('.mp4')) {
-    return 'video/mp4';
-  }
-
-  if (lowerCase.endsWith('.mov')) {
-    return 'video/quicktime';
-  }
-
-  if (lowerCase.endsWith('.m4a')) {
-    return 'audio/mp4';
-  }
-
-  if (lowerCase.endsWith('.mp3')) {
-    return 'audio/mpeg';
-  }
-
-  if (lowerCase.endsWith('.pdf')) {
-    return 'application/pdf';
-  }
-
-  return 'application/octet-stream';
-}
-
 String _safeLocalFileName(String fileName) {
   final List<String> segments = fileName
       .split(RegExp(r'[/\\]'))
@@ -14381,82 +14273,6 @@ final class _BubbleTailPainter extends CustomPainter {
   @override
   bool shouldRepaint(_BubbleTailPainter oldDelegate) {
     return oldDelegate.color != color || oldDelegate.direction != direction;
-  }
-}
-
-final class _ProfilePlaceholder extends StatelessWidget {
-  const _ProfilePlaceholder({
-    required this.imageUrl,
-    this.size = 36,
-    this.borderRadius = 12,
-    this.iconSize = 22,
-    this.iconColor = AppColors.white,
-  });
-
-  final String? imageUrl;
-  final double size;
-  final double borderRadius;
-  final double iconSize;
-  final Color iconColor;
-
-  @override
-  Widget build(BuildContext context) {
-    final String? resolvedImageUrl = imageUrl?.trim();
-    final BorderRadius resolvedBorderRadius = BorderRadius.circular(
-      borderRadius,
-    );
-
-    return SizedBox.square(
-      dimension: size,
-      child: resolvedImageUrl != null && resolvedImageUrl.isNotEmpty
-          ? ClipRRect(
-              borderRadius: resolvedBorderRadius,
-              child: Image.network(
-                resolvedImageUrl,
-                fit: BoxFit.cover,
-                errorBuilder:
-                    (
-                      BuildContext context,
-                      Object error,
-                      StackTrace? stackTrace,
-                    ) {
-                      return _DefaultProfilePlaceholder(
-                        borderRadius: resolvedBorderRadius,
-                        iconSize: iconSize,
-                        iconColor: iconColor,
-                      );
-                    },
-              ),
-            )
-          : _DefaultProfilePlaceholder(
-              borderRadius: resolvedBorderRadius,
-              iconSize: iconSize,
-              iconColor: iconColor,
-            ),
-    );
-  }
-}
-
-final class _DefaultProfilePlaceholder extends StatelessWidget {
-  const _DefaultProfilePlaceholder({
-    required this.borderRadius,
-    required this.iconSize,
-    required this.iconColor,
-  });
-
-  final BorderRadius borderRadius;
-  final double iconSize;
-  final Color iconColor;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.blue100,
-        borderRadius: borderRadius,
-      ),
-      child: Icon(Icons.person_rounded, color: iconColor, size: iconSize),
-    );
   }
 }
 

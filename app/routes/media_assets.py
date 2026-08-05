@@ -1,25 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import mimetypes
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Optional
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_session
-from app.dependencies import get_current_user
+from app.dependencies import CurrentUserDependency, SessionDependency
+from app.media_metadata import normalize_waveform_samples
 from app.models import (
     DirectConversation,
     MediaAsset,
     MediaKind,
     Message,
     MessageAttachment,
-    User,
 )
 from app.object_storage import (
     DEFAULT_PRESIGNED_URL_EXPIRES_SECONDS,
@@ -37,16 +35,6 @@ router = APIRouter(
     prefix="/media-assets",
     tags=["media-assets"],
 )
-
-SessionDependency = Annotated[
-    AsyncSession,
-    Depends(get_session),
-]
-
-CurrentUserDependency = Annotated[
-    User,
-    Depends(get_current_user),
-]
 
 
 def _safe_file_name(file_name: Optional[str], mime_type: str) -> str:
@@ -69,31 +57,6 @@ def _storage_key(
     return f"users/{user_id}/media/{media_asset_id}/{file_name}"
 
 
-def _normalized_waveform_samples(metadata: Optional[dict[str, Any]]) -> list[float]:
-    if metadata is None:
-        return []
-
-    value = metadata.get("waveform_samples")
-
-    if not isinstance(value, list):
-        return []
-
-    samples: list[float] = []
-
-    for item in value[:80]:
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
-            continue
-
-        sample = float(item)
-
-        if not math.isfinite(sample):
-            continue
-
-        samples.append(max(0.0, min(1.0, sample)))
-
-    return samples
-
-
 def _metadata_for_storage(
     *,
     kind: str,
@@ -102,7 +65,7 @@ def _metadata_for_storage(
     if kind != "voice_memo":
         return {}
 
-    waveform_samples = _normalized_waveform_samples(metadata)
+    waveform_samples = normalize_waveform_samples(metadata)
 
     if not waveform_samples:
         return {}

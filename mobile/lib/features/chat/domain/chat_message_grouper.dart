@@ -7,7 +7,7 @@ List<ChatMessageGroup> groupChatMessages(List<ChatMessage> messages) {
   }
 
   final List<ChatMessage> sortedMessages = List<ChatMessage>.of(messages)
-    ..sort(_compareMessages);
+    ..sort(compareChatMessages);
 
   final List<ChatMessageGroup> groups = [];
 
@@ -54,7 +54,8 @@ String? findLatestReadOutgoingMessageId({
 
     final ChatMessage? currentLatest = latestReadMessage;
 
-    if (currentLatest == null || _compareMessages(currentLatest, message) < 0) {
+    if (currentLatest == null ||
+        compareChatMessages(currentLatest, message) < 0) {
       latestReadMessage = message;
     }
   }
@@ -80,14 +81,4 @@ bool isSameChatDate(DateTime first, DateTime second) {
   return localFirst.year == localSecond.year &&
       localFirst.month == localSecond.month &&
       localFirst.day == localSecond.day;
-}
-
-int _compareMessages(ChatMessage first, ChatMessage second) {
-  final int dateComparison = first.createdAt.compareTo(second.createdAt);
-
-  if (dateComparison != 0) {
-    return dateComparison;
-  }
-
-  return first.id.compareTo(second.id);
 }

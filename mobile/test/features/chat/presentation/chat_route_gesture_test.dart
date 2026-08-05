@@ -965,6 +965,79 @@ void main() {
     },
   );
 
+  testWidgets('a taller keyboard keeps the latest message above the composer', (
+    WidgetTester tester,
+  ) async {
+    final ChatRealtimeService realtimeService = await _pumpConversationHome(
+      tester,
+      conversationResponder: (http.Request request) async {
+        return http.Response(
+          jsonEncode(
+            List<Map<String, dynamic>>.generate(
+              100,
+              (int offset) => _messageJson(offset + 300),
+            ),
+          ),
+          200,
+          headers: const <String, String>{
+            'content-type': 'application/json',
+            'x-has-more': 'true',
+          },
+        );
+      },
+    );
+    addTearDown(realtimeService.dispose);
+    addTearDown(tester.view.resetViewInsets);
+
+    await tester.tap(find.text(_otherUser.displayName));
+    await tester.pumpAndSettle();
+
+    final Finder latestBubbleFinder = find.byKey(
+      const ValueKey<String>('incoming-bubble-message-399'),
+    );
+    final Finder composerFinder = find.byKey(
+      const ValueKey<String>('message-composer-default'),
+    );
+    final Finder inputFinder = find.byKey(
+      const ValueKey<String>('message-input'),
+    );
+
+    await tester.tap(inputFinder);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getRect(composerFinder).top -
+          tester.getRect(latestBubbleFinder).bottom,
+      closeTo(12, 1),
+    );
+
+    tester.view.viewInsets = const FakeViewPadding(bottom: 380);
+    await tester.pumpAndSettle();
+
+    expect(latestBubbleFinder, findsOneWidget);
+    expect(
+      tester.getRect(composerFinder).top -
+          tester.getRect(latestBubbleFinder).bottom,
+      closeTo(12, 1),
+      reason:
+          'Switching to the taller emoji keyboard must move the message '
+          'viewport with the composer.',
+    );
+
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getRect(composerFinder).top -
+          tester.getRect(latestBubbleFinder).bottom,
+      closeTo(12, 1),
+      reason:
+          'Switching back to the shorter text keyboard must keep the latest '
+          'message anchored above the composer.',
+    );
+  });
+
   testWidgets(
     'a gesture that starts vertically never becomes a back swipe later',
     (WidgetTester tester) async {

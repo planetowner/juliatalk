@@ -1247,6 +1247,18 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     );
     _handleKeyboardDragViewportMetricsChanged(keyboardHeight);
 
+    final bool keyboardHeightIncreasedWhileVisible =
+        previousKeyboardHeight > 0.5 &&
+        keyboardHeight > previousKeyboardHeight + 0.5;
+
+    if (!_keyboardTransitionActive &&
+        keyboardHeightIncreasedWhileVisible &&
+        (_messageListKey.currentState?.isNearBottom ?? false)) {
+      setState(() {
+        _keyboardTransitionActive = true;
+      });
+    }
+
     if (!_keyboardTransitionActive) {
       return;
     }

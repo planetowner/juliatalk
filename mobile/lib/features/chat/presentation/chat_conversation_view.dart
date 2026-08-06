@@ -36,6 +36,8 @@ import 'reply_navigation_diagnostics.dart';
 
 const double _messageHorizontalPadding = 11;
 
+const double _messageListHorizontalPadding = 8;
+
 const double _replyMessageMinimumWidthRatio = 0.36;
 
 const double _replyMessageMaximumWidthRatio = 0.70;
@@ -43,6 +45,14 @@ const double _replyMessageMaximumWidthRatio = 0.70;
 const double _messageToComposerGap = 12;
 
 const double _attachmentPanelFallbackHeight = 302;
+
+const Duration _quickPhotoEligibilityDuration = Duration(seconds: 15);
+
+const Duration _quickPhotoDisplayDuration = Duration(seconds: 10);
+
+const Duration _quickPhotoDismissAnimationDuration = Duration(
+  milliseconds: 180,
+);
 
 const Duration _bottomSurfaceAnimationDuration = Duration(milliseconds: 180);
 
@@ -410,6 +420,20 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   late final ChatPhotoLibrary _photoLibrary;
 
+  final Set<String> _shownQuickPhotoAssetIds = <String>{};
+
+  ChatPhotoAsset? _quickPhotoAsset;
+  Uint8List? _quickPhotoThumbnailBytes;
+
+  int _quickPhotoRequestId = 0;
+
+  bool _quickPhotoPreviewOpen = false;
+  bool _quickPhotoPromptVisible = false;
+
+  Timer? _quickPhotoDismissTimer;
+
+  double _quickPhotoComposerHeight = 60;
+
   ChatMessage? _replyingToMessage;
   String? _replyingToContent;
   ChatMessage? _editingMessage;
@@ -492,6 +516,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _keyboardDragViewportAnchorReleaseTimer?.cancel();
     _composerResizeTimer?.cancel();
     _bottomSurfaceHoldTimer?.cancel();
+    _quickPhotoDismissTimer?.cancel();
     _voiceCallConnectionTimer?.cancel();
     _voiceCallTicker?.cancel();
 
@@ -573,6 +598,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     setState(() {
       _attachmentPanelOpen = false;
+      _clearQuickPhotoPrompt();
 
       // 키보드가 나타나는 동안 작성창 높이가 먼저 내려가지 않도록
       // 기존 첨부 패널 높이를 잠시 유지한다.
@@ -591,6 +617,18 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     final double keyboardHeight = _currentKeyboardHeight();
+    final DateTime pressedAt = DateTime.now();
+    final int requestId = ++_quickPhotoRequestId;
+
+    final RenderObject? composerRenderObject = _composerMeasureKey
+        .currentContext
+        ?.findRenderObject();
+
+    if (composerRenderObject is RenderBox &&
+        composerRenderObject.attached &&
+        composerRenderObject.hasSize) {
+      _quickPhotoComposerHeight = composerRenderObject.size.height;
+    }
 
     _stopKeyboardTransition();
     _startBottomSurfacePinIfNeeded();
@@ -604,10 +642,115 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _heldBottomSurfaceHeight = null;
       _photoPickerOpen = false;
       _attachmentPanelOpen = true;
+      _quickPhotoAsset = null;
+      _quickPhotoThumbnailBytes = null;
+      _quickPhotoPromptVisible = false;
     });
 
     // 입력 내용은 지우지 않고 포커스와 키보드만 내린다.
     _messageFocusNode.unfocus();
+
+    unawaited(
+      _showQuickPhotoIfEligible(requestId: requestId, pressedAt: pressedAt),
+    );
+  }
+
+  Future<void> _showQuickPhotoIfEligible({
+    required int requestId,
+    required DateTime pressedAt,
+  }) async {
+    final Object photoLibrary = _photoLibrary;
+
+    if (photoLibrary is! ChatQuickPhotoSource) {
+      return;
+    }
+
+    try {
+      final ChatPhotoAccessState accessState = await photoLibrary.checkAccess();
+
+      if (accessState == ChatPhotoAccessState.denied) {
+        return;
+      }
+
+      final ChatPhotoAsset? asset = await photoLibrary.loadLatestPhoto();
+      final DateTime? createdAt = asset?.createdAt;
+
+      if (asset == null ||
+          createdAt == null ||
+          _shownQuickPhotoAssetIds.contains(asset.id)) {
+        return;
+      }
+
+      final Duration ageAtButtonPress = pressedAt.difference(createdAt);
+
+      if (ageAtButtonPress.isNegative ||
+          ageAtButtonPress > _quickPhotoEligibilityDuration) {
+        return;
+      }
+
+      final Uint8List? thumbnailBytes = await _photoLibrary.loadThumbnail(
+        assetId: asset.id,
+        width: 256,
+        height: 256,
+      );
+
+      if (!mounted ||
+          requestId != _quickPhotoRequestId ||
+          !_attachmentPanelOpen ||
+          thumbnailBytes == null) {
+        return;
+      }
+
+      _shownQuickPhotoAssetIds.add(asset.id);
+
+      setState(() {
+        _quickPhotoAsset = asset;
+        _quickPhotoThumbnailBytes = thumbnailBytes;
+        _quickPhotoPromptVisible = true;
+      });
+
+      _quickPhotoDismissTimer?.cancel();
+      _quickPhotoDismissTimer = Timer(_quickPhotoDisplayDuration, () {
+        _quickPhotoDismissTimer = null;
+
+        if (!mounted || _quickPhotoAsset?.id != asset.id) {
+          return;
+        }
+
+        setState(() {
+          _quickPhotoPromptVisible = false;
+        });
+
+        _quickPhotoDismissTimer = Timer(
+          _quickPhotoDismissAnimationDuration,
+          () {
+            _quickPhotoDismissTimer = null;
+
+            if (!mounted ||
+                _quickPhotoPromptVisible ||
+                _quickPhotoAsset?.id != asset.id) {
+              return;
+            }
+
+            setState(() {
+              _quickPhotoAsset = null;
+              _quickPhotoThumbnailBytes = null;
+            });
+          },
+        );
+      });
+    } catch (_) {
+      // 빠른 전송 조회 실패는 첨부 메뉴 자체를 방해하지 않는다.
+    }
+  }
+
+  void _clearQuickPhotoPrompt() {
+    _quickPhotoDismissTimer?.cancel();
+    _quickPhotoDismissTimer = null;
+    _quickPhotoRequestId++;
+    _quickPhotoAsset = null;
+    _quickPhotoThumbnailBytes = null;
+    _quickPhotoPromptVisible = false;
   }
 
   void _closeAttachmentPanelToDefault() {
@@ -672,6 +815,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     setState(() {
       _attachmentPanelOpen = false;
       _photoPickerOpen = true;
+      _clearQuickPhotoPrompt();
 
       _photoPickerExpanded = false;
       _photoPickerDragging = false;
@@ -775,6 +919,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   void _resetBottomSurfaceState() {
     _attachmentPanelOpen = false;
     _photoPickerOpen = false;
+    _clearQuickPhotoPrompt();
     _photoPickerExpanded = false;
     _photoPickerDragging = false;
     _photoPickerCollapsedHeight = null;
@@ -901,6 +1046,57 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     _dismissComposerAfterAttachmentSend();
+  }
+
+  Future<void> _openQuickPhotoPreview() async {
+    final ChatPhotoAsset? asset = _quickPhotoAsset;
+    final Uint8List? thumbnailBytes = _quickPhotoThumbnailBytes;
+
+    if (asset == null || thumbnailBytes == null || _quickPhotoPreviewOpen) {
+      return;
+    }
+
+    _quickPhotoPreviewOpen = true;
+
+    final bool? shouldSend = await Navigator.of(context).push<bool>(
+      PageRouteBuilder<bool>(
+        transitionDuration: const Duration(milliseconds: 180),
+        reverseTransitionDuration: const Duration(milliseconds: 160),
+        pageBuilder:
+            (
+              BuildContext context,
+              Animation<double> animation,
+              Animation<double> secondaryAnimation,
+            ) {
+              return _QuickPhotoPreviewScreen(
+                asset: asset,
+                thumbnailBytes: thumbnailBytes,
+                photoLibrary: _photoLibrary,
+              );
+            },
+        transitionsBuilder:
+            (
+              BuildContext context,
+              Animation<double> animation,
+              Animation<double> secondaryAnimation,
+              Widget child,
+            ) {
+              return FadeTransition(opacity: animation, child: child);
+            },
+      ),
+    );
+
+    _quickPhotoPreviewOpen = false;
+
+    if (!mounted || shouldSend != true) {
+      return;
+    }
+
+    setState(_clearQuickPhotoPrompt);
+
+    await _sendSelectedPhotos(
+      ChatPhotoSelectionResult(assets: <ChatPhotoAsset>[asset], collage: true),
+    );
   }
 
   void _openPhotoViewer(ChatMessage message, int initialIndex) {
@@ -2716,6 +2912,27 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                 ],
               ),
 
+              if (!_searchModeActive &&
+                  !showingVoiceCallScreen &&
+                  _attachmentPanelOpen &&
+                  _quickPhotoAsset != null &&
+                  _quickPhotoThumbnailBytes != null)
+                Positioned(
+                  right: _messageListHorizontalPadding,
+                  bottom:
+                      bottomSurfaceHeight +
+                      _quickPhotoComposerHeight +
+                      _messageToComposerGap,
+                  child: _QuickPhotoPrompt(
+                    asset: _quickPhotoAsset!,
+                    thumbnailBytes: _quickPhotoThumbnailBytes!,
+                    visible: _quickPhotoPromptVisible,
+                    onPressed: () {
+                      unawaited(_openQuickPhotoPreview());
+                    },
+                  ),
+                ),
+
               if (!showingVoiceCallScreen)
                 Positioned(
                   left: 0,
@@ -2803,6 +3020,295 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     return _ChatLinkOpenerScope(
       onOpenLink: widget.onOpenLink ?? _openChatLinkInSystemBrowser,
       child: content,
+    );
+  }
+}
+
+String _quickPhotoHeroTag(String assetId) {
+  return 'quick-photo-$assetId';
+}
+
+final class _QuickPhotoPrompt extends StatelessWidget {
+  const _QuickPhotoPrompt({
+    required this.asset,
+    required this.thumbnailBytes,
+    required this.visible,
+    required this.onPressed,
+  });
+
+  final ChatPhotoAsset asset;
+  final Uint8List thumbnailBytes;
+  final bool visible;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final double cardWidth = (MediaQuery.sizeOf(context).width * 0.172)
+        .clamp(68, 76)
+        .toDouble();
+    final double cardHeight = cardWidth + 50;
+
+    return IgnorePointer(
+      ignoring: !visible,
+      child: AnimatedOpacity(
+        opacity: visible ? 1 : 0,
+        duration: _quickPhotoDismissAnimationDuration,
+        curve: Curves.linear,
+        child: TweenAnimationBuilder<double>(
+          tween: Tween<double>(begin: 0, end: 1),
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          builder: (BuildContext context, double value, Widget? child) {
+            return Opacity(
+              opacity: value,
+              child: Transform.scale(
+                scale: 0.92 + (0.08 * value),
+                alignment: Alignment.bottomRight,
+                child: child,
+              ),
+            );
+          },
+          child: Semantics(
+            button: true,
+            label: 'Send photo',
+            child: SizedBox(
+              key: const ValueKey<String>('quick-photo-prompt'),
+              width: cardWidth,
+              height: cardHeight,
+              child: DecoratedBox(
+                key: const ValueKey<String>('quick-photo-card-surface'),
+                decoration: const BoxDecoration(
+                  color: AppColors.white,
+                  borderRadius: BorderRadius.all(Radius.circular(17)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Color(0x1A000000),
+                      offset: Offset(0, 6),
+                      blurRadius: 18,
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.all(Radius.circular(17)),
+                  child: ColoredBox(
+                    color: AppColors.white,
+                    child: Column(
+                      children: [
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            Feedback.forTap(context);
+                            onPressed();
+                          },
+                          child: Hero(
+                            tag: _quickPhotoHeroTag(asset.id),
+                            child: Image.memory(
+                              thumbnailBytes,
+                              key: const ValueKey<String>(
+                                'quick-photo-thumbnail',
+                              ),
+                              width: cardWidth,
+                              height: cardWidth,
+                              fit: BoxFit.cover,
+                              gaplessPlayback: true,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 9,
+                            ),
+                            child: Material(
+                              key: const ValueKey<String>('quick-photo-send'),
+                              color: AppColors.blue500,
+                              borderRadius: const BorderRadius.all(
+                                Radius.circular(22),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
+                                onTap: () {
+                                  Feedback.forTap(context);
+                                  onPressed();
+                                },
+                                child: Center(
+                                  child: Text(
+                                    'Send',
+                                    textAlign: TextAlign.center,
+                                    style: AppTypography.subTypography11
+                                        .copyWith(
+                                          color: AppColors.white,
+                                          fontWeight: AppTypography.semibold,
+                                        ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _QuickPhotoPreviewScreen extends StatefulWidget {
+  const _QuickPhotoPreviewScreen({
+    required this.asset,
+    required this.thumbnailBytes,
+    required this.photoLibrary,
+  });
+
+  final ChatPhotoAsset asset;
+  final Uint8List thumbnailBytes;
+  final ChatPhotoLibrary photoLibrary;
+
+  @override
+  State<_QuickPhotoPreviewScreen> createState() {
+    return _QuickPhotoPreviewScreenState();
+  }
+}
+
+final class _QuickPhotoPreviewScreenState
+    extends State<_QuickPhotoPreviewScreen> {
+  late Uint8List _previewBytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _previewBytes = widget.thumbnailBytes;
+    unawaited(_loadPreview());
+  }
+
+  Future<void> _loadPreview() async {
+    final Uint8List? previewBytes;
+
+    try {
+      previewBytes = await widget.photoLibrary.loadMessagePreview(
+        assetId: widget.asset.id,
+      );
+    } catch (_) {
+      return;
+    }
+
+    if (!mounted || previewBytes == null) {
+      return;
+    }
+
+    final Uint8List resolvedPreviewBytes = previewBytes;
+
+    setState(() {
+      _previewBytes = resolvedPreviewBytes;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.light
+        .copyWith(
+          statusBarColor: Colors.transparent,
+          systemNavigationBarColor: AppColors.black,
+          systemNavigationBarIconBrightness: Brightness.light,
+        );
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: overlayStyle,
+      child: Scaffold(
+        key: const ValueKey<String>('quick-photo-preview'),
+        backgroundColor: AppColors.black,
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: SafeArea(
+                minimum: const EdgeInsets.fromLTRB(0, 52, 0, 76),
+                child: Center(
+                  child: Hero(
+                    tag: _quickPhotoHeroTag(widget.asset.id),
+                    child: Image.memory(
+                      _previewBytes,
+                      width: double.infinity,
+                      height: double.infinity,
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 8,
+              top: 0,
+              child: SafeArea(
+                bottom: false,
+                child: TextButton(
+                  key: const ValueKey<String>('quick-photo-preview-cancel'),
+                  onPressed: () {
+                    Navigator.of(context).pop(false);
+                  },
+                  style: TextButton.styleFrom(foregroundColor: AppColors.white),
+                  child: Text(
+                    'Cancel',
+                    style: AppTypography.subTypography10.copyWith(
+                      color: AppColors.white,
+                      fontWeight: AppTypography.medium,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: ColoredBox(
+                color: const Color(0xD9000000),
+                child: SafeArea(
+                  top: false,
+                  minimum: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: SizedBox(
+                      width: 72,
+                      height: 42,
+                      child: Material(
+                        color: AppColors.blue500,
+                        borderRadius: AppRadius.borderRadiusFull,
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          key: const ValueKey<String>(
+                            'quick-photo-preview-send',
+                          ),
+                          onTap: () {
+                            Feedback.forTap(context);
+                            Navigator.of(context).pop(true);
+                          },
+                          child: Center(
+                            child: Text(
+                              'Send',
+                              style: AppTypography.typography6.copyWith(
+                                color: AppColors.white,
+                                fontWeight: AppTypography.semibold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -8931,7 +9437,9 @@ final class _MessageListState extends State<_MessageList>
                         child: SizedBox(height: widget.topPadding),
                       ),
                       SliverPadding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: _messageListHorizontalPadding,
+                        ),
                         sliver: SliverList(
                           delegate: SliverChildBuilderDelegate(
                             (BuildContext context, int index) {
@@ -8973,7 +9481,9 @@ final class _MessageListState extends State<_MessageList>
                       ),
                       SliverPadding(
                         key: _historyCenterSliverKey,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: _messageListHorizontalPadding,
+                        ),
                         sliver: SliverList(
                           delegate: SliverChildBuilderDelegate((
                             BuildContext context,
@@ -14163,8 +14673,8 @@ final class _MessageBubbleState extends State<_MessageBubble>
         screenWidth * (widget.isReply ? _replyMessageMaximumWidthRatio : 0.68);
 
     final BorderRadius borderRadius = BorderRadius.only(
-      topLeft: Radius.circular(!_isOutgoing && widget.showTail ? 6 : 17),
-      topRight: Radius.circular(_isOutgoing && widget.showTail ? 6 : 17),
+      topLeft: Radius.circular(!_isOutgoing && widget.showTail ? 13 : 17),
+      topRight: Radius.circular(_isOutgoing && widget.showTail ? 13 : 17),
       bottomLeft: const Radius.circular(17),
       bottomRight: const Radius.circular(17),
     );

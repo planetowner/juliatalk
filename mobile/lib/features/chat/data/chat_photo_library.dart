@@ -27,11 +27,13 @@ final class ChatPhotoAsset {
     required this.id,
     required this.width,
     required this.height,
+    this.createdAt,
   });
 
   final String id;
   final int width;
   final int height;
+  final DateTime? createdAt;
 }
 
 final class ChatPhotoFile {
@@ -72,6 +74,12 @@ abstract interface class ChatPhotoLibrary {
   Future<void> openSettings();
 }
 
+abstract interface class ChatQuickPhotoSource {
+  Future<ChatPhotoAccessState> checkAccess();
+
+  Future<ChatPhotoAsset?> loadLatestPhoto();
+}
+
 final class ChatPhotoLibraryChange {
   ChatPhotoLibraryChange({
     Iterable<String> createdAssetIds = const <String>[],
@@ -96,7 +104,10 @@ abstract interface class ChatPhotoLibraryChangeSource {
 }
 
 final class PhotoManagerChatPhotoLibrary
-    implements ChatPhotoLibrary, ChatPhotoLibraryChangeSource {
+    implements
+        ChatPhotoLibrary,
+        ChatPhotoLibraryChangeSource,
+        ChatQuickPhotoSource {
   static const PermissionRequestOption _permissionOption =
       PermissionRequestOption(
         iosAccessLevel: IosAccessLevel.readWrite,
@@ -342,16 +353,7 @@ final class PhotoManagerChatPhotoLibrary
           await PhotoManager.requestPermissionExtend(
             requestOption: _permissionOption,
           );
-
-      final ChatPhotoAccessState accessState;
-
-      if (permissionState.isAuth) {
-        accessState = ChatPhotoAccessState.authorized;
-      } else if (permissionState.hasAccess) {
-        accessState = ChatPhotoAccessState.limited;
-      } else {
-        accessState = ChatPhotoAccessState.denied;
-      }
+      final ChatPhotoAccessState accessState = _accessStateFor(permissionState);
 
       _cachedAccessState = accessState;
 
@@ -359,6 +361,42 @@ final class PhotoManagerChatPhotoLibrary
     } finally {
       _accessRequestInFlight = null;
     }
+  }
+
+  @override
+  Future<ChatPhotoAccessState> checkAccess() async {
+    final PermissionState permissionState =
+        await PhotoManager.getPermissionState(requestOption: _permissionOption);
+
+    return _accessStateFor(permissionState);
+  }
+
+  @override
+  Future<ChatPhotoAsset?> loadLatestPhoto() async {
+    final List<AssetPathEntity> paths = await PhotoManager.getAssetPathList(
+      type: RequestType.image,
+      hasAll: true,
+      onlyAll: true,
+      filterOption: _createFilterOption(),
+    );
+
+    if (paths.isEmpty) {
+      return null;
+    }
+
+    final List<AssetEntity> entities = await paths.first.getAssetListPaged(
+      page: 0,
+      size: 1,
+    );
+
+    if (entities.isEmpty) {
+      return null;
+    }
+
+    final AssetEntity entity = entities.first;
+    _assetEntities[entity.id] = entity;
+
+    return _photoAssetFor(entity);
   }
 
   @override
@@ -455,15 +493,7 @@ final class PhotoManagerChatPhotoLibrary
       _assetEntities[entity.id] = entity;
     }
 
-    return List<ChatPhotoAsset>.unmodifiable(
-      entities.map(
-        (AssetEntity entity) => ChatPhotoAsset(
-          id: entity.id,
-          width: entity.orientatedWidth,
-          height: entity.orientatedHeight,
-        ),
-      ),
-    );
+    return List<ChatPhotoAsset>.unmodifiable(entities.map(_photoAssetFor));
   }
 
   @override
@@ -553,6 +583,27 @@ final class PhotoManagerChatPhotoLibrary
   @override
   Future<void> openSettings() async {
     await PhotoManager.openSetting();
+  }
+
+  static ChatPhotoAccessState _accessStateFor(PermissionState permissionState) {
+    if (permissionState.isAuth) {
+      return ChatPhotoAccessState.authorized;
+    }
+
+    if (permissionState.hasAccess) {
+      return ChatPhotoAccessState.limited;
+    }
+
+    return ChatPhotoAccessState.denied;
+  }
+
+  static ChatPhotoAsset _photoAssetFor(AssetEntity entity) {
+    return ChatPhotoAsset(
+      id: entity.id,
+      width: entity.orientatedWidth,
+      height: entity.orientatedHeight,
+      createdAt: entity.createDateTime,
+    );
   }
 }
 

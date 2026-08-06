@@ -441,14 +441,14 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   Timer? _keyboardTransitionTimer;
   Timer? _keyboardDismissSettleTimer;
-  Timer? _keyboardDragViewportAnchorReleaseTimer;
+  Timer? _viewportResizeAnchorReleaseTimer;
   Timer? _composerResizeTimer;
   Timer? _bottomSurfaceHoldTimer;
   Timer? _voiceCallConnectionTimer;
   Timer? _voiceCallTicker;
 
   bool _keyboardTransitionActive = false;
-  bool _keyboardDragViewportAnchorActive = false;
+  bool _viewportResizeAnchorActive = false;
   bool _pinBottomDuringComposerResize = false;
   bool _pinBottomAfterKeyboardDismiss = false;
   bool _postSendBottomSettlePending = false;
@@ -513,7 +513,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _keyboardTransitionTimer?.cancel();
     _keyboardDismissSettleTimer?.cancel();
-    _keyboardDragViewportAnchorReleaseTimer?.cancel();
+    _viewportResizeAnchorReleaseTimer?.cancel();
     _composerResizeTimer?.cancel();
     _bottomSurfaceHoldTimer?.cancel();
     _quickPhotoDismissTimer?.cancel();
@@ -564,14 +564,21 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     return view.viewInsets.bottom / view.devicePixelRatio;
   }
 
-  void _startBottomSurfacePinIfNeeded() {
+  void _startBottomSurfaceResizePreservationIfNeeded() {
     final _MessageListState? messageListState = _messageListKey.currentState;
 
     _stopComposerResizePin();
 
     if (messageListState == null || messageListState.isNearBottom) {
+      _endViewportResizeAnchorPreservation();
       _startComposerResizePin();
+      return;
     }
+
+    _beginViewportResizeAnchorPreservation();
+    _scheduleViewportResizeAnchorRelease(
+      delay: const Duration(milliseconds: 260),
+    );
   }
 
   void _scheduleBottomSurfaceHoldRelease() {
@@ -593,7 +600,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    _startBottomSurfacePinIfNeeded();
+    _startBottomSurfaceResizePreservationIfNeeded();
     _bottomSurfaceHoldTimer?.cancel();
 
     setState(() {
@@ -631,7 +638,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     _stopKeyboardTransition();
-    _startBottomSurfacePinIfNeeded();
+    _startBottomSurfaceResizePreservationIfNeeded();
     _bottomSurfaceHoldTimer?.cancel();
 
     setState(() {
@@ -760,7 +767,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    _startBottomSurfacePinIfNeeded();
+    _startBottomSurfaceResizePreservationIfNeeded();
     _bottomSurfaceHoldTimer?.cancel();
 
     setState(_resetBottomSurfaceState);
@@ -810,7 +817,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final double collapsedHeight =
         renderObject.size.height + attachmentPanelHeight;
 
-    _startBottomSurfacePinIfNeeded();
+    _startBottomSurfaceResizePreservationIfNeeded();
 
     setState(() {
       _attachmentPanelOpen = false;
@@ -833,7 +840,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    _startBottomSurfacePinIfNeeded();
+    _startBottomSurfaceResizePreservationIfNeeded();
 
     setState(() {
       _photoPickerOpen = false;
@@ -1441,19 +1448,28 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       previousKeyboardHeight: previousKeyboardHeight,
       keyboardHeight: keyboardHeight,
     );
-    _handleKeyboardDragViewportMetricsChanged(keyboardHeight);
 
-    final bool keyboardHeightIncreasedWhileVisible =
-        previousKeyboardHeight > 0.5 &&
-        keyboardHeight > previousKeyboardHeight + 0.5;
+    final bool keyboardHeightChanged =
+        (keyboardHeight - previousKeyboardHeight).abs() > 0.5;
+    final _MessageListState? messageListState = _messageListKey.currentState;
 
-    if (!_keyboardTransitionActive &&
-        keyboardHeightIncreasedWhileVisible &&
-        (_messageListKey.currentState?.isNearBottom ?? false)) {
-      setState(() {
-        _keyboardTransitionActive = true;
-      });
+    if (keyboardHeightChanged && messageListState != null) {
+      if (messageListState.isNearBottom) {
+        if (!_keyboardTransitionActive &&
+            keyboardHeight > previousKeyboardHeight + 0.5) {
+          setState(() {
+            _keyboardTransitionActive = true;
+          });
+        }
+      } else if (!_keyboardTransitionActive &&
+          !_pinBottomDuringComposerResize &&
+          !_pinBottomAfterKeyboardDismiss &&
+          !_postSendBottomSettlePending) {
+        _beginViewportResizeAnchorPreservation();
+      }
     }
+
+    _handleViewportResizeMetricsChanged(keyboardHeight);
 
     if (!_keyboardTransitionActive) {
       return;
@@ -1539,10 +1555,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _pinBottomAfterKeyboardDismiss = true;
   }
 
-  void _beginKeyboardDragViewportAnchorPreservation() {
-    if (_searchViewportAnchorActive ||
-        _keyboardDragViewportAnchorActive ||
-        _currentKeyboardHeight() <= 0.5) {
+  void _beginViewportResizeAnchorPreservation() {
+    if (_searchViewportAnchorActive || _viewportResizeAnchorActive) {
       return;
     }
 
@@ -1552,51 +1566,67 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    _keyboardDragViewportAnchorActive = true;
+    _viewportResizeAnchorActive = true;
     messageListState.beginViewportAnchorPreservation();
-    _scheduleKeyboardDragViewportAnchorRelease(
-      delay: const Duration(milliseconds: 700),
-    );
   }
 
-  void _handleKeyboardDragViewportMetricsChanged(double keyboardHeight) {
-    if (!_keyboardDragViewportAnchorActive) {
+  void _handleViewportResizeMetricsChanged(double keyboardHeight) {
+    if (!_viewportResizeAnchorActive) {
       return;
     }
 
-    _scheduleKeyboardDragViewportAnchorRelease(
-      delay: keyboardHeight <= 0.5
-          ? Duration.zero
-          : const Duration(milliseconds: 500),
+    if (keyboardHeight <= 0.5) {
+      _viewportResizeAnchorReleaseTimer?.cancel();
+      _viewportResizeAnchorReleaseTimer = null;
+      return;
+    }
+
+    _scheduleViewportResizeAnchorRelease(
+      delay: const Duration(milliseconds: 500),
     );
   }
 
-  void _scheduleKeyboardDragViewportAnchorRelease({required Duration delay}) {
-    _keyboardDragViewportAnchorReleaseTimer?.cancel();
-    _keyboardDragViewportAnchorReleaseTimer = Timer(delay, () {
-      _keyboardDragViewportAnchorReleaseTimer = null;
+  void _handleBottomSurfaceHeightAnimationEnd() {
+    if (!_viewportResizeAnchorActive || _currentKeyboardHeight() > 0.5) {
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _endViewportResizeAnchorPreservation();
+    });
+  }
+
+  void _scheduleViewportResizeAnchorRelease({required Duration delay}) {
+    _viewportResizeAnchorReleaseTimer?.cancel();
+    _viewportResizeAnchorReleaseTimer = Timer(delay, () {
+      _viewportResizeAnchorReleaseTimer = null;
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _endKeyboardDragViewportAnchorPreservation();
+        _endViewportResizeAnchorPreservation();
       });
       WidgetsBinding.instance.ensureVisualUpdate();
     });
   }
 
-  void _endKeyboardDragViewportAnchorPreservation() {
-    _keyboardDragViewportAnchorReleaseTimer?.cancel();
-    _keyboardDragViewportAnchorReleaseTimer = null;
+  void _endViewportResizeAnchorPreservation() {
+    _viewportResizeAnchorReleaseTimer?.cancel();
+    _viewportResizeAnchorReleaseTimer = null;
 
-    if (!_keyboardDragViewportAnchorActive) {
+    if (!_viewportResizeAnchorActive) {
       return;
     }
 
     _messageListKey.currentState?.endViewportAnchorPreservation();
-    _keyboardDragViewportAnchorActive = false;
+    _viewportResizeAnchorActive = false;
   }
 
   void _handleMessageListUserScrollStarted() {
-    _beginKeyboardDragViewportAnchorPreservation();
+    if (_currentKeyboardHeight() > 0.5) {
+      _beginViewportResizeAnchorPreservation();
+      _scheduleViewportResizeAnchorRelease(
+        delay: const Duration(milliseconds: 700),
+      );
+    }
     _keyboardTransitionTimer?.cancel();
     _keyboardTransitionTimer = null;
     _keyboardDismissSettleTimer?.cancel();
@@ -1859,7 +1889,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   void _beginSearchViewportAnchorPreservation() {
-    _endKeyboardDragViewportAnchorPreservation();
+    _endViewportResizeAnchorPreservation();
     _searchViewportAnchorActive = true;
     _searchViewportAnchorReleasePending = false;
     _searchViewportAnchorReleaseScheduled = false;
@@ -2881,6 +2911,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                               showPhotoPicker: _photoPickerOpen,
                               photoPickerExpanded: _photoPickerExpanded,
                               animateHeight: animateBottomSurfaceHeight,
+                              onHeightAnimationEnd:
+                                  _handleBottomSurfaceHeightAnimationEnd,
                               photoLibrary: _photoLibrary,
                               onPhotoPressed: _openPhotoPicker,
                               onCameraPressed: _openCamera,
@@ -6305,7 +6337,7 @@ final class _ViewportAnchorScrollPosition
 
     _lastEffectiveViewportBottom = currentEffectiveViewportBottom;
 
-    if ((targetPixels - pixels).abs() < 0.5) {
+    if (targetPixels == pixels) {
       return true;
     }
 
@@ -14841,6 +14873,7 @@ final class _ComposerBottomSurface extends StatelessWidget {
     required this.showPhotoPicker,
     required this.photoPickerExpanded,
     required this.animateHeight,
+    required this.onHeightAnimationEnd,
     required this.photoLibrary,
     required this.onPhotoPressed,
     required this.onCameraPressed,
@@ -14858,6 +14891,7 @@ final class _ComposerBottomSurface extends StatelessWidget {
   final bool showAttachmentPanel;
   final bool showPhotoPicker;
   final bool animateHeight;
+  final VoidCallback onHeightAnimationEnd;
 
   final bool photoPickerExpanded;
 
@@ -14916,6 +14950,7 @@ final class _ComposerBottomSurface extends StatelessWidget {
       height: height,
       duration: animateHeight ? _bottomSurfaceAnimationDuration : Duration.zero,
       curve: Curves.easeOutCubic,
+      onEnd: onHeightAnimationEnd,
       clipBehavior: Clip.hardEdge,
       decoration: const BoxDecoration(color: AppColors.white),
       child: AnimatedSwitcher(

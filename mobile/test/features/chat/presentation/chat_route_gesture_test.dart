@@ -965,6 +965,178 @@ void main() {
     },
   );
 
+  testWidgets(
+    'bottom surface resizing preserves a scrolled message viewport anchor',
+    (WidgetTester tester) async {
+      final ChatRealtimeService realtimeService = await _pumpConversationHome(
+        tester,
+        conversationResponder: (http.Request request) async {
+          return http.Response(
+            jsonEncode(
+              List<Map<String, dynamic>>.generate(
+                100,
+                (int offset) => _messageJson(offset + 300),
+              ),
+            ),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json',
+              'x-has-more': 'true',
+            },
+          );
+        },
+      );
+      addTearDown(realtimeService.dispose);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.tap(find.text(_otherUser.displayName));
+      await tester.pumpAndSettle();
+
+      final ScrollController scrollController = _messageList(
+        tester,
+      ).controller!;
+      scrollController.jumpTo(
+        (scrollController.position.minScrollExtent +
+                scrollController.position.maxScrollExtent) /
+            2,
+      );
+      await tester.pump();
+
+      expect(
+        scrollController.position.maxScrollExtent -
+            scrollController.position.pixels,
+        greaterThan(48),
+      );
+
+      final double pixelsBeforeKeyboard = scrollController.position.pixels;
+      final double devicePixelRatio = tester.view.devicePixelRatio;
+
+      await tester.tap(find.byKey(const ValueKey<String>('message-input')));
+
+      tester.view.viewInsets = FakeViewPadding(bottom: 300 * devicePixelRatio);
+      await tester.pump(const Duration(milliseconds: 16));
+
+      final double pixelsAtStableKeyboardHeight =
+          scrollController.position.pixels;
+
+      for (final double keyboardHeight in const <double>[
+        300.843,
+        300.708,
+        300.594,
+        300.498,
+        300.417,
+        300.350,
+        300.293,
+        300.000,
+      ]) {
+        tester.view.viewInsets = FakeViewPadding(
+          bottom: keyboardHeight * devicePixelRatio,
+        );
+        await tester.pump(const Duration(milliseconds: 8));
+      }
+
+      expect(
+        scrollController.position.pixels,
+        closeTo(pixelsAtStableKeyboardHeight, 0.01),
+        reason:
+            'Sub-pixel keyboard animation frames must not accumulate into '
+            'message viewport drift.',
+      );
+
+      tester.view.viewInsets = const FakeViewPadding();
+      await tester.pumpAndSettle();
+
+      expect(
+        scrollController.position.pixels,
+        closeTo(pixelsBeforeKeyboard, 0.01),
+      );
+
+      for (int cycle = 0; cycle < 6; cycle += 1) {
+        final double viewportBeforeKeyboard =
+            scrollController.position.viewportDimension;
+
+        tester.view.viewInsets = FakeViewPadding(
+          bottom: 300 * devicePixelRatio,
+        );
+        await tester.pumpAndSettle();
+
+        final double keyboardViewportChange =
+            viewportBeforeKeyboard -
+            scrollController.position.viewportDimension;
+
+        expect(keyboardViewportChange, greaterThan(0));
+        expect(
+          scrollController.position.pixels - pixelsBeforeKeyboard,
+          closeTo(keyboardViewportChange, 1),
+          reason:
+              'Opening the keyboard must move the current message viewport by '
+              'the same amount that its visible height shrinks.',
+        );
+
+        tester.view.viewInsets = const FakeViewPadding();
+        await tester.pumpAndSettle();
+
+        expect(
+          scrollController.position.pixels,
+          closeTo(pixelsBeforeKeyboard, 0.01),
+          reason:
+              'Keyboard cycle ${cycle + 1} must restore the same message '
+              'viewport without cumulative drift.',
+        );
+      }
+
+      final double pixelsBeforePanel = scrollController.position.pixels;
+      final double viewportBeforePanel =
+          scrollController.position.viewportDimension;
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('message-attachment')),
+      );
+      await tester.pumpAndSettle();
+
+      final double panelViewportChange =
+          viewportBeforePanel - scrollController.position.viewportDimension;
+
+      expect(panelViewportChange, greaterThan(0));
+      expect(
+        scrollController.position.pixels - pixelsBeforePanel,
+        closeTo(panelViewportChange, 0.01),
+        reason:
+            'The attachment panel must use the same viewport resize rule as '
+            'the system keyboard.',
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('message-attachment')),
+      );
+
+      tester.view.viewInsets = FakeViewPadding(bottom: 320 * devicePixelRatio);
+      await tester.pumpAndSettle();
+
+      final double keyboardViewportChangeAfterPanel =
+          viewportBeforePanel - scrollController.position.viewportDimension;
+
+      expect(
+        scrollController.position.pixels - pixelsBeforePanel,
+        closeTo(keyboardViewportChangeAfterPanel, 0.01),
+        reason:
+            'Switching from the attachment panel to the keyboard must keep '
+            'the same visible message viewport.',
+      );
+
+      tester.view.viewInsets = const FakeViewPadding();
+      await tester.pumpAndSettle();
+
+      expect(
+        scrollController.position.pixels,
+        closeTo(pixelsBeforePanel, 0.01),
+        reason:
+            'Closing the keyboard after an attachment-panel transition must '
+            'restore the same message viewport without cumulative drift.',
+      );
+    },
+  );
+
   testWidgets('a taller keyboard keeps the latest message above the composer', (
     WidgetTester tester,
   ) async {

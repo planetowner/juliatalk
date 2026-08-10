@@ -138,6 +138,7 @@ def _bounded_alert_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     custom_data = payload.get("juliatalk")
     if isinstance(custom_data, dict):
+        # 알림 본문을 줄이기 전에 표시 품질에만 영향을 주는 이미지 URL부터 빼요.
         for optional_key in ("sender_image_url", "photo_url"):
             if _encoded_payload_size(payload) <= APNS_MAX_PAYLOAD_BYTES:
                 break
@@ -170,6 +171,7 @@ class APNSClient:
 
     def _provider_token(self) -> str:
         now = time.time()
+        # APNs 제공자 토큰의 1시간 유효 기간보다 여유 있게 50분마다 갱신해요.
         if (
             self._cached_provider_token is not None
             and now - self._provider_token_created_at < 50 * 60
@@ -375,6 +377,7 @@ async def _send_voip_event(
 
     for device in devices:
         assert device.voip_push_token is not None
+        # 이미 지난 수신 전화는 전달할 가치가 없으므로 APNs에 저장하지 않아요.
         result = await client.send(
             device_token=device.voip_push_token,
             payload=payload,

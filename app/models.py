@@ -358,6 +358,7 @@ class Conversation(Base):
 class DirectConversation(Base):
     __tablename__ = "direct_conversations"
     __table_args__ = (
+        # 사용자 ID를 정렬해 같은 두 사람의 대화가 순서만 바뀌어 중복되지 않게 해요.
         CheckConstraint(
             "user_one_id < user_two_id",
             name="direct_conversations_distinct_users_check",

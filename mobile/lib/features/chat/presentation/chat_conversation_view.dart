@@ -608,7 +608,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _clearQuickPhotoPrompt();
 
       // 키보드가 나타나는 동안 작성창 높이가 먼저 내려가지 않도록
-      // 기존 첨부 패널 높이를 잠시 유지한다.
+      // 기존 첨부 패널 높이를 잠시 유지해요.
       _heldBottomSurfaceHeight = math.max(
         _lastKeyboardHeight,
         _attachmentPanelFallbackHeight,
@@ -654,7 +654,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _quickPhotoPromptVisible = false;
     });
 
-    // 입력 내용은 지우지 않고 포커스와 키보드만 내린다.
+    // 입력 내용은 유지하고 포커스와 키보드만 내려요.
     _messageFocusNode.unfocus();
 
     unawaited(
@@ -747,7 +747,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         );
       });
     } catch (_) {
-      // 빠른 전송 조회 실패는 첨부 메뉴 자체를 방해하지 않는다.
+      // 빠른 전송 조회가 실패해도 첨부 메뉴는 그대로 열어요.
     }
   }
 
@@ -809,11 +809,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       math.max(_lastKeyboardHeight, MediaQuery.viewPaddingOf(context).bottom),
     );
 
-    // Photo 선택기의 최초 높이는 임의 비율이 아니라
-    // 현재 작성창 + 현재 첨부 패널의 실제 합산 높이다.
-    //
-    // 따라서 Photo로 전환해도 패널의 위쪽 경계가
-    // 기존 입력창 위쪽 경계와 정확히 같은 위치에 남는다.
+    // Photo 선택기의 첫 높이는 현재 작성창과 첨부 패널의 실제 합이에요.
+    // 패널이 바뀌어도 위쪽 경계를 같은 위치에 유지해요.
     final double collapsedHeight =
         renderObject.size.height + attachmentPanelHeight;
 
@@ -922,7 +919,6 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     });
   }
 
-  // 첨부 패널·Photo 선택기를 모두 닫고 Photo 크기 상태를 초기화한다.
   void _resetBottomSurfaceState() {
     _attachmentPanelOpen = false;
     _photoPickerOpen = false;
@@ -935,7 +931,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   // 첨부(사진·카메라·파일) 전송 직후 진행 중인 전환·타이머를 정리하고
-  // 하단 서피스를 닫은 뒤 최신 메시지로 스크롤한다.
+  // 하단 서피스를 닫은 뒤 최신 메시지로 스크롤해요.
   void _dismissComposerAfterAttachmentSend() {
     _stopKeyboardTransition();
     _stopComposerResizePin();
@@ -1142,9 +1138,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   Future<void> _openCamera() async {
     final ImagePicker picker = ImagePicker();
 
-    // image_picker가 기기의 기본 카메라 앱을 실행한다.
-    // iOS는 최초 1회만 시스템 카메라 권한 팝업을 띄우고 결과를 기억하며,
-    // Android는 카메라 앱에 위임하므로 앱 차원의 반복 권한 요청이 없다.
+    // image_picker가 기기의 기본 카메라 앱을 열어요.
+    // iOS는 권한 결정을 기억하고, Android는 카메라 앱에 위임해요.
     XFile? capture;
 
     try {
@@ -1167,7 +1162,6 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    // 사용자가 촬영을 취소하면 아무것도 전송하지 않는다.
     if (!mounted || capture == null) {
       return;
     }
@@ -1191,7 +1185,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       frame.image.dispose();
       codec.dispose();
     } catch (_) {
-      // 디코딩에 실패해도 전송은 진행한다.
+      // 미리 보기 디코딩에 실패해도 원본 전송은 진행해요.
     }
 
     if (!mounted) {
@@ -1245,8 +1239,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   Future<void> _openFile() async {
-    // file_picker가 기기의 기본 문서 선택기(iOS는 Files 앱)를 연다.
-    // 사용자가 직접 파일을 고르는 방식이라 별도 권한 팝업이 없다.
+    // file_picker가 기기의 기본 문서 선택기를 열어요.
+    // 사용자가 직접 파일을 고르므로 별도 권한이 필요 없어요.
     FilePickerResult? result;
 
     try {
@@ -1265,7 +1259,6 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    // 사용자가 선택을 취소하면 아무것도 전송하지 않는다.
     if (!mounted || result == null || result.files.isEmpty) {
       return;
     }
@@ -1392,7 +1385,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     // 첨부 패널 상태에서 입력창을 직접 탭한 경우에도
-    // × 버튼과 동일하게 키보드 상태로 전환한다.
+    // × 버튼과 동일하게 키보드 상태로 전환해요.
     if (_attachmentPanelOpen) {
       _closeAttachmentPanelForKeyboard();
     }
@@ -1421,9 +1414,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _observedKeyboardHeight = keyboardHeight;
 
-    // 키보드가 내려가는 중간 높이를 저장하면 첨부 패널이
-    // safe area 높이만큼만 열릴 수 있다. 올라가거나 열린 상태의
-    // 유효한 높이만 기억한다.
+    // 키보드가 내려가는 중간 높이는 제외하고, 열린 상태의 유효한 높이만 기억해요.
     final bool keyboardIsOpeningOrStable =
         keyboardHeight >= previousKeyboardHeight - 0.5;
 
@@ -2133,7 +2124,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     // 첨부 패널의 180ms 닫힘 전환이 끝난 뒤
-    // 변경된 위치에서 말풍선을 캡처한다.
+    // 변경된 위치에서 말풍선을 캡처해요.
     if (customBottomSurfaceWasOpen) {
       await WidgetsBinding.instance.endOfFrame;
 
@@ -2274,7 +2265,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final ChatMessage? editingMessage = _editingMessage;
     final String? originalContent = _editingOriginalContent;
 
-    // trim하지 않은 실제 입력값을 그대로 보관한다.
+    // trim하지 않은 실제 입력값을 그대로 보관해요.
     final String updatedContent = _messageController.text;
 
     if (editingMessage == null ||
@@ -2339,10 +2330,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    // 실제 보낼 내용은 trim하지 않는다.
+    // 실제 보낼 내용은 trim하지 않고 원문을 유지해요.
     final String content = _messageController.text;
 
-    // 공백이나 줄바꿈만 있는 메시지만 차단한다.
+    // 공백이나 줄바꿈만 있는 메시지만 차단해요.
     if (content.trim().isEmpty) {
       return;
     }
@@ -2742,14 +2733,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         _photoPickerCollapsedHeight ??
         attachmentPanelHeight;
 
-    // 카카오톡 확장 화면은 화면 전체를 덮지 않고,
-    // 상단 상태 표시줄과 일부 채팅 상단을 남긴다.
-    // 첨부 이미지 비율상 전체 화면의 약 89% 높이다.
-    //
-    // 단, 확장 패널은 상단 바(56) 아래 영역에만 놓이므로
-    // 상태 표시줄뿐 아니라 상단 바 높이도 함께 빼야
-    // 카메라 컷아웃 등으로 상태 표시줄이 큰 기기에서
-    // 메시지 리스트가 음수로 눌려 하단이 넘치지 않는다.
+    // 확장 패널은 카카오톡처럼 상태 표시줄과 일부 채팅을 남기는 89% 높이예요.
+    // 상단 바 아래에 놓이므로 두 높이를 모두 빼서 큰 카메라 컷아웃에서도 넘침을 막아요.
     final double photoPickerMaximumHeight = math.max(
       resolvedPhotoPickerHeight,
       math.min(
@@ -3651,7 +3636,7 @@ final class _ChatSearchTopBar extends StatelessWidget {
                     ),
                     decoration: InputDecoration(
                       // 테마의 filled:true(grey100)가 사각형으로 채워져
-                      // DecoratedBox의 둥근 모서리를 덮으므로 끈다.
+                      // DecoratedBox의 둥근 모서리를 덮으므로 꺼요.
                       filled: false,
                       hintText: 'Search',
                       hintStyle: AppTypography.typography4.copyWith(
@@ -4974,7 +4959,7 @@ final class _VoiceMemoSheetState extends State<_VoiceMemoSheet> {
       await _recorder.cancel();
       await _deleteRecordingFile(_recordingPath);
     } catch (_) {
-      // Reset should still clear local UI state even if cleanup fails.
+      // 녹음 리소스 정리에 실패해도 화면 상태는 초기화해요.
     }
 
     if (!mounted) {
@@ -6441,7 +6426,7 @@ final class _MessageListState extends State<_MessageList>
   static const double _olderMessagesPrefetchViewportCount = 6;
   static const int _bottomSettleRequiredStableFrames = 2;
   // 긴 번역문이 사라질 때는 AnimatedSwitcher(160ms)가 끝난 뒤
-  // AnimatedSize(180ms)의 축소가 시작되므로 두 전환 전체를 덮는다.
+  // AnimatedSize(180ms)가 축소되므로 두 전환 시간을 모두 덮어요.
   static const Duration _bottomAnchorPreservationDuration = Duration(
     milliseconds: 400,
   );
@@ -7809,7 +7794,7 @@ final class _MessageListState extends State<_MessageList>
       return;
     }
 
-    // Remove first so that reinserting the key also refreshes its eviction order.
+    // 키를 다시 넣을 때 제거 순서도 최신으로 갱신해요.
     _rememberedMessageScrollOffsets.remove(messageId);
     _rememberedMessageScrollOffsets[messageId] = scrollOffset;
 
@@ -7871,9 +7856,9 @@ final class _MessageListState extends State<_MessageList>
         return false;
       }
 
-      // 캡처 준비 과정 어디에서 실패하더라도 원문 탐색을 중단하지 않는다.
+      // 캡처 준비에 실패해도 원문 탐색은 계속해요.
       // 다음 scroll jump가 만드는 프레임에서 이 불투명 마스크가 함께
-      // 그려지므로 여기서 별도의 프레임을 기다릴 필요가 없다.
+      // 그려지므로 여기서 별도의 프레임을 기다리지 않아요.
       setState(() {
         _replyNavigationMaskActive = true;
       });
@@ -8048,7 +8033,7 @@ final class _MessageListState extends State<_MessageList>
       }
 
       // 중심 sliver 자체를 목표 정렬 지점에 놓아 첫 레이아웃부터
-      // 대상 말풍선이 최종 위치 부근에 나타나게 한다.
+      // 대상 말풍선이 최종 위치 부근에 나타나게 해요.
       _messageNavigationCenterAnchor = alignment.clamp(0.0, 1.0).toDouble();
     });
     _scrollController.correctPixelsForMessageRecenter(0);
@@ -8139,7 +8124,7 @@ final class _MessageListState extends State<_MessageList>
       }
     }
 
-    // 예상하지 못한 레이아웃 구성에서도 기존의 범위 탐색으로 복구한다.
+    // 예상하지 못한 레이아웃 구성에서도 기존 범위 탐색으로 복구해요.
     return _scrollToMessage(messageId, alignment: alignment);
   }
 
@@ -8189,11 +8174,8 @@ final class _MessageListState extends State<_MessageList>
         returnTargetGroupId != null && returnTargetGroupId == latestGroupId;
 
     if (!didRenderMessage) {
-      // The small context rebuilt around a return target may no longer contain
-      // the center saved from the original window. Search within the current
-      // structural center before making the return target the new center. A
-      // target at the end of the conversation must never become the center,
-      // because that leaves a scrollable empty region after the last message.
+      // 복귀용 작은 구간에는 이전 중심이 없을 수 있어 현재 중심부터 찾아요.
+      // 마지막 메시지는 빈 스크롤 영역이 생기지 않도록 새 중심에서 제외해요.
       didRenderMessage = await _scrollToMessage(
         anchor.messageId,
         alignment: initialAlignment,
@@ -8326,7 +8308,7 @@ final class _MessageListState extends State<_MessageList>
 
     if (canFitEntireMessage) {
       // 요청한 정렬을 우선하되, 긴 원문이 잘리는 경우에는
-      // 말풍선 전체가 보이는 범위 안으로 위치를 보정한다.
+      // 말풍선 전체가 보이는 범위 안으로 위치를 보정해요.
       targetOffset = targetOffset
           .clamp(fullyVisibleMinimum, fullyVisibleMaximum)
           .toDouble();
@@ -8520,8 +8502,8 @@ final class _MessageListState extends State<_MessageList>
       }
 
       // 화면 밖 원문은 현재 렌더링된 메시지들의 실제 픽셀 간격으로
-      // 다음 위치를 추정하고, 추정할 수 없으면 탐색 구간을 절반으로
-      // 좁힌다. 최종 위치는 실제 원문 말풍선이 생긴 뒤에만 확정한다.
+      // 다음 위치를 추정하고, 어려우면 탐색 구간을 절반으로 좁혀요.
+      // 최종 위치는 실제 원문 말풍선이 생긴 뒤에만 확정해요.
       ReplyNavigationDiagnostics.record(
         '[reply-navigation] scroll-probe '
         'target=$messageId attempt=$attempt offset=$targetOffset '
@@ -8633,7 +8615,7 @@ final class _MessageListState extends State<_MessageList>
     _messageHighlightTimer?.cancel();
 
     // 같은 메시지가 아직 강조 중일 때 다시 요청되어도
-    // false → true 전환을 만들어 애니메이션을 재시작한다.
+    // false → true 전환을 만들어 애니메이션을 다시 시작해요.
     if (_highlightedMessageId == messageId) {
       setState(() {
         _highlightedMessageId = null;
@@ -8688,9 +8670,7 @@ final class _MessageListState extends State<_MessageList>
       return _findMessage(messageId) != null;
     }
 
-    // A local context switch normally completes before a screenshot can be
-    // captured. Keep the current frame frozen only for an actual disk/network
-    // wait so cached quote navigation remains immediate.
+    // 로컬 구간 전환은 캡처보다 빨라 디스크·네트워크를 기다릴 때만 화면을 고정해요.
     final Future<bool> loadMessageFuture = ensureMessageLoaded(
       messageId,
       restoreLatestWindow: restoreLatestWindow,
@@ -8767,8 +8747,8 @@ final class _MessageListState extends State<_MessageList>
     );
 
     // 픽셀 오프셋은 lazy sliver의 측정 범위가 바뀌면 같은 메시지를
-    // 가리키지 않을 수 있다. 답장 말풍선과 현재 viewport 사이의
-    // 상대 위치를 저장해 복귀할 때 다시 계산한다.
+    // 가리키지 않을 수 있어요. 답장 말풍선과 viewport의 상대 위치를
+    // 저장해 복귀할 때 다시 계산해요.
     final _MessageViewportAnchor? returnAnchor = _captureMessageViewportAnchor(
       replyMessageId,
     );
@@ -8825,7 +8805,7 @@ final class _MessageListState extends State<_MessageList>
       });
       didOpenOriginalMessage = true;
 
-      // 즉시 이동한 화면이 페인트된 뒤 원문 펄스를 실행한다.
+      // 즉시 이동한 화면이 페인트된 뒤 원문 펄스를 실행해요.
       _flashMessage(originalMessageId);
     } finally {
       if (!didOpenOriginalMessage &&
@@ -8889,7 +8869,7 @@ final class _MessageListState extends State<_MessageList>
         _returnToReplyAnchor = null;
       });
 
-      // 원래 화면으로 복원된 뒤 해당 답장 말풍선에 같은 펄스를 준다.
+      // 원래 화면으로 복원된 뒤 해당 답장 말풍선에 같은 펄스를 줘요.
       if (_messageRenderObject(returnAnchor.messageId) != null) {
         _flashMessage(returnAnchor.messageId);
       }
@@ -9130,7 +9110,7 @@ final class _MessageListState extends State<_MessageList>
       return;
     }
 
-    // 키보드가 닫힌 뒤 새 위치에서 말풍선을 캡처한다.
+    // 키보드가 닫힌 뒤 새 위치에서 말풍선을 캡처해요.
     await WidgetsBinding.instance.endOfFrame;
 
     if (!mounted || bubbleKey.currentContext == null) {
@@ -9251,6 +9231,7 @@ final class _MessageListState extends State<_MessageList>
       try {
         await deleter(messageId: messageId);
       } catch (_) {
+        // 서버 삭제가 실패하면 로컬 메시지를 유지해 화면과 서버 상태를 맞춰요.
         return;
       }
     }
@@ -10641,9 +10622,7 @@ final class _RenderReplyMessageLayout extends RenderBox
     quote.layout(looseConstraints, parentUsesSize: true);
     body.layout(looseConstraints, parentUsesSize: true);
 
-    // The quote and reply body determine the width before the divider is laid
-    // out. TextWidthBasis.longestLine can therefore report the actual
-    // rightmost rendered line instead of the divider forcing the maximum width.
+    // 구분선보다 인용문과 본문을 먼저 재야 실제 가장 긴 줄로 말풍선 너비를 정할 수 있어요.
     final double width = _resolvedWidth(
       constraints: constraints,
       quoteWidth: quote.size.width,
@@ -12886,6 +12865,7 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
         _PhotoMessageImageState.rememberAccessUrl(mediaAssetId, accessUrl);
         imageProvider = NetworkImage(accessUrl.toString());
       } catch (_) {
+        // 미리 불러오기가 실패해도 현재 갤러리는 그대로 사용할 수 있어요.
         return;
       }
     }
@@ -14032,6 +14012,7 @@ final class _VoiceMemoMessageBubbleState
 
       return audioFile.path;
     } catch (_) {
+      // 다음 재생에서 다시 받을 수 있도록 실패한 요청 상태를 비워요.
       _audioPathFuture = null;
       return null;
     }
@@ -14165,6 +14146,7 @@ final class _VoiceMemoMessageBubbleState
       try {
         await player.seek(clampedPosition);
       } catch (_) {
+        // seek가 실패하면 플레이어가 실제로 멈춘 위치를 복원값으로 사용해요.
         resolvedPosition = _currentPlaybackPositionForCaching();
       }
     }
@@ -14959,8 +14941,8 @@ final class _ComposerBottomSurface extends StatelessWidget {
         switchOutCurve: Curves.easeInCubic,
 
         // AnimatedSwitcher의 기본 Stack은 자식에게
-        // 느슨한 가로 제약을 줄 수 있다.
-        // 모든 하단 패널을 부모 너비와 높이에 강제로 맞춘다.
+        // 느슨한 가로 제약을 줄 수 있어요.
+        // 모든 하단 패널을 부모 너비와 높이에 맞춰요.
         layoutBuilder: (Widget? currentChild, List<Widget> previousChildren) {
           return Stack(
             fit: StackFit.expand,

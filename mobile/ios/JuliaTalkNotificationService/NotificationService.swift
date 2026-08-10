@@ -87,6 +87,7 @@ final class NotificationService: UNNotificationServiceExtension {
       isMe: true,
       suggestionType: .none
     )
+    // 메시지 Intent로 알림을 갱신해야 iOS가 발신자 이미지와 대화형 알림 UI를 표시해요.
     let conversationIdentifier =
       payload["conversation_id"] as? String ?? content.threadIdentifier
     let intent = INSendMessageIntent(
@@ -111,6 +112,7 @@ final class NotificationService: UNNotificationServiceExtension {
     do {
       return try content.updating(from: intent)
     } catch {
+      // Intent 갱신에 실패해도 원본 알림은 그대로 전달해요.
       return content
     }
   }
@@ -124,6 +126,7 @@ final class NotificationService: UNNotificationServiceExtension {
       mimeType: mimeType,
       remoteURL: remoteURL
     )
+    // UNNotificationAttachment는 원격 URL을 받지 않으므로 임시 파일로 내려받아요.
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(

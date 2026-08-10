@@ -71,6 +71,7 @@ async def register_current_device(
         )
         session.add(device)
 
+    # 같은 설치 ID나 푸시 토큰은 하나의 활성 기기 레코드에만 남겨요.
     for duplicate in matching_devices:
         if duplicate is device:
             continue

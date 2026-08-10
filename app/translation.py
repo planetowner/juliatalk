@@ -149,8 +149,7 @@ def should_translate_text(
     normalized_target = normalize_language_code(target_language)
     inferred_language = infer_text_language(cleaned_text)
 
-    # Only messages containing Hangul or Han characters are translated.
-    # Latin-only text, numbers, punctuation, and emoji must pass through.
+    # 한글이나 한자가 없는 영문·숫자·기호·이모지는 그대로 보내요.
     if normalized_target is None or inferred_language is None:
         return False
 

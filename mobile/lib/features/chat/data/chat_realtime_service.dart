@@ -99,7 +99,7 @@ final class ChatRealtimeService extends ChangeNotifier
     try {
       await _notificationService.setActiveChatSenderId(userId);
     } catch (_) {
-      // A later conversation transition will retry the native state update.
+      // 다음 대화 전환 때 네이티브 활성 대화 상태를 다시 맞춰요.
     }
 
     await markConversationAsRead(userId);
@@ -115,7 +115,7 @@ final class ChatRealtimeService extends ChangeNotifier
     try {
       await _notificationService.clearActiveChatSenderId(userId);
     } catch (_) {
-      // Native active-chat suppression also ends when the app leaves foreground.
+      // 앱이 포그라운드를 벗어나면 네이티브 알림 억제도 끝나므로 복구를 기다리지 않아요.
     }
 
     await refreshUnreadCounts();
@@ -128,6 +128,7 @@ final class ChatRealtimeService extends ChangeNotifier
 
     _setUnreadCount(userId, 0);
 
+    // 진행 중인 요청 뒤에 들어온 읽음 요청은 한 번 더 실행해 새 메시지를 놓치지 않아요.
     if (!_markReadInFlight.add(userId)) {
       _markReadPending.add(userId);
       return;
@@ -170,6 +171,7 @@ final class ChatRealtimeService extends ChangeNotifier
     try {
       do {
         _unreadRefreshPending = false;
+        // 요청 중 WebSocket 값이 바뀌면 오래된 REST 응답으로 덮지 않고 다시 조회해요.
         final int revisionAtStart = _unreadMutationRevision;
 
         try {
@@ -194,7 +196,7 @@ final class ChatRealtimeService extends ChangeNotifier
 
           _replaceUnreadCounts(nextCounts);
         } catch (_) {
-          // Keep the real-time snapshot during transient REST failures.
+          // REST가 잠시 실패해도 마지막 실시간 스냅샷은 유지해요.
         }
       } while (_unreadRefreshPending && !_disposed);
     } finally {
@@ -351,6 +353,7 @@ final class ChatRealtimeService extends ChangeNotifier
       return true;
     }
 
+    // 같은 스트림의 과거 순번만 버리고, stream ID가 바뀌면 순번을 새로 받아요.
     _unreadSnapshotStreamId = snapshot.streamId;
     _lastUnreadSnapshotSequence = snapshot.sequence;
 
@@ -483,7 +486,7 @@ final class ChatRealtimeService extends ChangeNotifier
         try {
           await _notificationService.setBadgeCount(count);
         } catch (_) {
-          // The next unread mutation or foreground refresh will retry.
+          // 다음 읽지 않음 변경이나 앱 복귀 때 최신 배지 값으로 다시 시도해요.
         }
       }
     } finally {

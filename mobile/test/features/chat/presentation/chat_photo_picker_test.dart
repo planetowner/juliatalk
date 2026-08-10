@@ -177,8 +177,8 @@ Future<void> _tapPhotoAsset(WidgetTester tester, String assetId) async {
     final Rect gridRect = tester.getRect(gridFinder);
     final Rect tileRect = tester.getRect(tileFinder);
 
-    // 타일 중심이 GridView의 실제 터치 가능 영역 안에 있어야 한다.
-    // 단순히 위젯 트리에 빌드됐다는 것만으로는 충분하지 않다.
+    // 타일 중심이 GridView의 실제 터치 영역 안에 있어야 해요.
+    // 위젯 트리에 빌드된 것만으로는 실제 탭 가능 여부를 확인할 수 없어요.
     final double safeTop = gridRect.top + 8;
     final double safeBottom = gridRect.bottom - 8;
 
@@ -197,7 +197,7 @@ Future<void> _tapPhotoAsset(WidgetTester tester, String assetId) async {
     await tester.tapAt(tileRect.center);
 
     // 선택 번호, Send 활성 상태, 선택 제한 상태가
-    // 다음 동작 전에 위젯 트리에 반영되도록 한다.
+    // 다음 동작 전에 위젯 트리에 반영되게 해요.
     await tester.pump();
 
     return;
@@ -279,12 +279,10 @@ void main() {
 
     expect(find.text('10 Send'), findsOneWidget);
 
-    // 10장이 이미 선택된 상태에서 11번째를 선택한다.
     await _tapPhotoAsset(tester, 'asset-10');
 
     expect(find.text('You can select up to 10 photos.'), findsOneWidget);
 
-    // 제한을 초과한 사진은 선택되지 않아야 한다.
     expect(
       find.descendant(
         of: find.byKey(
@@ -325,7 +323,6 @@ void main() {
 
       expect(find.text('1 Send'), findsOneWidget);
 
-      // 확장 패널 헤더의 Recents 드롭다운을 연다.
       await tester.tap(
         find.byKey(const ValueKey<String>('photo-album-dropdown')),
       );
@@ -353,10 +350,9 @@ void main() {
         findsOneWidget,
       );
 
-      // 다른 앨범으로 이동해도 기존 선택 개수는 유지된다.
+      // 다른 앨범으로 이동해도 기존 선택 개수는 유지돼요.
       expect(find.text('1 Send'), findsOneWidget);
 
-      // 다시 Recents로 돌아간다.
       await tester.tap(
         find.byKey(const ValueKey<String>('photo-album-dropdown')),
       );
@@ -371,8 +367,7 @@ void main() {
 
       await _tapPhotoAsset(tester, 'asset-1');
 
-      // 기존에 1번이었던 사진을 탭하면 해제된다.
-      // 이는 앨범 이동 중에도 동일한 선택 항목이 유지됐다는 뜻이다.
+      // 앨범 이동 중에도 같은 선택을 유지했는지 선택 해제로 검증해요.
       expect(find.text('1 Send'), findsNothing);
 
       expect(find.text('Send'), findsOneWidget);
@@ -399,14 +394,14 @@ void main() {
 
     await _tapPhotoAsset(tester, 'asset-0');
 
-    // 사진 선택 결과가 반영되어 Send 버튼이 활성화된 상태다.
+    // 사진 선택 결과가 반영돼 Send 버튼이 활성화된 상태예요.
     expect(find.text('1 Send'), findsOneWidget);
 
     await tester.tap(
       find.byKey(const ValueKey<String>('photo-collage-toggle')),
     );
 
-    // collage 상태 변경을 다음 Send 탭 전에 반영한다.
+    // collage 상태 변경을 다음 Send 탭 전에 반영해요.
     await tester.pump();
 
     await tester.tap(find.byKey(const ValueKey<String>('photo-picker-send')));

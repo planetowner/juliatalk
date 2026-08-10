@@ -32,6 +32,7 @@ private enum KeychainStore {
       kSecAttrService as String: Bundle.main.bundleIdentifier ?? "JuliaTalk",
       kSecAttrAccount as String: key,
     ]
+    // SecItemAdd는 기존 항목을 덮어쓰지 않아 먼저 지운 뒤 새 값으로 저장해요.
     SecItemDelete(query as CFDictionary)
 
     var insert = query
@@ -304,8 +305,7 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
         withExtension: "mobileprovision"
       )
     else {
-      // App Store and TestFlight builds do not expose an embedded profile at
-      // runtime, and both use the production APNs environment.
+      // 프로파일이 없으면 App Store·TestFlight 배포로 보고 운영 APNs를 사용해요.
       return "production"
     }
 
@@ -360,6 +360,7 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
     if let voipToken {
       body["voip_push_token"] = voipToken
     } else if clearVoIPToken {
+      // 키를 생략하면 서버의 기존 토큰이 유지되므로 명시적인 null로 삭제를 요청해요.
       body["voip_push_token"] = NSNull()
     }
 
@@ -472,6 +473,7 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
       case .failure:
         self.disconnectCallSignaling()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+          // 통화가 아직 활성 상태일 때만 끊어진 신호 채널을 다시 연결해요.
           guard self.activeCallers[callUUID] != nil else { return }
           self.connectCallSignaling(callUUID: callUUID)
         }
@@ -529,6 +531,7 @@ final class NotificationBridge: NSObject, FlutterPlugin, FlutterStreamHandler {
       if let eventSink = self.eventSink {
         eventSink(event)
       } else {
+        // Dart가 구독하기 전에 온 네이티브 이벤트는 스트림이 열릴 때까지 보관해요.
         self.pendingEvents.append(event)
       }
     }
@@ -653,6 +656,7 @@ extension NotificationBridge: PKPushRegistryDelegate {
     activeCallers[uuid] = call
     connectCallSignaling(callUUID: uuid)
 
+    // PushKit 수신 직후 CallKit에 알리지 않으면 iOS가 앱을 종료할 수 있어요.
     callProvider.reportNewIncomingCall(with: uuid, update: update) { error in
       if let error = error {
         self.activeCallers.removeValue(forKey: uuid)
@@ -694,6 +698,7 @@ extension NotificationBridge: CXProviderDelegate {
       durationMilliseconds = max(0, Int(Date().timeIntervalSince(answeredAt) * 1000))
       outcome = "ended"
     } else {
+      // 수신자가 받기 전에 통화 UI를 닫으면 부재중 통화로 기록해요.
       durationMilliseconds = 0
       outcome = "missed"
     }

@@ -92,6 +92,7 @@ async def ensure_database_extensions(
 async def ensure_schema_compatibility(
     connection: AsyncConnection,
 ) -> None:
+    # 앱을 여러 번 시작해도 기존 스키마에 같은 변경을 안전하게 적용해요.
     await connection.execute(
         text(
             "ALTER TABLE users "

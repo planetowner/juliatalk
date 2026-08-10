@@ -104,6 +104,7 @@ class UnreadCountsEventPublisher:
 
         lock = self._lock_by_user_id.setdefault(user_id, asyncio.Lock())
 
+        # 조회와 순번 증가를 묶어 같은 사용자의 이벤트 순서가 뒤집히지 않게 해요.
         async with lock:
             counts_by_sender_id = await load_unread_counts_by_sender(
                 session,

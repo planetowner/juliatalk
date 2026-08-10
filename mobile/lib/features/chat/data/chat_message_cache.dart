@@ -327,6 +327,7 @@ final class ChatMessageCache {
         incomingMessages.first.id == combinedOldestId;
     final bool incomingOwnsNewestBoundary =
         incomingMessages.last.id == combinedNewestId;
+    // 실제 경계를 가진 구간의 hasMore 값만 써서 부분 캐시 사이에 빈 구간이 생기지 않게 해요.
     bool combinedHasMoreOlder = incomingOwnsOldestBoundary
         ? hasMoreOlder
         : true;
@@ -408,7 +409,7 @@ final class ChatMessageCache {
             messagesById[message.id] = message;
           }
         } catch (_) {
-          // Ignore one stale record without discarding other cached ranges.
+          // 오래된 레코드 하나가 깨져도 정상적인 캐시 구간은 유지해요.
         }
       }
 
@@ -474,7 +475,7 @@ final class ChatMessageCache {
       _discardUnreferencedMessages(entry);
       return entry;
     } catch (_) {
-      // Persistent storage is an optimization and must never block chat.
+      // 디스크 캐시는 최적화 수단이므로 읽기 실패가 채팅 진입을 막지 않게 해요.
       return _ChatMessageCacheEntry();
     }
   }
@@ -634,6 +635,7 @@ final class ChatMessageCache {
   ) async {
     try {
       while (true) {
+        // 쓰는 동안 새 변경이 생기면 최신 리비전까지 다시 저장해요.
         final int writingRevision = entry.writeRevision;
         _discardUnreferencedMessages(entry);
         final List<ChatMessage> sortedMessages =
@@ -663,7 +665,7 @@ final class ChatMessageCache {
         }
       }
     } catch (_) {
-      // Keep the in-memory ranges usable when persistent storage is unavailable.
+      // 디스크 저장에 실패해도 현재 앱의 메모리 캐시는 계속 사용해요.
     } finally {
       entry.writeFuture = null;
     }

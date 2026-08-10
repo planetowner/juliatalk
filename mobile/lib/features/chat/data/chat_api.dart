@@ -452,6 +452,7 @@ final class ChatApi {
       final Uri? previewUri = Uri.tryParse(previewUrl);
 
       if (previewUri != null) {
+        // 서버가 차단되는 사이트만 기기에서 미리 읽어 fallback 메타데이터로 보내요.
         final Map<String, Object?>? devicePreview =
             await DeviceLinkPreviewFetcher(client: _client).fetch(previewUri);
 
@@ -583,6 +584,7 @@ final class ChatApi {
       throw const ChatApiException('The selected media file is empty.');
     }
 
+    // 서버가 발급한 URL로 원본을 올린 뒤 완료를 알려야 실제 업로드를 검증할 수 있어요.
     final http.Response createResponse = await _client.post(
       _baseUri.resolve('/media-assets'),
       headers: _jsonHeaders,
@@ -702,6 +704,7 @@ final class ChatApi {
       return message;
     }
 
+    // 서버 응답에는 없는 기기 미리 보기를 합쳐 전송 직후에도 사진을 바로 보여 줘요.
     return message.copyWith(
       photoAttachments: List<ChatPhotoAttachment>.generate(
         serverPhotos.length,
@@ -744,6 +747,7 @@ final class ChatApi {
       return message;
     }
 
+    // 서버 메타데이터와 녹음 직후의 로컬 오디오를 합쳐 즉시 재생할 수 있게 해요.
     return message.copyWith(
       voiceMemoAttachment: ChatVoiceMemoAttachment(
         duration: serverVoiceMemo.duration > Duration.zero
@@ -886,6 +890,7 @@ final class ChatApi {
     Map<String, Object?>? metadata,
     String? replyToMessageId,
   }) async {
+    // 서버가 메시지 순서에 쓰는 시각을 기기에서 UTC로 고정해 전달해요.
     final Map<String, Object?> body = <String, Object?>{
       'recipient_id': recipientId,
       'content': content,

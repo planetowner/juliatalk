@@ -3,11 +3,9 @@ import 'package:flutter/material.dart';
 final class AppColors {
   AppColors._();
 
-  // Neutral utility colors
   static const Color white = Color(0xFFFFFFFF);
   static const Color black = Color(0xFF000000);
 
-  // Grey
   static const Color grey50 = Color(0xFFF9FAFB);
   static const Color grey100 = Color(0xFFF2F4F6);
   static const Color grey200 = Color(0xFFE5E8EB);
@@ -19,7 +17,6 @@ final class AppColors {
   static const Color grey800 = Color(0xFF333D4B);
   static const Color grey900 = Color(0xFF191F28);
 
-  // Blue
   static const Color blue50 = Color(0xFFE8F3FF);
   static const Color blue100 = Color(0xFFC9E2FF);
   static const Color blue200 = Color(0xFF90C2FF);
@@ -31,7 +28,6 @@ final class AppColors {
   static const Color blue800 = Color(0xFF1957C2);
   static const Color blue900 = Color(0xFF194AA6);
 
-  // Red
   static const Color red50 = Color(0xFFFFEEEE);
   static const Color red100 = Color(0xFFFFD4D6);
   static const Color red200 = Color(0xFFFEAFB4);
@@ -43,7 +39,6 @@ final class AppColors {
   static const Color red800 = Color(0xFFBC1B2A);
   static const Color red900 = Color(0xFFA51926);
 
-  // Green
   static const Color green50 = Color(0xFFF0FAF6);
   static const Color green100 = Color(0xFFAEEFD5);
   static const Color green200 = Color(0xFF76E4B8);
@@ -55,7 +50,6 @@ final class AppColors {
   static const Color green800 = Color(0xFF028450);
   static const Color green900 = Color(0xFF027648);
 
-  // JuliaTalk semantic colors
   static const Color background = white;
   static const Color backgroundSecondary = grey100;
   static const Color surface = white;

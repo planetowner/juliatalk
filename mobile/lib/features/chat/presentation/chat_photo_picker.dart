@@ -326,8 +326,8 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
         return;
       }
 
-      // 사용자가 새로고침 도중 다른 앨범을 선택했다면 현재 선택을
-      // 덮어쓰지 않고 새 선택을 기준으로 다시 조회한다.
+    // 사용자가 새로고침 도중 다른 앨범을 선택했다면 현재 선택을
+    // 유지하고 새 선택을 기준으로 다시 조회해요.
       if (_selectedAlbum?.id != previouslySelectedAlbumId) {
         _libraryRefreshRequested = true;
         return;
@@ -356,8 +356,8 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
 
       _pendingDeletedAssetIds.clear();
     } catch (_) {
-      // 일시적인 Photos 조회 실패 시 현재 화면을 유지한다.
-      // 다음 변경 알림이나 앱 복귀 때 다시 동기화한다.
+      // Photos 조회가 잠시 실패해도 현재 화면을 유지해요.
+      // 다음 변경 알림이나 앱 복귀 때 다시 동기화해요.
     } finally {
       _refreshingLibrary = false;
 
@@ -441,8 +441,8 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
         ? _gridController.position.pixels
         : 0;
 
-    // 각 자산의 이전 인덱스를 보존한 채 새 스냅샷을 먼저 배치한다.
-    // 타일은 이전 좌표에서 시작해 새 좌표까지 한 타임라인으로 이동한다.
+    // 각 자산의 이전 인덱스를 유지한 채 새 스냅샷을 먼저 배치해요.
+    // 타일은 이전 좌표에서 새 좌표까지 한 타임라인으로 이동해요.
     setState(() {
       _photoGridTransition = _PhotoGridTransition(
         previousIndexes: previousIndexes,

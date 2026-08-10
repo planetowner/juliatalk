@@ -76,6 +76,7 @@ async def change_password(
         password_data.new_password
     )
 
+    # 비밀번호를 바꾸면 이전에 발급한 모든 액세스 토큰을 무효화해요.
     current_user.token_version += 1
 
     await session.commit()

@@ -38,6 +38,7 @@ router = APIRouter(
 
 
 def _safe_file_name(file_name: Optional[str], mime_type: str) -> str:
+    # 저장 키에 사용자가 보낸 디렉터리 경로가 섞이지 않게 마지막 파일명만 써요.
     candidate = PurePosixPath(file_name or "").name
 
     if candidate:
@@ -187,6 +188,7 @@ async def complete_media_asset_upload(
 
     try:
         object_storage = get_object_storage_client()
+        # boto3 호출은 동기식이므로 이벤트 루프를 막지 않게 작업 스레드에서 확인해요.
         metadata = await asyncio.to_thread(
             object_storage.object_metadata,
             storage_key=media_asset.storage_key,
@@ -245,6 +247,7 @@ async def create_media_asset_access_url(
     )
 
     if not can_access:
+        # 자산 존재 여부가 노출되지 않도록 권한이 없어도 찾지 못한 것처럼 응답해요.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Media asset not found",

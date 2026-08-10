@@ -32,6 +32,7 @@ async def set_user_password(
             raise SystemExit(f"User not found: {username}")
 
         user.password_hash = hash_password(password)
+        # 관리자 스크립트로 비밀번호를 바꿔도 기존 액세스 토큰을 모두 무효화해요.
         user.token_version += 1
 
         await session.commit()

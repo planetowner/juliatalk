@@ -1,12 +1,9 @@
 import 'dart:math' as math;
 
-/// Keeps the chat scrollbar independent from transient lazy-sliver estimates.
+/// lazy sliver의 일시적인 추정값과 분리된 채팅 스크롤 범위를 관리해요.
 ///
-/// A centered custom scroll view preserves the visible message when an older
-/// page is inserted, but its raw minimum scroll extent can change by a very
-/// large estimated amount until the newly inserted sliver has been measured.
-/// This tracker follows real pixel deltas while extending its stable range by
-/// the average extent of the messages that were already loaded.
+/// 이전 페이지를 넣으면 새 sliver를 측정하기 전까지 원시 범위가 크게 흔들릴 수 있어요.
+/// 실제 픽셀 변화만 따라가고 기존 메시지의 평균 높이로 안정적인 범위를 미리 늘려요.
 final class ChatScrollbarRangeTracker {
   double? _minimumExtent;
   double? _maximumExtent;
@@ -54,11 +51,10 @@ final class ChatScrollbarRangeTracker {
     _messageCount = 0;
   }
 
-  /// Extends the stable range before Flutter lays out an inserted page.
+  /// Flutter가 새 페이지를 배치하기 전에 안정적인 범위를 늘려요.
   ///
-  /// Using the existing average content extent makes equal-sized message pages
-  /// occupy equal portions of the scrollbar. It also prevents an unmeasured
-  /// lazy sliver's provisional extent from moving the thumb to an edge.
+  /// 기존 평균 높이를 써서 비슷한 메시지 페이지가 같은 비율을 차지하게 해요.
+  /// 아직 측정하지 않은 sliver가 thumb를 끝으로 밀어내는 현상도 막아요.
   void extend({
     required int messagesBefore,
     required int messagesAfter,
@@ -91,8 +87,7 @@ final class ChatScrollbarRangeTracker {
     _messageCount = totalMessageCount < 0 ? 0 : totalMessageCount;
   }
 
-  /// Rebases the raw coordinate after a structural recenter that does not move
-  /// the message visible on screen.
+  /// 화면의 메시지는 그대로 두고 구조를 가운데로 맞춘 뒤 원시 좌표 기준을 갱신해요.
   void rebaseRawPixels(double rawPixels) {
     if (isInitialized && rawPixels.isFinite) {
       _lastRawPixels = rawPixels;
@@ -205,8 +200,7 @@ final class ChatScrollbarRangeSnapshot {
 }
 
 abstract final class ChatScrollbarThumbLengthResolver {
-  // The reference scrollbar exposes one equal history window as 144 logical
-  // pixels, then 72, 48, and the existing 36-pixel floor as pages accumulate.
+  // 같은 크기의 대화 구간이 늘면 thumb를 144, 72, 48 순으로 줄이고 36에서 멈춰요.
   static const double minimumLength = 36;
   static const double initialPageLength = 144;
 

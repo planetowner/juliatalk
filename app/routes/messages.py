@@ -266,6 +266,7 @@ def read_link_preview_html(response: Any) -> bytes:
     previous_tail = b""
     total_bytes = 0
 
+    # 미리 보기 메타데이터가 있는 head까지만 읽고, 큰 페이지도 2MB에서 멈춰요.
     while total_bytes < LINK_PREVIEW_MAX_BYTES:
         remaining_bytes = LINK_PREVIEW_MAX_BYTES - total_bytes
         chunk = response.read(
@@ -1037,6 +1038,7 @@ async def execute_message_translation(
     )
 
     previous_messages = list(context_result)
+    # 최신순으로 제한한 대화를 번역 모델에는 실제 대화 순서로 전달해요.
     previous_messages.reverse()
 
     context_messages = [
@@ -1152,6 +1154,7 @@ async def create_message(
     message_type = message_data.message_type
 
     if message_type in {"text", "link"}:
+        # 클라이언트가 보낸 유형보다 실제 본문을 기준으로 링크 여부를 결정해요.
         message_type = "link" if first_url_in_text(content) is not None else "text"
 
     if message_type in {"text", "link"} and not content.strip():
@@ -1276,6 +1279,7 @@ async def create_message(
         direct_conversation,
         current_user.id,
     )
+    # 수신자 이벤트에는 서버가 다시 계산한 읽지 않은 개수도 함께 보내요.
     await connection_manager.send_to_user(
         user_id=current_user.id,
         data=message_created_event,
@@ -1340,6 +1344,7 @@ async def update_call_outcome(
         )
 
     requested_outcome = CallOutcome(outcome_data.outcome)
+    # 발신자와 수신자는 서로 다른 통화 종료 사유를 확정할 수 있어요.
     sender_outcomes = {
         CallOutcome.ENDED,
         CallOutcome.CANCELLED,
@@ -1545,6 +1550,7 @@ async def list_conversation(
 
     if before_message_id is not None:
         assert cursor_message is not None
+        # 같은 시각의 메시지도 빠지거나 겹치지 않도록 UUID를 두 번째 정렬 기준으로 써요.
         message_filters.append(
             or_(
                 Message.created_at < cursor_message.created_at,
@@ -1828,6 +1834,7 @@ async def mark_conversation_as_read(
     )
 
     if direct_conversation is None:
+        # 다른 기기에 남아 있을 수 있는 오래된 배지까지 빈 스냅샷으로 정리해요.
         await unread_counts_event_publisher.send_event(
             session,
             user_id=current_user.id,
@@ -1856,6 +1863,7 @@ async def mark_conversation_as_read(
     unread_messages = list(result)
 
     if not unread_messages:
+        # 새 읽음 항목이 없어도 현재 0건 상태를 모든 연결에 다시 알려요.
         await unread_counts_event_publisher.send_event(
             session,
             user_id=current_user.id,

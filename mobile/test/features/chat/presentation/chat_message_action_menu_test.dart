@@ -43,9 +43,9 @@ double _gapBetweenMessageAndComposer(
       tester.getRect(messageFinder).bottom;
 }
 
-// 목록을 실제 대화의 마지막 메시지가 보이는 맨 아래로 이동시킨다.
-// 초기 화면은 맨 위(오래된 메시지)에서 시작하므로, 최신 메시지를
-// 기준으로 검증하는 테스트는 먼저 이 헬퍼로 하단으로 내려가야 한다.
+  // 목록을 실제 대화의 마지막 메시지가 보이는 맨 아래로 옮겨요.
+  // 초기 화면은 맨 위(오래된 메시지)에서 시작하므로, 최신 메시지를
+  // 기준으로 검증하는 테스트는 먼저 이 헬퍼로 하단으로 내려가요.
 Future<void> _scrollChatToBottom(WidgetTester tester) async {
   await tester.drag(
     find.byKey(const ValueKey<String>('message-list')),
@@ -64,8 +64,8 @@ Future<void> _showMessage(WidgetTester tester, Finder messageFinder) async {
       return;
     }
 
-    // 목록이 최신 위치에서 시작하므로 손가락을 아래로 움직여
-    // 과거 메시지 방향으로 스크롤한다.
+  // 목록이 최신 위치에서 시작하므로 손가락을 아래로 움직여
+  // 과거 메시지 방향으로 스크롤해요.
     await tester.drag(listFinder, const Offset(0, 300));
     await tester.pumpAndSettle();
   }
@@ -1159,7 +1159,7 @@ void main() {
       tester.getCenter(messageListFinder),
     );
 
-    // 첫 이동으로 터치 슬롭을 넘어 실제 스크롤 드래그를 시작한다.
+      // 첫 이동으로 터치 슬롭을 넘어 실제 스크롤 드래그를 시작해요.
     await gesture.moveBy(const Offset(0, 30));
     await tester.pump();
 
@@ -1292,8 +1292,8 @@ void main() {
   testWidgets('tapping an empty chat area dismisses the keyboard', (
     WidgetTester tester,
   ) async {
-    // 모든 메시지가 화면 안에 들어와 목록 하단에
-    // 실제 빈 공간이 생기도록 충분히 높은 화면을 사용한다.
+      // 모든 메시지가 화면 안에 들어와 목록 하단에
+      // 실제 빈 공간이 생기도록 충분히 높은 화면을 사용해요.
     await tester.binding.setSurfaceSize(const Size(420, 2600));
 
     addTearDown(() async {
@@ -1700,7 +1700,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey<String>('message-input')));
       await tester.pump();
 
-      // 키보드가 올라와 사용 가능한 화면 높이가 줄어든 상황을 재현한다.
+      // 키보드가 올라와 사용 가능한 화면 높이가 줄어든 상황을 재현해요.
       await tester.binding.setSurfaceSize(const Size(420, 600));
       await tester.pumpAndSettle();
 
@@ -1987,11 +1987,10 @@ void main() {
           (originalBubbleRect.top - messageListRect.top) /
           messageListRect.height;
 
-      // 상단에 딱 붙거나 중앙에 놓이는 것이 아니라,
-      // 채팅 표시 영역의 상단 1/3 부근에 위치해야 한다.
+      // 상단에 붙거나 중앙에 놓이지 않고 채팅 표시 영역의 상단 1/3에 놓여야 해요.
       expect(originalTopRatio, inInclusiveRange(0.18, 0.38));
 
-      // 원문 전체가 채팅 표시 영역 안에 있어야 한다.
+      // 원문 전체가 채팅 표시 영역 안에 보여야 해요.
       expect(
         originalBubbleRect.top,
         greaterThanOrEqualTo(messageListRect.top - 0.5),
@@ -2004,7 +2003,7 @@ void main() {
 
       expect(find.text('抱歉啦欧巴'), findsOneWidget);
 
-      // 인용 영역 탭은 번역을 실행하지 않는다.
+      // 인용 영역 탭은 번역을 실행하지 않아요.
       expect(find.text('미안해, 오빠.'), findsNothing);
 
       expect(
@@ -2015,7 +2014,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 45));
 
       // _pumpUntilFound에서 이미 약 한 프레임이 진행됐으므로
-      // 이 시점은 확대 펄스의 정점 부근이다.
+      // 이 시점은 확대 펄스의 정점 부근이에요.
       expect(_messagePulseScaleX(tester, '5'), greaterThan(1.005));
 
       await tester.pump(const Duration(milliseconds: 420));
@@ -2152,7 +2151,7 @@ void main() {
 
     expect(editableText.controller.text, '작성 중인 메시지');
 
-    // 첨부 패널 상태의 같은 버튼은 × 역할을 한다.
+      // 첨부 패널 상태의 같은 버튼은 × 역할을 해요.
     await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
     await tester.pumpAndSettle();
 

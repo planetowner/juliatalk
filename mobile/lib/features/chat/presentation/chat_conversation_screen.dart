@@ -343,7 +343,7 @@ final class _ChatConversationHomeScreenState
       _conversationCacheTrimmedUserIds.remove(userId);
       _conversationHasMoreByUserId[userId] = page.hasMore;
     } catch (_) {
-      // Prefetching should never block the chat list.
+      // 미리 불러오기가 실패해도 채팅 목록은 그대로 보여 줘요.
     } finally {
       _prefetchingConversationUserIds.remove(userId);
     }
@@ -442,7 +442,7 @@ final class _ChatConversationHomeScreenState
           )
           .orCancel;
     } on TickerCanceled {
-      // A close gesture can legitimately replace the opening animation.
+      // 닫기 제스처는 시작 애니메이션을 정상적으로 중단할 수 있어요.
     }
   }
 
@@ -569,8 +569,7 @@ final class _ChatConversationHomeScreenState
         return;
       }
 
-      // Decide once per pointer sequence. A vertical scroll must not turn into
-      // route navigation later just because the finger drifts to the right.
+      // 포인터마다 방향을 한 번만 정해 세로 스크롤이 화면 전환으로 바뀌지 않게 해요.
       if (totalDelta.dx <= 0 || horizontalDistance <= verticalDistance) {
         _chatRoutePointerRejected = true;
         return;
@@ -947,8 +946,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
       unawaited(_loadConversation(showLoading: true));
     }
 
-    // Start after the first route frame has built so synchronous widget
-    // construction cannot consume the animation before anything is painted.
+    // 첫 프레임 뒤에 시작해 위젯 생성 중 애니메이션이 화면 없이 소진되지 않게 해요.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _notifyReadyForRouteAnimation();
     });
@@ -1006,8 +1004,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     }
 
     if (_openedWithCachedMessages) {
-      // Rebuilding a long cached timeline during the 190ms route transition can
-      // starve the animation of frames, so refresh only after it has completed.
+      // 190ms 화면 전환이 끝난 뒤 긴 캐시를 갱신해 애니메이션 프레임을 지켜요.
       await _loadConversation(showLoading: false);
     }
   }
@@ -1540,7 +1537,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         widget.realtimeService.markConversationAsRead(widget.otherUser.id),
       );
     } catch (_) {
-      // Keep the current conversation visible during transient sync errors.
+      // 일시적인 동기화 실패 중에도 현재 대화는 계속 보여 줘요.
     } finally {
       _syncingAfterReconnect = false;
     }

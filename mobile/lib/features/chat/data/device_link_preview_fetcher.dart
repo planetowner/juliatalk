@@ -29,6 +29,7 @@ final class DeviceLinkPreviewFetcher {
     try {
       return await _fetch(uri).timeout(_fetchTimeout);
     } catch (_) {
+      // 미리 보기 실패는 메시지 전송을 막지 않고 서버의 기본 메타데이터에 맡겨요.
       return null;
     }
   }
@@ -36,6 +37,7 @@ final class DeviceLinkPreviewFetcher {
   bool _usesDeviceFallback(Uri uri) {
     final String host = uri.host.toLowerCase();
 
+    // fmkorea가 서버 스크래퍼를 제한할 때만 일반 브라우저인 기기에서 보완해요.
     return uri.isScheme('https') &&
         (host == 'fmkorea.com' || host.endsWith('.fmkorea.com'));
   }

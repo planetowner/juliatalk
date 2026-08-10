@@ -144,9 +144,9 @@ final class PhotoManagerChatPhotoLibrary
   Future<ChatPhotoAccessState>? _accessRequestInFlight;
 
   static FilterOptionGroup _createFilterOption() {
-    // FilterOptionGroup의 기본 생성일 상한은 생성 순간의 DateTime.now()다.
+    // FilterOptionGroup의 기본 생성일 상한은 생성 순간의 DateTime.now()예요.
     // 조회 옵션을 앱 수명 동안 재사용하면 앱 실행 후 추가된 사진이
-    // 영구적으로 제외되므로 앨범을 조회할 때마다 새로 만든다.
+    // 영구적으로 빠지므로 앨범을 조회할 때마다 새로 만들어요.
     return FilterOptionGroup(
       orders: const <OrderOption>[
         OrderOption(type: OrderOptionType.createDate, asc: false),
@@ -186,7 +186,7 @@ final class PhotoManagerChatPhotoLibrary
     }
 
     // AnimatedSwitcher로 선택기를 빠르게 닫았다 다시 여는 동안
-    // 네이티브 observer를 불필요하게 중단했다 재시작하지 않는다.
+    // 네이티브 observer를 그대로 유지해요.
     _stopChangeNotificationsTimer?.cancel();
     _stopChangeNotificationsTimer = Timer(
       const Duration(milliseconds: 400),
@@ -265,7 +265,7 @@ final class PhotoManagerChatPhotoLibrary
     try {
       await PhotoManager.stopChangeNotify();
     } catch (_) {
-      // 다음 구독 때 다시 시작할 수 있도록 로컬 상태는 정리한다.
+      // 다음 구독 때 다시 시작할 수 있도록 로컬 상태는 정리해요.
     } finally {
       PhotoManager.removeChangeCallback(_photoManagerChangeCallback);
       _changeNotificationsStarted = false;
@@ -325,8 +325,7 @@ final class PhotoManagerChatPhotoLibrary
   Future<ChatPhotoAccessState> requestAccess() {
     final ChatPhotoAccessState? cachedState = _cachedAccessState;
 
-    // 이번 앱 실행 중 이미 사용자가 결정을 내렸다면
-    // 시스템 권한 요청을 다시 호출하지 않는다.
+    // 이번 앱 실행 중 사용자가 이미 결정했다면 시스템 권한 요청을 생략해요.
     if (cachedState != null) {
       return Future<ChatPhotoAccessState>.value(cachedState);
     }
@@ -334,8 +333,7 @@ final class PhotoManagerChatPhotoLibrary
     final Future<ChatPhotoAccessState>? existingRequest =
         _accessRequestInFlight;
 
-    // 빠르게 여러 번 Photo가 눌려도 권한 팝업을
-    // 중복 요청하지 않는다.
+    // Photo를 빠르게 여러 번 눌러도 하나의 권한 요청을 함께 사용해요.
     if (existingRequest != null) {
       return existingRequest;
     }

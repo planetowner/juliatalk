@@ -2030,6 +2030,8 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         onSendCallMessage: _sendCallMessage,
         onUpdateCallOutcome: _updateCallOutcome,
         onCreateMediaAssetAccessUrl: widget.chatApi.createMediaAssetAccessUrl,
+        onCreatePhotoThumbnailAccessUrl:
+            widget.chatApi.createMediaAssetThumbnailAccessUrl,
         onEditTextMessage: _editTextMessage,
         onRetryTranslation: _retryTextMessageTranslation,
         onDeleteMessage: _deleteMessage,

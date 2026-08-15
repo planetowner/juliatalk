@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -51,7 +52,134 @@ Rect _photoRect(WidgetTester tester, int index) {
   return tester.getRect(_photoFinder(index));
 }
 
+final class _IncomingPhotoHarness extends StatefulWidget {
+  const _IncomingPhotoHarness({super.key});
+
+  @override
+  State<_IncomingPhotoHarness> createState() {
+    return _IncomingPhotoHarnessState();
+  }
+}
+
+final class _IncomingPhotoHarnessState extends State<_IncomingPhotoHarness> {
+  List<ChatMessage> _messages = <ChatMessage>[
+    ChatMessage(
+      id: 'outgoing-text',
+      senderId: '1',
+      recipientId: '2',
+      content: 'Before photo',
+      createdAt: DateTime(2026, 7, 1, 12, 51),
+    ),
+  ];
+
+  void addIncomingPhoto() {
+    setState(() {
+      _messages = <ChatMessage>[
+        ..._messages,
+        ChatMessage(
+          id: 'incoming-photo',
+          senderId: '2',
+          recipientId: '1',
+          content: '',
+          createdAt: DateTime(2026, 7, 1, 12, 52),
+          photoAttachments: <ChatPhotoAttachment>[
+            ChatPhotoAttachment(
+              assetId: 'incoming-preview',
+              previewBytes: _testPng,
+              width: 1200,
+              height: 900,
+            ),
+          ],
+        ),
+      ];
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ChatConversationView(initialMessages: _messages);
+  }
+}
+
 void main() {
+  testWidgets('new incoming photo row fades in at its final position', (
+    WidgetTester tester,
+  ) async {
+    final GlobalKey<_IncomingPhotoHarnessState> harnessKey =
+        GlobalKey<_IncomingPhotoHarnessState>();
+
+    await tester.pumpWidget(
+      MaterialApp(home: _IncomingPhotoHarness(key: harnessKey)),
+    );
+    await tester.pumpAndSettle();
+
+    harnessKey.currentState!.addIncomingPhoto();
+    await tester.pump();
+
+    final Finder revealFinder = find.byKey(
+      const ValueKey<String>('incoming-photo-reveal-incoming-photo'),
+    );
+    final Finder fadeFinder = find.descendant(
+      of: revealFinder,
+      matching: find.byType(FadeTransition),
+    );
+
+    expect(revealFinder, findsOneWidget);
+    expect(
+      tester.widget<FadeTransition>(fadeFinder).opacity.value,
+      lessThan(1),
+    );
+
+    await tester.pump(const Duration(milliseconds: 120));
+
+    expect(tester.widget<FadeTransition>(fadeFinder).opacity.value, 1);
+  });
+
+  testWidgets('remote photos wait on a plain white placeholder', (
+    WidgetTester tester,
+  ) async {
+    final Completer<Uri> accessUrl = Completer<Uri>();
+    final ChatMessage message = ChatMessage(
+      id: 'remote-photo',
+      senderId: '2',
+      recipientId: '1',
+      content: '',
+      createdAt: DateTime(2026, 7, 1, 12, 52),
+      photoAttachments: const <ChatPhotoAttachment>[
+        ChatPhotoAttachment(
+          assetId: 'remote-photo',
+          mediaAssetId: 'remote-photo',
+          width: 1200,
+          height: 900,
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatConversationView(
+          initialMessages: <ChatMessage>[message],
+          onCreatePhotoThumbnailAccessUrl: ({required String mediaAssetId}) {
+            return accessUrl.future;
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final Finder bubbleFinder = find.byKey(
+      const ValueKey<String>('incoming-bubble-remote-photo'),
+    );
+
+    expect(
+      find.descendant(
+        of: bubbleFinder,
+        matching: find.byIcon(Icons.image_outlined),
+      ),
+      findsNothing,
+    );
+  });
+
   testWidgets('incoming photo messages render as incoming media bubbles', (
     WidgetTester tester,
   ) async {

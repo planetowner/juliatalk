@@ -54,6 +54,10 @@ const Duration _quickPhotoDismissAnimationDuration = Duration(
   milliseconds: 180,
 );
 
+const Duration _incomingPhotoRevealDuration = Duration(milliseconds: 120);
+
+const Duration _photoLoadRevealDuration = Duration(milliseconds: 80);
+
 const Duration _bottomSurfaceAnimationDuration = Duration(milliseconds: 180);
 
 const Duration _outgoingCallNoAnswerTimeout = Duration(seconds: 30);
@@ -339,6 +343,7 @@ final class ChatConversationView extends StatefulWidget {
     this.onSendCallMessage,
     this.onUpdateCallOutcome,
     this.onCreateMediaAssetAccessUrl,
+    this.onCreatePhotoThumbnailAccessUrl,
     this.onOpenLink,
     this.onEditTextMessage,
     this.onTranslateMessage,
@@ -377,6 +382,7 @@ final class ChatConversationView extends StatefulWidget {
   final ChatCallMessageSender? onSendCallMessage;
   final ChatCallOutcomeUpdater? onUpdateCallOutcome;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final ChatLinkOpener? onOpenLink;
   final ChatTextMessageEditor? onEditTextMessage;
   final ChatMessageTranslator? onTranslateMessage;
@@ -534,6 +540,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
 
     return _mediaAssetAccessUrlCreator;
+  }
+
+  ChatMediaAssetAccessUrlCreator? get _cachedPhotoThumbnailAccessUrlCreator {
+    return widget.onCreatePhotoThumbnailAccessUrl;
   }
 
   Future<Uri> _createCachedMediaAssetAccessUrl({required String mediaAssetId}) {
@@ -2832,6 +2842,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       onPhotoMessageTap: _openPhotoViewer,
                       onCreateMediaAssetAccessUrl:
                           _cachedMediaAssetAccessUrlCreator,
+                      onCreatePhotoThumbnailAccessUrl:
+                          _cachedPhotoThumbnailAccessUrlCreator,
                       translationDelay: widget.translationDelay,
                       initialClock: widget.initialClock,
                       nextLocalMessageId: widget.nextLocalMessageId,
@@ -6354,6 +6366,7 @@ final class _MessageList extends StatefulWidget {
     required this.onDeleteMessage,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreatePhotoThumbnailAccessUrl,
     required this.translationDelay,
     required this.initialClock,
     required this.nextLocalMessageId,
@@ -6392,6 +6405,7 @@ final class _MessageList extends StatefulWidget {
   final ChatMessageDeleter? onDeleteMessage;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final Duration translationDelay;
   final DateTime? initialClock;
   final int nextLocalMessageId;
@@ -6441,6 +6455,8 @@ final class _MessageListState extends State<_MessageList>
   final Map<String, GlobalKey> _messageBubbleKeys = <String, GlobalKey>{};
   final Map<String, double> _rememberedMessageScrollOffsets =
       <String, double>{};
+  final Map<String, DateTime> _incomingPhotoRevealStartedAt =
+      <String, DateTime>{};
   final GlobalKey _messageListRepaintBoundaryKey = GlobalKey();
   final Key _historyCenterSliverKey = UniqueKey();
   late final _ViewportAnchorScrollController _scrollController;
@@ -6530,6 +6546,7 @@ final class _MessageListState extends State<_MessageList>
     }
     _syncMessageClockWithMessages(_messages);
     _nextMessageId = widget.nextLocalMessageId;
+    _prefetchPhotoThumbnails(_messages);
 
     _beginBottomSettle();
   }
@@ -7064,6 +7081,11 @@ final class _MessageListState extends State<_MessageList>
     final bool enteredLatestWindow =
         widget.showingLatestWindow && !oldWidget.showingLatestWindow;
 
+    if (oldWidget.onCreatePhotoThumbnailAccessUrl !=
+        widget.onCreatePhotoThumbnailAccessUrl) {
+      _prefetchPhotoThumbnails(_messages);
+    }
+
     if (widget.scrollLocked && !oldWidget.scrollLocked) {
       _stopScrollingAtCurrentOffset();
     }
@@ -7107,6 +7129,16 @@ final class _MessageListState extends State<_MessageList>
     _messages = List<ChatMessage>.of(
       widget.initialMessages ?? const <ChatMessage>[],
     );
+    if (!_olderMessagesLoadInProgress && !_newerMessagesLoadInProgress) {
+      final Set<String> previousMessageIdSet = previousMessageIds.toSet();
+
+      for (final ChatMessage message in _messages) {
+        if (!previousMessageIdSet.contains(message.id)) {
+          _recordIncomingPhotoReveal(message);
+        }
+      }
+    }
+    _prefetchPhotoThumbnails(_messages);
     if (enteredLatestWindow) {
       _normalizeHistoryCenterForLatestWindow();
     } else {
@@ -7117,6 +7149,9 @@ final class _MessageListState extends State<_MessageList>
         .toSet();
     _messageBubbleKeys.removeWhere(
       (String messageId, GlobalKey _) => !currentMessageIds.contains(messageId),
+    );
+    _incomingPhotoRevealStartedAt.removeWhere(
+      (String messageId, DateTime _) => !currentMessageIds.contains(messageId),
     );
     _historyPageBoundaryMessageIds.removeWhere(
       (String messageId) => !currentMessageIds.contains(messageId),
@@ -7262,8 +7297,49 @@ final class _MessageListState extends State<_MessageList>
     }
   }
 
+  void _recordIncomingPhotoReveal(ChatMessage message) {
+    if (message.senderId == widget.currentUserId ||
+        message.photoAttachments.isEmpty) {
+      return;
+    }
+
+    _incomingPhotoRevealStartedAt[message.id] = DateTime.now();
+  }
+
+  void _prefetchPhotoThumbnails(Iterable<ChatMessage> messages) {
+    final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+        widget.onCreatePhotoThumbnailAccessUrl;
+
+    if (createAccessUrl == null) {
+      return;
+    }
+
+    for (final ChatMessage message in messages) {
+      for (final ChatPhotoAttachment attachment in message.photoAttachments) {
+        final String? mediaAssetId = attachment.mediaAssetId;
+
+        if (attachment.previewBytes == null && mediaAssetId != null) {
+          unawaited(
+            _ChatPhotoDiskCache.load(
+              mediaAssetId: mediaAssetId,
+              createAccessUrl: createAccessUrl,
+            ).then<void>((_) {}),
+          );
+        }
+      }
+    }
+  }
+
   void addMessage(ChatMessage message) {
     final List<String> previousMessageIds = _messageIdsSnapshot();
+    final bool isNewMessage = !_messages.any(
+      (ChatMessage existingMessage) => existingMessage.id == message.id,
+    );
+
+    if (isNewMessage) {
+      _recordIncomingPhotoReveal(message);
+      _prefetchPhotoThumbnails(<ChatMessage>[message]);
+    }
 
     setState(() {
       final int existingIndex = _messages.indexWhere(
@@ -7288,6 +7364,14 @@ final class _MessageListState extends State<_MessageList>
     }
 
     final List<String> previousMessageIds = _messageIdsSnapshot();
+    final Set<String> existingMessageIds = previousMessageIds.toSet();
+
+    for (final ChatMessage message in messages) {
+      if (!existingMessageIds.contains(message.id)) {
+        _recordIncomingPhotoReveal(message);
+      }
+    }
+    _prefetchPhotoThumbnails(messages);
 
     setState(() {
       for (final ChatMessage message in messages) {
@@ -9687,6 +9771,8 @@ final class _MessageListState extends State<_MessageList>
         onFileMessageTap: _handleFileMessageTap,
         onPhotoMessageTap: widget.onPhotoMessageTap,
         onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
+        onCreatePhotoThumbnailAccessUrl: widget.onCreatePhotoThumbnailAccessUrl,
+        incomingPhotoRevealStartedAt: _incomingPhotoRevealStartedAt,
         onRetryTranslation: _retryTranslation,
         onMessageLongPress: _handleMessageLongPress,
         onReplyQuoteTap: _handleReplyQuoteTap,
@@ -10776,6 +10862,8 @@ final class _MessageGroup extends StatelessWidget {
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreatePhotoThumbnailAccessUrl,
+    required this.incomingPhotoRevealStartedAt,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -10798,6 +10886,8 @@ final class _MessageGroup extends StatelessWidget {
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
+  final Map<String, DateTime> incomingPhotoRevealStartedAt;
   final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -10817,6 +10907,7 @@ final class _MessageGroup extends StatelessWidget {
         onFileMessageTap: onFileMessageTap,
         onPhotoMessageTap: onPhotoMessageTap,
         onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+        onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
         onMessageLongPress: onMessageLongPress,
         onReplyQuoteTap: onReplyQuoteTap,
         messageBubbleKeyFor: messageBubbleKeyFor,
@@ -10838,6 +10929,8 @@ final class _MessageGroup extends StatelessWidget {
       onFileMessageTap: onFileMessageTap,
       onPhotoMessageTap: onPhotoMessageTap,
       onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+      onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
+      incomingPhotoRevealStartedAt: incomingPhotoRevealStartedAt,
       onRetryTranslation: onRetryTranslation,
       onMessageLongPress: onMessageLongPress,
       onReplyQuoteTap: onReplyQuoteTap,
@@ -10862,6 +10955,8 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreatePhotoThumbnailAccessUrl,
+    required this.incomingPhotoRevealStartedAt,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -10882,6 +10977,8 @@ final class _IncomingMessageGroup extends StatelessWidget {
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
+  final Map<String, DateTime> incomingPhotoRevealStartedAt;
   final ValueChanged<String> onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -10889,7 +10986,10 @@ final class _IncomingMessageGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final bool revealWholeGroup =
+        messages.length == 1 &&
+        incomingPhotoRevealStartedAt.containsKey(messages.first.id);
+    final Widget content = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         AppProfileImage(
@@ -10924,6 +11024,11 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   onFileMessageTap: onFileMessageTap,
                   onPhotoMessageTap: onPhotoMessageTap,
                   onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+                  onCreatePhotoThumbnailAccessUrl:
+                      onCreatePhotoThumbnailAccessUrl,
+                  incomingPhotoRevealStartedAt: revealWholeGroup
+                      ? null
+                      : incomingPhotoRevealStartedAt[messages[index].id],
                   onRetryTranslation: () {
                     onRetryTranslation(messages[index].id);
                   },
@@ -10938,6 +11043,70 @@ final class _IncomingMessageGroup extends StatelessWidget {
         ),
       ],
     );
+
+    if (!revealWholeGroup) {
+      return content;
+    }
+
+    return _IncomingPhotoMessageReveal(
+      key: ValueKey<String>('incoming-photo-reveal-${messages.first.id}'),
+      startedAt: incomingPhotoRevealStartedAt[messages.first.id]!,
+      child: content,
+    );
+  }
+}
+
+final class _IncomingPhotoMessageReveal extends StatefulWidget {
+  const _IncomingPhotoMessageReveal({
+    required this.startedAt,
+    required this.child,
+    super.key,
+  });
+
+  final DateTime startedAt;
+  final Widget child;
+
+  @override
+  State<_IncomingPhotoMessageReveal> createState() {
+    return _IncomingPhotoMessageRevealState();
+  }
+}
+
+final class _IncomingPhotoMessageRevealState
+    extends State<_IncomingPhotoMessageReveal>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+
+    final Duration elapsed = DateTime.now().difference(widget.startedAt);
+    final double progress =
+        elapsed.inMicroseconds / _incomingPhotoRevealDuration.inMicroseconds;
+
+    _controller = AnimationController(
+      vsync: this,
+      duration: _incomingPhotoRevealDuration,
+      value: progress.clamp(0, 1).toDouble(),
+    );
+    _opacity = CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic);
+
+    if (_controller.value < 1) {
+      _controller.forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(opacity: _opacity, child: widget.child);
   }
 }
 
@@ -10958,6 +11127,8 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreatePhotoThumbnailAccessUrl,
+    required this.incomingPhotoRevealStartedAt,
     required this.onRetryTranslation,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
@@ -10979,6 +11150,8 @@ final class _IncomingMessageRow extends StatelessWidget {
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
+  final DateTime? incomingPhotoRevealStartedAt;
   final VoidCallback onRetryTranslation;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
@@ -11014,7 +11187,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         attachments: message.photoAttachments,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerLeft,
-        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+        onCreateMediaAssetAccessUrl: onCreatePhotoThumbnailAccessUrl,
         onPhotoTap: (int photoIndex) {
           onPhotoMessageTap(message, photoIndex);
         },
@@ -11098,7 +11271,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         ? bubble
         : Flexible(fit: FlexFit.loose, child: bubble);
 
-    return Row(
+    final Widget row = Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         rowBubble,
@@ -11110,6 +11283,18 @@ final class _IncomingMessageRow extends StatelessWidget {
           ),
         ],
       ],
+    );
+
+    final DateTime? revealStartedAt = incomingPhotoRevealStartedAt;
+
+    if (!isPhotoMessage || revealStartedAt == null) {
+      return row;
+    }
+
+    return _IncomingPhotoMessageReveal(
+      key: ValueKey<String>('incoming-photo-reveal-${message.id}'),
+      startedAt: revealStartedAt,
+      child: row,
     );
   }
 }
@@ -11885,6 +12070,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreatePhotoThumbnailAccessUrl,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.messageBubbleKeyFor,
@@ -11900,6 +12086,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final _MessageBubbleKeyFor messageBubbleKeyFor;
@@ -11921,6 +12108,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
             onFileMessageTap: onFileMessageTap,
             onPhotoMessageTap: onPhotoMessageTap,
             onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+            onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
             onMessageLongPress: onMessageLongPress,
             onReplyQuoteTap: onReplyQuoteTap,
             bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
@@ -11958,6 +12146,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreatePhotoThumbnailAccessUrl,
     required this.onMessageLongPress,
     required this.onReplyQuoteTap,
     required this.bubbleInteractionKey,
@@ -11973,6 +12162,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final _MessageLongPressCallback onMessageLongPress;
   final _ReplyQuoteTapCallback onReplyQuoteTap;
   final GlobalKey bubbleInteractionKey;
@@ -11993,7 +12183,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         attachments: message.photoAttachments,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerRight,
-        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+        onCreateMediaAssetAccessUrl: onCreatePhotoThumbnailAccessUrl,
         onPhotoTap: (int photoIndex) {
           onPhotoMessageTap(message, photoIndex);
         },
@@ -12490,6 +12680,7 @@ final class _PhotoMessageCollage extends StatelessWidget {
             attachment: attachment,
             itemIndex: itemIndex,
             onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+            persistToDisk: true,
           ),
           if (hiddenCount > 0)
             ColoredBox(
@@ -12520,6 +12711,7 @@ final class _PhotoMessageImage extends StatefulWidget {
     this.height,
     this.fit = BoxFit.cover,
     this.filterQuality = FilterQuality.medium,
+    this.persistToDisk = false,
   });
 
   final ChatPhotoAttachment attachment;
@@ -12530,6 +12722,7 @@ final class _PhotoMessageImage extends StatefulWidget {
   final double? height;
   final BoxFit fit;
   final FilterQuality filterQuality;
+  final bool persistToDisk;
 
   @override
   State<_PhotoMessageImage> createState() {
@@ -12544,6 +12737,8 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
 
   Future<Uri>? _accessUrlFuture;
   Uri? _resolvedAccessUrl;
+  Future<File?>? _cacheFileFuture;
+  File? _resolvedCacheFile;
 
   static void rememberAccessUrl(String mediaAssetId, Uri url) {
     _resolvedAccessUrls[mediaAssetId] = _ResolvedPhotoAccessUrl(
@@ -12564,7 +12759,8 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
 
     if (oldWidget.attachment != widget.attachment ||
         oldWidget.onCreateMediaAssetAccessUrl !=
-            widget.onCreateMediaAssetAccessUrl) {
+            widget.onCreateMediaAssetAccessUrl ||
+        oldWidget.persistToDisk != widget.persistToDisk) {
       _syncAccessUrlFuture();
     }
   }
@@ -12573,6 +12769,8 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
     if (widget.attachment.previewBytes != null) {
       _accessUrlFuture = null;
       _resolvedAccessUrl = null;
+      _cacheFileFuture = null;
+      _resolvedCacheFile = null;
       return;
     }
 
@@ -12583,8 +12781,32 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
     if (mediaAssetId == null || createAccessUrl == null) {
       _accessUrlFuture = null;
       _resolvedAccessUrl = null;
+      _cacheFileFuture = null;
+      _resolvedCacheFile = null;
       return;
     }
+
+    if (widget.persistToDisk) {
+      _accessUrlFuture = null;
+      _resolvedAccessUrl = null;
+      _resolvedCacheFile = _ChatPhotoDiskCache.resolvedFile(mediaAssetId);
+      _cacheFileFuture = _resolvedCacheFile == null
+          ? _ChatPhotoDiskCache.load(
+              mediaAssetId: mediaAssetId,
+              createAccessUrl: createAccessUrl,
+            ).then((File? file) {
+              if (mounted && widget.attachment.mediaAssetId == mediaAssetId) {
+                _resolvedCacheFile = file;
+              }
+
+              return file;
+            })
+          : null;
+      return;
+    }
+
+    _cacheFileFuture = null;
+    _resolvedCacheFile = null;
 
     final _ResolvedPhotoAccessUrl? resolvedAccessUrl =
         _resolvedAccessUrls[mediaAssetId];
@@ -12624,6 +12846,33 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
         fit: widget.fit,
         gaplessPlayback: true,
         filterQuality: widget.filterQuality,
+      );
+    }
+
+    if (widget.persistToDisk) {
+      final File? resolvedCacheFile = _resolvedCacheFile;
+
+      if (resolvedCacheFile != null) {
+        return _buildCachedFileImage(resolvedCacheFile);
+      }
+
+      final Future<File?>? cacheFileFuture = _cacheFileFuture;
+
+      if (cacheFileFuture == null) {
+        return _buildPlaceholder();
+      }
+
+      return FutureBuilder<File?>(
+        future: cacheFileFuture,
+        builder: (BuildContext context, AsyncSnapshot<File?> snapshot) {
+          final File? file = snapshot.data;
+
+          if (file == null) {
+            return _buildPlaceholder();
+          }
+
+          return _buildCachedFileImage(file);
+        },
       );
     }
 
@@ -12686,6 +12935,65 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
     );
   }
 
+  Widget _buildCachedFileImage(File file) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
+        final int? cacheWidth = constraints.hasBoundedWidth
+            ? (constraints.maxWidth * pixelRatio).ceil().clamp(1, 1280).toInt()
+            : null;
+        final int? cacheHeight = constraints.hasBoundedHeight
+            ? (constraints.maxHeight * pixelRatio).ceil().clamp(1, 1280).toInt()
+            : null;
+
+        return Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            _buildPlaceholder(),
+            Image.file(
+              file,
+              key: ValueKey<String>(widget.imageKey ?? _defaultRemoteImageKey),
+              width: widget.width,
+              height: widget.height,
+              fit: widget.fit,
+              gaplessPlayback: true,
+              filterQuality: widget.filterQuality,
+              cacheWidth: cacheWidth,
+              cacheHeight: cacheHeight,
+              frameBuilder:
+                  (
+                    BuildContext context,
+                    Widget child,
+                    int? frame,
+                    bool wasSynchronouslyLoaded,
+                  ) {
+                    if (wasSynchronouslyLoaded) {
+                      return child;
+                    }
+
+                    return AnimatedOpacity(
+                      opacity: frame == null ? 0 : 1,
+                      duration: _photoLoadRevealDuration,
+                      curve: Curves.easeOut,
+                      child: child,
+                    );
+                  },
+              errorBuilder: (_, _, _) {
+                final String? mediaAssetId = widget.attachment.mediaAssetId;
+
+                if (mediaAssetId != null) {
+                  unawaited(_ChatPhotoDiskCache.remove(mediaAssetId));
+                }
+
+                return _buildPlaceholder();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildPlaceholder() {
     return _PhotoMessagePlaceholder(width: widget.width, height: widget.height);
   }
@@ -12708,6 +13016,72 @@ final class _ResolvedPhotoAccessUrl {
   final DateTime resolvedAt;
 }
 
+final class _ChatPhotoDiskCache {
+  static final Map<String, File> _resolvedFiles = <String, File>{};
+  static final Map<String, Future<File?>> _pendingLoads =
+      <String, Future<File?>>{};
+
+  static File? resolvedFile(String mediaAssetId) {
+    return _resolvedFiles[mediaAssetId];
+  }
+
+  static Future<File?> load({
+    required String mediaAssetId,
+    required ChatMediaAssetAccessUrlCreator createAccessUrl,
+  }) {
+    final File? resolved = _resolvedFiles[mediaAssetId];
+
+    if (resolved != null) {
+      return Future<File?>.value(resolved);
+    }
+
+    return _pendingLoads.putIfAbsent(mediaAssetId, () async {
+      try {
+        final Directory cacheDirectory = await getApplicationCacheDirectory();
+        final Directory photoDirectory = Directory(
+          '${cacheDirectory.path}/chat-photo-thumbnails',
+        );
+        final File file = File('${photoDirectory.path}/$mediaAssetId.jpg');
+
+        if (await file.exists() && await file.length() > 0) {
+          _resolvedFiles[mediaAssetId] = file;
+          return file;
+        }
+
+        final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
+        final http.Response response = await http.get(accessUrl);
+
+        if (response.statusCode < 200 ||
+            response.statusCode >= 300 ||
+            response.bodyBytes.isEmpty) {
+          return null;
+        }
+
+        await photoDirectory.create(recursive: true);
+        await file.writeAsBytes(response.bodyBytes, flush: true);
+        _resolvedFiles[mediaAssetId] = file;
+        return file;
+      } catch (_) {
+        return null;
+      } finally {
+        _pendingLoads.remove(mediaAssetId);
+      }
+    });
+  }
+
+  static Future<void> remove(String mediaAssetId) async {
+    final File? file = _resolvedFiles.remove(mediaAssetId);
+
+    if (file != null) {
+      try {
+        await file.delete();
+      } catch (_) {
+        return;
+      }
+    }
+  }
+}
+
 final class _PhotoMessagePlaceholder extends StatelessWidget {
   const _PhotoMessagePlaceholder({this.width, this.height});
 
@@ -12719,12 +13093,7 @@ final class _PhotoMessagePlaceholder extends StatelessWidget {
     return SizedBox(
       width: width,
       height: height,
-      child: const ColoredBox(
-        color: AppColors.grey100,
-        child: Center(
-          child: Icon(Icons.image_outlined, color: AppColors.grey400, size: 28),
-        ),
-      ),
+      child: const ColoredBox(color: AppColors.white),
     );
   }
 }

@@ -487,6 +487,7 @@ final class ChatApi {
             mimeType: photo.mimeType ?? 'image/jpeg',
             sizeBytes: photo.sizeBytes ?? photo.uploadBytes?.length ?? 0,
             bytes: photo.uploadBytes,
+            thumbnailBytes: photo.previewBytes,
             width: photo.width,
             height: photo.height,
           );
@@ -575,6 +576,7 @@ final class ChatApi {
     required String mimeType,
     required int sizeBytes,
     required Uint8List? bytes,
+    Uint8List? thumbnailBytes,
     int? width,
     int? height,
     Duration? duration,
@@ -584,7 +586,7 @@ final class ChatApi {
       throw const ChatApiException('The selected media file is empty.');
     }
 
-    // 서버가 발급한 URL로 원본을 올린 뒤 완료를 알려야 실제 업로드를 검증할 수 있어요.
+    // 서버가 발급한 URL로 원본과 채팅용 미리보기를 올린 뒤 완료를 알려요.
     final http.Response createResponse = await _client.post(
       _baseUri.resolve('/media-assets'),
       headers: _jsonHeaders,
@@ -635,6 +637,18 @@ final class ChatApi {
                 MapEntry<String, String>(key, value.toString()),
           )
         : <String, String>{'Content-Type': mimeType};
+    final String? thumbnailUploadUrl = _optionalString(
+      decodedBody['thumbnail_upload_url'],
+    );
+    final Object? thumbnailUploadHeadersJson =
+        decodedBody['thumbnail_upload_headers'];
+    final Map<String, String> thumbnailUploadHeaders =
+        thumbnailUploadHeadersJson is Map<String, dynamic>
+        ? thumbnailUploadHeadersJson.map(
+            (String key, dynamic value) =>
+                MapEntry<String, String>(key, value.toString()),
+          )
+        : <String, String>{'Content-Type': 'image/jpeg'};
 
     final http.Response uploadResponse = await _client.put(
       Uri.parse(uploadUrl),
@@ -647,6 +661,24 @@ final class ChatApi {
         'Media upload failed with status code '
         '${uploadResponse.statusCode}.',
       );
+    }
+
+    if (thumbnailUploadUrl != null &&
+        thumbnailBytes != null &&
+        thumbnailBytes.isNotEmpty) {
+      final http.Response thumbnailUploadResponse = await _client.put(
+        Uri.parse(thumbnailUploadUrl),
+        headers: thumbnailUploadHeaders,
+        body: thumbnailBytes,
+      );
+
+      if (thumbnailUploadResponse.statusCode < 200 ||
+          thumbnailUploadResponse.statusCode >= 300) {
+        throw ChatApiException(
+          'Photo thumbnail upload failed with status code '
+          '${thumbnailUploadResponse.statusCode}.',
+        );
+      }
     }
 
     final http.Response completeResponse = await _client.post(
@@ -669,8 +701,31 @@ final class ChatApi {
   }
 
   Future<Uri> createMediaAssetAccessUrl({required String mediaAssetId}) async {
+    return _createMediaAssetAccessUrl(mediaAssetId: mediaAssetId);
+  }
+
+  Future<Uri> createMediaAssetThumbnailAccessUrl({
+    required String mediaAssetId,
+  }) async {
+    return _createMediaAssetAccessUrl(
+      mediaAssetId: mediaAssetId,
+      variant: 'thumbnail',
+    );
+  }
+
+  Future<Uri> _createMediaAssetAccessUrl({
+    required String mediaAssetId,
+    String? variant,
+  }) async {
+    final Uri accessUri = _baseUri.resolve(
+      '/media-assets/$mediaAssetId/access',
+    );
     final http.Response response = await _client.get(
-      _baseUri.resolve('/media-assets/$mediaAssetId/access'),
+      variant == null
+          ? accessUri
+          : accessUri.replace(
+              queryParameters: <String, String>{'variant': variant},
+            ),
       headers: _headers,
     );
 

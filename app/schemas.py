@@ -183,6 +183,8 @@ class MediaAssetUploadRead(BaseModel):
     storage_key: str
     upload_url: str
     upload_headers: dict[str, str]
+    thumbnail_upload_url: Optional[str] = None
+    thumbnail_upload_headers: Optional[dict[str, str]] = None
     expires_in_seconds: int
 
 

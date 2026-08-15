@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import mimetypes
 from pathlib import PurePosixPath
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, status
@@ -56,6 +56,10 @@ def _storage_key(
     file_name: str,
 ) -> str:
     return f"users/{user_id}/media/{media_asset_id}/{file_name}"
+
+
+def _thumbnail_storage_key(*, user_id: UUID, media_asset_id: UUID) -> str:
+    return f"users/{user_id}/media/{media_asset_id}/thumbnail/chat.jpg"
 
 
 def _metadata_for_storage(
@@ -121,12 +125,28 @@ async def create_media_asset_upload(
         media_asset_id=media_asset_id,
         file_name=file_name,
     )
+    thumbnail_storage_key = (
+        _thumbnail_storage_key(
+            user_id=current_user.id,
+            media_asset_id=media_asset_id,
+        )
+        if media_data.kind == "photo"
+        else None
+    )
 
     try:
         object_storage = get_object_storage_client()
         upload_url = object_storage.presigned_put_url(
             storage_key=storage_key,
             content_type=media_data.mime_type,
+        )
+        thumbnail_upload_url = (
+            object_storage.presigned_put_url(
+                storage_key=thumbnail_storage_key,
+                content_type="image/jpeg",
+            )
+            if thumbnail_storage_key is not None
+            else None
         )
     except RuntimeError as error:
         raise HTTPException(
@@ -139,6 +159,7 @@ async def create_media_asset_upload(
         owner_user_id=current_user.id,
         kind=MediaKind(media_data.kind),
         storage_key=storage_key,
+        thumbnail_storage_key=thumbnail_storage_key,
         file_name=file_name,
         mime_type=media_data.mime_type,
         size_bytes=media_data.size_bytes,
@@ -159,6 +180,12 @@ async def create_media_asset_upload(
         storage_key=storage_key,
         upload_url=upload_url,
         upload_headers={"Content-Type": media_data.mime_type},
+        thumbnail_upload_url=thumbnail_upload_url,
+        thumbnail_upload_headers=(
+            {"Content-Type": "image/jpeg"}
+            if thumbnail_upload_url is not None
+            else None
+        ),
         expires_in_seconds=DEFAULT_PRESIGNED_URL_EXPIRES_SECONDS,
     )
 
@@ -212,6 +239,21 @@ async def complete_media_asset_upload(
             detail="Uploaded media size does not match metadata",
         )
 
+    if media_asset.thumbnail_storage_key is not None:
+        try:
+            await asyncio.to_thread(
+                object_storage.object_metadata,
+                storage_key=media_asset.thumbnail_storage_key,
+            )
+        except FileNotFoundError:
+            # 이전 앱이 썸네일 URL을 사용하지 않아도 원본 업로드는 마칠 수 있어요.
+            media_asset.thumbnail_storage_key = None
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(error),
+            ) from error
+
     media_asset.upload_status = "complete"
     await session.commit()
 
@@ -229,6 +271,7 @@ async def create_media_asset_access_url(
     media_asset_id: UUID,
     current_user: CurrentUserDependency,
     session: SessionDependency,
+    variant: Literal["original", "thumbnail"] = "original",
 ) -> MediaAssetAccessRead:
     media_asset = await session.get(MediaAsset, media_asset_id)
 
@@ -259,10 +302,16 @@ async def create_media_asset_access_url(
             detail="Media asset is not available",
         )
 
+    storage_key = (
+        media_asset.thumbnail_storage_key
+        if variant == "thumbnail" and media_asset.thumbnail_storage_key is not None
+        else media_asset.storage_key
+    )
+
     try:
         object_storage = get_object_storage_client()
         access_url = object_storage.presigned_get_url(
-            storage_key=media_asset.storage_key,
+            storage_key=storage_key,
         )
     except RuntimeError as error:
         raise HTTPException(
@@ -274,7 +323,11 @@ async def create_media_asset_access_url(
         media_asset_id=media_asset.id,
         access_url=access_url,
         expires_in_seconds=DEFAULT_PRESIGNED_URL_EXPIRES_SECONDS,
-        mime_type=media_asset.mime_type,
+        mime_type=(
+            "image/jpeg"
+            if storage_key == media_asset.thumbnail_storage_key
+            else media_asset.mime_type
+        ),
         file_name=media_asset.file_name,
         size_bytes=media_asset.size_bytes,
     )

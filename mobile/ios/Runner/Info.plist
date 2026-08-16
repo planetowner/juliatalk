@@ -80,6 +80,8 @@
 	</array>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>JuliaTalk needs access to your photo library so you can choose and send photos in chats.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>JuliaTalk accesses location information embedded in photos you choose only to send those photos in chats.</string>
 
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>JuliaTalk needs permission to save chat photos to your photo library.</string>

@@ -1,16 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
 import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
 final Uint8List _testPng = base64Decode(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB'
-  'CAYAAAAfFcSJAAAADUlEQVR42mNk+M/w'
-  'HwAEAQH/2p3KAAAAAElFTkSuQmCC',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAABmJLR0QA'
+  '/wD/AP+gvaeTAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAB3RJTUUH5gMQ'
+  'FwcdLl4wmwAAAAtJREFUCNdjYAACAAAFAAHiJgWbAAAAAElFTkSuQmCC',
 );
 
 Widget _buildPhotoMessageScreen(ChatMessage message) {
@@ -23,6 +24,9 @@ ChatMessage _photoMessage({
   required String senderId,
   required String recipientId,
   int attachmentCount = 1,
+  bool photoUploadPending = false,
+  int? photoUploadedBytes,
+  int? photoUploadTotalBytes,
 }) {
   return ChatMessage(
     id: '1',
@@ -30,6 +34,9 @@ ChatMessage _photoMessage({
     recipientId: recipientId,
     content: '',
     createdAt: DateTime(2026, 7, 1, 12, 52),
+    photoUploadPending: photoUploadPending,
+    photoUploadedBytes: photoUploadedBytes,
+    photoUploadTotalBytes: photoUploadTotalBytes,
     photoAttachments: List<ChatPhotoAttachment>.generate(
       attachmentCount,
       (int index) => ChatPhotoAttachment(
@@ -98,6 +105,62 @@ final class _IncomingPhotoHarnessState extends State<_IncomingPhotoHarness> {
   @override
   Widget build(BuildContext context) {
     return ChatConversationView(initialMessages: _messages);
+  }
+}
+
+final class _PhotoRefreshHarness extends StatefulWidget {
+  const _PhotoRefreshHarness({super.key});
+
+  @override
+  State<_PhotoRefreshHarness> createState() => _PhotoRefreshHarnessState();
+}
+
+final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
+  ChatMessage _message = ChatMessage(
+    id: 'refreshed-photo-message',
+    senderId: '1',
+    recipientId: '2',
+    content: '',
+    createdAt: DateTime(2026, 7, 1, 12, 52),
+    photoAttachments: <ChatPhotoAttachment>[
+      ChatPhotoAttachment(
+        assetId: 'refreshed-photo',
+        mediaAssetId: 'refreshed-photo-media',
+        previewBytes: _testPng,
+        width: 1179,
+        height: 2556,
+      ),
+    ],
+  );
+
+  void replaceWithServerMessage() {
+    setState(() {
+      _message = ChatMessage(
+        id: 'refreshed-photo-message',
+        senderId: '1',
+        recipientId: '2',
+        content: '',
+        createdAt: DateTime(2026, 7, 1, 12, 52),
+        photoAttachments: const <ChatPhotoAttachment>[
+          ChatPhotoAttachment(
+            assetId: 'refreshed-photo',
+            mediaAssetId: 'refreshed-photo-media',
+            width: 1179,
+            height: 2556,
+          ),
+        ],
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ChatConversationView(
+      initialMessages: <ChatMessage>[_message],
+      onCreatePhotoThumbnailAccessUrl: ({required String mediaAssetId}) {
+        return Completer<Uri>().future;
+      },
+    );
   }
 }
 
@@ -180,6 +243,114 @@ void main() {
     );
   });
 
+  testWidgets('cached remote photos are prepared without a reveal fade', (
+    WidgetTester tester,
+  ) async {
+    final Directory cacheDirectory = Directory.systemTemp.createTempSync(
+      'juliatalk-photo-cache-test-',
+    );
+    const MethodChannel pathProviderChannel = MethodChannel(
+      'plugins.flutter.io/path_provider',
+    );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pathProviderChannel, (MethodCall call) async {
+          if (call.method == 'getApplicationCacheDirectory') {
+            return cacheDirectory.path;
+          }
+
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pathProviderChannel, null);
+      if (cacheDirectory.existsSync()) {
+        cacheDirectory.deleteSync(recursive: true);
+      }
+    });
+
+    const String mediaAssetId = 'cached-route-photo';
+    final Directory photoDirectory = Directory(
+      '${cacheDirectory.path}/chat-photo-thumbnails',
+    );
+    photoDirectory.createSync(recursive: true);
+    File('${photoDirectory.path}/$mediaAssetId.jpg').writeAsBytesSync(_testPng);
+
+    final ChatConversationViewController controller =
+        ChatConversationViewController();
+    final ChatMessage message = ChatMessage(
+      id: 'cached-remote-photo',
+      senderId: '2',
+      recipientId: '1',
+      content: '',
+      createdAt: DateTime(2026, 7, 1, 12, 52),
+      photoAttachments: const <ChatPhotoAttachment>[
+        ChatPhotoAttachment(
+          assetId: 'cached-remote-photo',
+          mediaAssetId: mediaAssetId,
+          width: 1200,
+          height: 900,
+        ),
+      ],
+    );
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            controller: controller,
+            initialMessages: <ChatMessage>[message],
+            onCreatePhotoThumbnailAccessUrl:
+                ({required String mediaAssetId}) async {
+                  throw StateError(
+                    'Cached photos must not request the network.',
+                  );
+                },
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.pumpAndSettle();
+      await controller.prepareInitialCachedPhotos();
+      await tester.pump();
+    });
+
+    final Finder imageFinder = find.byKey(
+      const ValueKey<String>('photo-message-remote-cached-route-photo-0'),
+    );
+    expect(imageFinder, findsOneWidget);
+    final Image cachedImage = tester.widget<Image>(imageFinder);
+    final ResizeImage resizedImage = cachedImage.image as ResizeImage;
+    expect(resizedImage.width, isNotNull);
+    expect(resizedImage.height, isNull);
+    expect(
+      find.ancestor(of: imageFinder, matching: find.byType(AnimatedOpacity)),
+      findsNothing,
+    );
+  });
+
+  testWidgets('a server refresh keeps the visible local photo preview', (
+    WidgetTester tester,
+  ) async {
+    final GlobalKey<_PhotoRefreshHarnessState> harnessKey =
+        GlobalKey<_PhotoRefreshHarnessState>();
+
+    await tester.pumpWidget(
+      MaterialApp(home: _PhotoRefreshHarness(key: harnessKey)),
+    );
+    await tester.pump();
+
+    const ValueKey<String> previewKey = ValueKey<String>(
+      'photo-message-refreshed-photo-0',
+    );
+    expect(find.byKey(previewKey), findsOneWidget);
+
+    harnessKey.currentState!.replaceWithServerMessage();
+    await tester.pump();
+
+    expect(find.byKey(previewKey), findsOneWidget);
+  });
+
   testWidgets('incoming photo messages render as incoming media bubbles', (
     WidgetTester tester,
   ) async {
@@ -237,6 +408,89 @@ void main() {
         ),
       ),
       findsOneWidget,
+    );
+  });
+
+  testWidgets('outgoing photo upload progress follows message state', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildPhotoMessageScreen(
+        _photoMessage(
+          senderId: '1',
+          recipientId: '2',
+          photoUploadPending: true,
+          photoUploadedBytes: 0,
+          photoUploadTotalBytes: 998000,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-upload-progress-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('photo-upload-image-icon')),
+      findsOneWidget,
+    );
+    expect(
+      tester.getSize(
+        find.byKey(const ValueKey<String>('photo-upload-image-icon')),
+      ),
+      const Size.square(16),
+    );
+    expect(find.text('0 / 998 KB'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _buildPhotoMessageScreen(
+        _photoMessage(
+          senderId: '1',
+          recipientId: '2',
+          photoUploadPending: true,
+          photoUploadedBytes: 524288,
+          photoUploadTotalBytes: 1200000,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byIcon(Icons.close_rounded), findsOneWidget);
+    expect(find.text('0.5 / 1.2 MB'), findsOneWidget);
+    final CircularProgressIndicator progressIndicator = tester.widget(
+      find.byType(CircularProgressIndicator),
+    );
+    expect(progressIndicator.strokeWidth, 2.2);
+    expect(progressIndicator.backgroundColor, Colors.transparent);
+
+    await tester.pumpWidget(
+      _buildPhotoMessageScreen(
+        _photoMessage(
+          senderId: '1',
+          recipientId: '2',
+          photoUploadPending: true,
+          photoUploadedBytes: 1200000,
+          photoUploadTotalBytes: 1200000,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-upload-image-icon')),
+      findsOneWidget,
+    );
+    expect(find.text('1.2 / 1.2 MB'), findsNothing);
+
+    await tester.pumpWidget(
+      _buildPhotoMessageScreen(_photoMessage(senderId: '1', recipientId: '2')),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-upload-progress-1')),
+      findsNothing,
     );
   });
 

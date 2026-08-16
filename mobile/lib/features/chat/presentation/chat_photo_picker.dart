@@ -11,10 +11,15 @@ final class ChatPhotoSelectionResult {
   ChatPhotoSelectionResult({
     required List<ChatPhotoAsset> assets,
     required this.collage,
-  }) : assets = List<ChatPhotoAsset>.unmodifiable(assets);
+    Map<String, Uint8List> previewBytesByAssetId = const <String, Uint8List>{},
+  }) : assets = List<ChatPhotoAsset>.unmodifiable(assets),
+       previewBytesByAssetId = Map<String, Uint8List>.unmodifiable(
+         previewBytesByAssetId,
+       );
 
   final List<ChatPhotoAsset> assets;
   final bool collage;
+  final Map<String, Uint8List> previewBytesByAssetId;
 }
 
 typedef ChatPhotoSendCallback =
@@ -257,6 +262,10 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
     _refreshingLibrary = true;
 
     try {
+      if (widget.photoLibrary case final ChatPhotoLibraryPreloader preloader) {
+        preloader.invalidateCache();
+      }
+
       final String? previouslySelectedAlbumId = _selectedAlbum?.id;
       final List<ChatPhotoAlbum> albums = await widget.photoLibrary
           .loadAlbums();
@@ -326,8 +335,8 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
         return;
       }
 
-    // 사용자가 새로고침 도중 다른 앨범을 선택했다면 현재 선택을
-    // 유지하고 새 선택을 기준으로 다시 조회해요.
+      // 사용자가 새로고침 도중 다른 앨범을 선택했다면 현재 선택을
+      // 유지하고 새 선택을 기준으로 다시 조회해요.
       if (_selectedAlbum?.id != previouslySelectedAlbumId) {
         _libraryRefreshRequested = true;
         return;
@@ -706,23 +715,24 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
       return;
     }
 
-    setState(() {
-      _sending = true;
-    });
+    _sending = true;
 
     try {
       await widget.onSend(
         ChatPhotoSelectionResult(
           assets: _selectedAssets,
           collage: _collagePhotos,
+          previewBytesByAssetId: <String, Uint8List>{
+            for (final ChatPhotoAsset asset in _selectedAssets)
+              if (_thumbnailBytesByAssetId.containsKey(asset.id))
+                asset.id: _thumbnailBytesByAssetId[asset.id]!,
+          },
         ),
       );
     } finally {
-      if (mounted) {
-        setState(() {
-          _sending = false;
-        });
+      _sending = false;
 
+      if (mounted) {
         _schedulePendingLibraryRefresh();
       }
     }
@@ -1110,28 +1120,14 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
                         horizontal: 15,
                         vertical: 9,
                       ),
-                      child: _sending
-                          ? const Center(
-                              child: SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: AppColors.white,
-                                ),
-                              ),
-                            )
-                          : Text(
-                              selectedCount == 0
-                                  ? 'Send'
-                                  : '$selectedCount Send',
-                              textAlign: TextAlign.center,
-                              style: AppTypography.subTypography10.copyWith(
-                                color: canSend
-                                    ? AppColors.white
-                                    : AppColors.grey500,
-                                fontWeight: AppTypography.semibold,
-                              ),
-                            ),
+                      child: Text(
+                        selectedCount == 0 ? 'Send' : '$selectedCount Send',
+                        textAlign: TextAlign.center,
+                        style: AppTypography.subTypography10.copyWith(
+                          color: canSend ? AppColors.white : AppColors.grey500,
+                          fontWeight: AppTypography.semibold,
+                        ),
+                      ),
                     ),
                   ),
                 ),

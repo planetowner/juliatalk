@@ -215,21 +215,47 @@ async def complete_media_asset_upload(
 
     try:
         object_storage = get_object_storage_client()
-        # boto3 호출은 동기식이므로 이벤트 루프를 막지 않게 작업 스레드에서 확인해요.
-        metadata = await asyncio.to_thread(
-            object_storage.object_metadata,
-            storage_key=media_asset.storage_key,
-        )
-    except FileNotFoundError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Media upload has not reached Object Storage",
-        ) from error
     except RuntimeError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(error),
         ) from error
+
+    metadata_futures = [
+        asyncio.to_thread(
+            object_storage.object_metadata,
+            storage_key=media_asset.storage_key,
+        )
+    ]
+
+    if media_asset.thumbnail_storage_key is not None:
+        metadata_futures.append(
+            asyncio.to_thread(
+                object_storage.object_metadata,
+                storage_key=media_asset.thumbnail_storage_key,
+            )
+        )
+
+    metadata_results = await asyncio.gather(
+        *metadata_futures,
+        return_exceptions=True,
+    )
+    metadata = metadata_results[0]
+
+    if isinstance(metadata, FileNotFoundError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Media upload has not reached Object Storage",
+        ) from metadata
+
+    if isinstance(metadata, RuntimeError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(metadata),
+        ) from metadata
+
+    if isinstance(metadata, BaseException):
+        raise metadata
 
     object_size = metadata.get("ContentLength")
 
@@ -240,19 +266,18 @@ async def complete_media_asset_upload(
         )
 
     if media_asset.thumbnail_storage_key is not None:
-        try:
-            await asyncio.to_thread(
-                object_storage.object_metadata,
-                storage_key=media_asset.thumbnail_storage_key,
-            )
-        except FileNotFoundError:
+        thumbnail_metadata = metadata_results[1]
+
+        if isinstance(thumbnail_metadata, FileNotFoundError):
             # 이전 앱이 썸네일 URL을 사용하지 않아도 원본 업로드는 마칠 수 있어요.
             media_asset.thumbnail_storage_key = None
-        except RuntimeError as error:
+        elif isinstance(thumbnail_metadata, RuntimeError):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(error),
-            ) from error
+                detail=str(thumbnail_metadata),
+            ) from thumbnail_metadata
+        elif isinstance(thumbnail_metadata, BaseException):
+            raise thumbnail_metadata
 
     media_asset.upload_status = "complete"
     await session.commit()

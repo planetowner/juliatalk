@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +19,18 @@ class _FakeObjectStorage:
     def presigned_get_url(self, *, storage_key: str) -> str:
         self.get_storage_keys.append(storage_key)
         return f"https://storage.example.com/get/{storage_key}"
+
+
+class _ConcurrentMetadataObjectStorage(_FakeObjectStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.metadata_storage_keys: list[str] = []
+        self.metadata_barrier = threading.Barrier(2)
+
+    def object_metadata(self, *, storage_key: str):
+        self.metadata_storage_keys.append(storage_key)
+        self.metadata_barrier.wait(timeout=5)
+        return {"ContentLength": 3}
 
 
 class _FakeSession:
@@ -69,6 +82,40 @@ class MediaAssetVariantTests(unittest.TestCase):
         )
         self.assertTrue(
             asset.thumbnail_storage_key.endswith("/thumbnail/chat.jpg")
+        )
+
+    def test_completion_checks_original_and_thumbnail_together(self) -> None:
+        storage = _ConcurrentMetadataObjectStorage()
+        owner_id = uuid4()
+        asset_id = uuid4()
+        asset = SimpleNamespace(
+            id=asset_id,
+            owner_user_id=owner_id,
+            upload_status="pending",
+            storage_key="media/original.jpg",
+            thumbnail_storage_key="media/thumbnail/chat.jpg",
+            size_bytes=3,
+        )
+        session = _FakeSession(asset)
+        current_user = SimpleNamespace(id=owner_id)
+
+        with patch.object(
+            media_assets,
+            "get_object_storage_client",
+            return_value=storage,
+        ):
+            result = asyncio.run(
+                media_assets.complete_media_asset_upload(
+                    asset_id,
+                    current_user,
+                    session,
+                )
+            )
+
+        self.assertEqual(result.upload_status, "complete")
+        self.assertCountEqual(
+            storage.metadata_storage_keys,
+            ["media/original.jpg", "media/thumbnail/chat.jpg"],
         )
 
     def test_thumbnail_access_uses_thumbnail_and_falls_back_to_original(

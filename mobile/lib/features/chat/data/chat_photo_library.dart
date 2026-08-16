@@ -74,6 +74,12 @@ abstract interface class ChatPhotoLibrary {
   Future<void> openSettings();
 }
 
+abstract interface class ChatPhotoLibraryPreloader {
+  Future<void> preload();
+
+  void invalidateCache();
+}
+
 abstract interface class ChatQuickPhotoSource {
   Future<ChatPhotoAccessState> checkAccess();
 
@@ -107,7 +113,11 @@ final class PhotoManagerChatPhotoLibrary
     implements
         ChatPhotoLibrary,
         ChatPhotoLibraryChangeSource,
-        ChatQuickPhotoSource {
+        ChatQuickPhotoSource,
+        ChatPhotoLibraryPreloader {
+  static const int _preloadPageSize = 60;
+  static const int _preloadThumbnailCount = 18;
+  static const int _maximumThumbnailCacheCount = 160;
   static const PermissionRequestOption _permissionOption =
       PermissionRequestOption(
         iosAccessLevel: IosAccessLevel.readWrite,
@@ -139,9 +149,26 @@ final class PhotoManagerChatPhotoLibrary
   final Set<ChatPhotoLibraryChangeCallback> _changeListeners =
       <ChatPhotoLibraryChangeCallback>{};
 
+  final Map<String, List<ChatPhotoAsset>> _assetPageCache =
+      <String, List<ChatPhotoAsset>>{};
+
+  final Map<String, Future<List<ChatPhotoAsset>>> _assetPageRequests =
+      <String, Future<List<ChatPhotoAsset>>>{};
+
+  final Map<String, Uint8List> _thumbnailCache = <String, Uint8List>{};
+
+  final Map<String, Future<Uint8List?>> _thumbnailRequests =
+      <String, Future<Uint8List?>>{};
+
   ChatPhotoAccessState? _cachedAccessState;
 
+  List<ChatPhotoAlbum>? _albumCache;
+
   Future<ChatPhotoAccessState>? _accessRequestInFlight;
+
+  Future<List<ChatPhotoAlbum>>? _albumRequestInFlight;
+
+  int _cacheVersion = 0;
 
   static FilterOptionGroup _createFilterOption() {
     // FilterOptionGroup의 기본 생성일 상한은 생성 순간의 DateTime.now()예요.
@@ -315,6 +342,8 @@ final class PhotoManagerChatPhotoLibrary
   }
 
   void _notifyChangeListeners(ChatPhotoLibraryChange change) {
+    invalidateCache();
+
     for (final ChatPhotoLibraryChangeCallback listener
         in List<ChatPhotoLibraryChangeCallback>.of(_changeListeners)) {
       listener(change);
@@ -366,7 +395,10 @@ final class PhotoManagerChatPhotoLibrary
     final PermissionState permissionState =
         await PhotoManager.getPermissionState(requestOption: _permissionOption);
 
-    return _accessStateFor(permissionState);
+    final ChatPhotoAccessState accessState = _accessStateFor(permissionState);
+    _cachedAccessState = accessState;
+
+    return accessState;
   }
 
   @override
@@ -398,7 +430,50 @@ final class PhotoManagerChatPhotoLibrary
   }
 
   @override
-  Future<List<ChatPhotoAlbum>> loadAlbums() async {
+  Future<List<ChatPhotoAlbum>> loadAlbums() {
+    final List<ChatPhotoAlbum>? cachedAlbums = _albumCache;
+
+    if (cachedAlbums != null) {
+      return Future<List<ChatPhotoAlbum>>.value(cachedAlbums);
+    }
+
+    final Future<List<ChatPhotoAlbum>>? existingRequest = _albumRequestInFlight;
+
+    if (existingRequest != null) {
+      return existingRequest;
+    }
+
+    final Future<List<ChatPhotoAlbum>> request = _loadAlbumsAndCache(
+      cacheVersion: _cacheVersion,
+    );
+    _albumRequestInFlight = request;
+
+    return request;
+  }
+
+  Future<List<ChatPhotoAlbum>> _loadAlbumsAndCache({
+    required int cacheVersion,
+  }) async {
+    try {
+      final List<ChatPhotoAlbum> albums = await _loadAlbumsFresh(
+        cacheVersion: cacheVersion,
+      );
+
+      if (_cacheVersion == cacheVersion) {
+        _albumCache = albums;
+      }
+
+      return albums;
+    } finally {
+      if (_cacheVersion == cacheVersion) {
+        _albumRequestInFlight = null;
+      }
+    }
+  }
+
+  Future<List<ChatPhotoAlbum>> _loadAlbumsFresh({
+    required int cacheVersion,
+  }) async {
     final FilterOptionGroup filterOption = _createFilterOption();
 
     final List<AssetPathEntity> paths = await PhotoManager.getAssetPathList(
@@ -408,49 +483,44 @@ final class PhotoManagerChatPhotoLibrary
       filterOption: filterOption,
     );
 
-    _albumEntities
-      ..clear()
-      ..addEntries(
-        paths.map(
-          (AssetPathEntity path) =>
-              MapEntry<String, AssetPathEntity>(path.id, path),
-        ),
-      );
+    final Map<String, AssetPathEntity> albumEntities =
+        <String, AssetPathEntity>{
+          for (final AssetPathEntity path in paths) path.id: path,
+        };
+    final Map<String, AssetEntity> coverAssetEntities = <String, AssetEntity>{};
 
-    _assetEntities.clear();
+    final List<ChatPhotoAlbum?> loadedAlbums = await Future.wait(
+      paths.map((AssetPathEntity path) async {
+        final int count = await path.assetCountAsync;
 
-    final List<ChatPhotoAlbum> albums = <ChatPhotoAlbum>[];
+        if (count == 0) {
+          return null;
+        }
 
-    for (final AssetPathEntity path in paths) {
-      final int count = await path.assetCountAsync;
+        final List<AssetEntity> coverAssets = await path.getAssetListPaged(
+          page: 0,
+          size: 1,
+        );
+        final AssetEntity? coverAsset = coverAssets.isEmpty
+            ? null
+            : coverAssets.first;
 
-      if (count == 0) {
-        continue;
-      }
+        if (coverAsset != null) {
+          coverAssetEntities[coverAsset.id] = coverAsset;
+        }
 
-      final List<AssetEntity> coverAssets = await path.getAssetListPaged(
-        page: 0,
-        size: 1,
-      );
-
-      final AssetEntity? coverAsset = coverAssets.isEmpty
-          ? null
-          : coverAssets.first;
-
-      if (coverAsset != null) {
-        _assetEntities[coverAsset.id] = coverAsset;
-      }
-
-      albums.add(
-        ChatPhotoAlbum(
+        return ChatPhotoAlbum(
           id: path.id,
           name: path.name,
           assetCount: count,
           isAll: path.isAll,
           coverAssetId: coverAsset?.id,
-        ),
-      );
-    }
+        );
+      }),
+    );
+    final List<ChatPhotoAlbum> albums = loadedAlbums
+        .whereType<ChatPhotoAlbum>()
+        .toList();
 
     final int allAlbumIndex = albums.indexWhere(
       (ChatPhotoAlbum album) => album.isAll,
@@ -462,11 +532,78 @@ final class PhotoManagerChatPhotoLibrary
       albums.insert(0, allAlbum);
     }
 
+    if (_cacheVersion == cacheVersion) {
+      _albumEntities
+        ..clear()
+        ..addAll(albumEntities);
+      _assetEntities
+        ..clear()
+        ..addAll(coverAssetEntities);
+    }
+
     return List<ChatPhotoAlbum>.unmodifiable(albums);
   }
 
   @override
   Future<List<ChatPhotoAsset>> loadAssets({
+    required String albumId,
+    required int page,
+    required int pageSize,
+  }) {
+    final String cacheKey = '$albumId:$page:$pageSize';
+    final List<ChatPhotoAsset>? cachedAssets = _assetPageCache[cacheKey];
+
+    if (cachedAssets != null) {
+      return Future<List<ChatPhotoAsset>>.value(cachedAssets);
+    }
+
+    final Future<List<ChatPhotoAsset>>? existingRequest =
+        _assetPageRequests[cacheKey];
+
+    if (existingRequest != null) {
+      return existingRequest;
+    }
+
+    final Future<List<ChatPhotoAsset>> request = _loadAssetsAndCache(
+      cacheKey: cacheKey,
+      cacheVersion: _cacheVersion,
+      albumId: albumId,
+      page: page,
+      pageSize: pageSize,
+    );
+    _assetPageRequests[cacheKey] = request;
+
+    return request;
+  }
+
+  Future<List<ChatPhotoAsset>> _loadAssetsAndCache({
+    required String cacheKey,
+    required int cacheVersion,
+    required String albumId,
+    required int page,
+    required int pageSize,
+  }) async {
+    try {
+      final List<ChatPhotoAsset> assets = await _loadAssetsFresh(
+        cacheVersion: cacheVersion,
+        albumId: albumId,
+        page: page,
+        pageSize: pageSize,
+      );
+      if (_cacheVersion == cacheVersion) {
+        _assetPageCache[cacheKey] = assets;
+      }
+
+      return assets;
+    } finally {
+      if (_cacheVersion == cacheVersion) {
+        _assetPageRequests.remove(cacheKey);
+      }
+    }
+  }
+
+  Future<List<ChatPhotoAsset>> _loadAssetsFresh({
+    required int cacheVersion,
     required String albumId,
     required int page,
     required int pageSize,
@@ -487,8 +624,10 @@ final class PhotoManagerChatPhotoLibrary
       size: pageSize,
     );
 
-    for (final AssetEntity entity in entities) {
-      _assetEntities[entity.id] = entity;
+    if (_cacheVersion == cacheVersion) {
+      for (final AssetEntity entity in entities) {
+        _assetEntities[entity.id] = entity;
+      }
     }
 
     return List<ChatPhotoAsset>.unmodifiable(entities.map(_photoAssetFor));
@@ -496,6 +635,66 @@ final class PhotoManagerChatPhotoLibrary
 
   @override
   Future<Uint8List?> loadThumbnail({
+    required String assetId,
+    required int width,
+    required int height,
+  }) {
+    final String cacheKey = '$assetId:$width:$height';
+    final Uint8List? cachedBytes = _thumbnailCache[cacheKey];
+
+    if (cachedBytes != null) {
+      return Future<Uint8List?>.value(cachedBytes);
+    }
+
+    final Future<Uint8List?>? existingRequest = _thumbnailRequests[cacheKey];
+
+    if (existingRequest != null) {
+      return existingRequest;
+    }
+
+    final Future<Uint8List?> request = _loadThumbnailAndCache(
+      cacheKey: cacheKey,
+      cacheVersion: _cacheVersion,
+      assetId: assetId,
+      width: width,
+      height: height,
+    );
+    _thumbnailRequests[cacheKey] = request;
+
+    return request;
+  }
+
+  Future<Uint8List?> _loadThumbnailAndCache({
+    required String cacheKey,
+    required int cacheVersion,
+    required String assetId,
+    required int width,
+    required int height,
+  }) async {
+    try {
+      final Uint8List? bytes = await _loadThumbnailFresh(
+        assetId: assetId,
+        width: width,
+        height: height,
+      );
+
+      if (bytes != null && _cacheVersion == cacheVersion) {
+        _thumbnailCache[cacheKey] = bytes;
+
+        if (_thumbnailCache.length > _maximumThumbnailCacheCount) {
+          _thumbnailCache.remove(_thumbnailCache.keys.first);
+        }
+      }
+
+      return bytes;
+    } finally {
+      if (_cacheVersion == cacheVersion) {
+        _thumbnailRequests.remove(cacheKey);
+      }
+    }
+  }
+
+  Future<Uint8List?> _loadThumbnailFresh({
     required String assetId,
     required int width,
     required int height,
@@ -511,6 +710,52 @@ final class PhotoManagerChatPhotoLibrary
       format: ThumbnailFormat.jpeg,
       quality: 85,
     );
+  }
+
+  @override
+  Future<void> preload() async {
+    final ChatPhotoAccessState accessState =
+        _cachedAccessState ?? await checkAccess();
+
+    if (accessState == ChatPhotoAccessState.denied) {
+      return;
+    }
+
+    final List<ChatPhotoAlbum> albums = await loadAlbums();
+
+    if (albums.isEmpty) {
+      return;
+    }
+
+    final ChatPhotoAlbum album = albums.firstWhere(
+      (ChatPhotoAlbum album) => album.isAll,
+      orElse: () => albums.first,
+    );
+    final List<ChatPhotoAsset> assets = await loadAssets(
+      albumId: album.id,
+      page: 0,
+      pageSize: _preloadPageSize,
+    );
+
+    await Future.wait(
+      assets
+          .take(_preloadThumbnailCount)
+          .map(
+            (ChatPhotoAsset asset) =>
+                loadThumbnail(assetId: asset.id, width: 320, height: 320),
+          ),
+    );
+  }
+
+  @override
+  void invalidateCache() {
+    _cacheVersion += 1;
+    _albumCache = null;
+    _albumRequestInFlight = null;
+    _assetPageCache.clear();
+    _assetPageRequests.clear();
+    _thumbnailCache.clear();
+    _thumbnailRequests.clear();
   }
 
   @override

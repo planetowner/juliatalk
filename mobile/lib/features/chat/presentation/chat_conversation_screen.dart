@@ -906,6 +906,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   ];
 
   StreamSubscription<Map<String, dynamic>>? _realtimeEventSubscription;
+  late final ChatConversationViewController _conversationViewController;
   Future<void>? _olderMessagesLoadFuture;
   Future<void>? _newerMessagesLoadFuture;
   int _messageWindowGeneration = 0;
@@ -927,6 +928,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   void initState() {
     super.initState();
 
+    _conversationViewController = ChatConversationViewController();
     final List<ChatMessage>? initialMessages = widget.initialMessages;
 
     _messages = initialMessages == null
@@ -993,6 +995,12 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   }
 
   Future<void> _openRouteAndRefreshCachedConversation() async {
+    await _conversationViewController.prepareInitialCachedPhotos();
+
+    if (!mounted) {
+      return;
+    }
+
     final Future<void> Function()? onReady = widget.onReadyForRouteAnimation;
 
     if (onReady != null) {
@@ -1838,6 +1846,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     required List<ChatPhotoAttachment> attachments,
     required bool collage,
     ChatReplyReference? replyTo,
+    ChatPhotoUploadProgressCallback? onUploadProgress,
   }) async {
     final List<ChatMessage> messages;
 
@@ -1847,6 +1856,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
           recipientId: widget.otherUser.id,
           photos: attachments,
           replyToMessageId: replyTo?.messageId,
+          onUploadProgress: onUploadProgress,
         ),
       ];
     } else {
@@ -1856,6 +1866,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
             recipientId: widget.otherUser.id,
             photos: <ChatPhotoAttachment>[attachment],
             replyToMessageId: replyTo?.messageId,
+            onUploadProgress: onUploadProgress,
           );
         }),
       );
@@ -2006,6 +2017,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         }
       },
       child: ChatConversationView(
+        controller: _conversationViewController,
         initialMessages: _messages,
         showingLatestWindow: _showingLatestWindow,
         hasMoreMessages: _hasMoreMessages,

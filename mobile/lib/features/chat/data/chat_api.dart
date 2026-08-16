@@ -475,6 +475,7 @@ final class ChatApi {
     required String recipientId,
     required List<ChatPhotoAttachment> photos,
     String? replyToMessageId,
+    ChatPhotoUploadProgressCallback? onUploadProgress,
   }) async {
     final List<String> mediaAssetIds = <String>[];
 
@@ -490,6 +491,13 @@ final class ChatApi {
             thumbnailBytes: photo.previewBytes,
             width: photo.width,
             height: photo.height,
+            onUploadProgress: (int uploadedBytes, int totalBytes) {
+              onUploadProgress?.call(
+                assetId: photo.assetId,
+                uploadedBytes: uploadedBytes,
+                totalBytes: totalBytes,
+              );
+            },
           );
 
       mediaAssetIds.add(mediaAssetId);
@@ -581,6 +589,7 @@ final class ChatApi {
     int? height,
     Duration? duration,
     Map<String, Object?>? metadata,
+    void Function(int uploadedBytes, int totalBytes)? onUploadProgress,
   }) async {
     if (bytes == null || bytes.isEmpty) {
       throw const ChatApiException('The selected media file is empty.');
@@ -650,11 +659,28 @@ final class ChatApi {
           )
         : <String, String>{'Content-Type': 'image/jpeg'};
 
-    final http.Response uploadResponse = await _client.put(
-      Uri.parse(uploadUrl),
-      headers: uploadHeaders,
-      body: bytes,
+    final bool hasThumbnail =
+        thumbnailUploadUrl != null &&
+        thumbnailBytes != null &&
+        thumbnailBytes.isNotEmpty;
+    final List<Future<http.Response>> uploadFutures = <Future<http.Response>>[
+      _putMediaBytes(
+        url: Uri.parse(uploadUrl),
+        headers: uploadHeaders,
+        bytes: bytes,
+        onUploadProgress: onUploadProgress,
+      ),
+      if (hasThumbnail)
+        _client.put(
+          Uri.parse(thumbnailUploadUrl!),
+          headers: thumbnailUploadHeaders,
+          body: thumbnailBytes!,
+        ),
+    ];
+    final List<http.Response> uploadResponses = await Future.wait(
+      uploadFutures,
     );
+    final http.Response uploadResponse = uploadResponses.first;
 
     if (uploadResponse.statusCode < 200 || uploadResponse.statusCode >= 300) {
       throw ChatApiException(
@@ -663,14 +689,8 @@ final class ChatApi {
       );
     }
 
-    if (thumbnailUploadUrl != null &&
-        thumbnailBytes != null &&
-        thumbnailBytes.isNotEmpty) {
-      final http.Response thumbnailUploadResponse = await _client.put(
-        Uri.parse(thumbnailUploadUrl),
-        headers: thumbnailUploadHeaders,
-        body: thumbnailBytes,
-      );
+    if (hasThumbnail) {
+      final http.Response thumbnailUploadResponse = uploadResponses[1];
 
       if (thumbnailUploadResponse.statusCode < 200 ||
           thumbnailUploadResponse.statusCode >= 300) {
@@ -698,6 +718,41 @@ final class ChatApi {
     }
 
     return mediaAssetId;
+  }
+
+  Future<http.Response> _putMediaBytes({
+    required Uri url,
+    required Map<String, String> headers,
+    required Uint8List bytes,
+    void Function(int uploadedBytes, int totalBytes)? onUploadProgress,
+  }) async {
+    final http.StreamedRequest request = http.StreamedRequest('PUT', url)
+      ..headers.addAll(headers)
+      ..contentLength = bytes.length;
+    final Future<http.StreamedResponse> responseFuture = _client.send(request);
+    int uploadedBytes = 0;
+
+    const int chunkSize = 64 * 1024;
+    final Stream<List<int>> uploadStream =
+        Stream<List<int>>.fromIterable(<Uint8List>[
+          for (int offset = 0; offset < bytes.length; offset += chunkSize)
+            Uint8List.sublistView(
+              bytes,
+              offset,
+              offset + chunkSize < bytes.length
+                  ? offset + chunkSize
+                  : bytes.length,
+            ),
+        ]).map((List<int> chunk) {
+          uploadedBytes += chunk.length;
+          onUploadProgress?.call(uploadedBytes, bytes.length);
+          return chunk;
+        });
+
+    await request.sink.addStream(uploadStream);
+    await request.sink.close();
+
+    return http.Response.fromStream(await responseFuture);
   }
 
   Future<Uri> createMediaAssetAccessUrl({required String mediaAssetId}) async {

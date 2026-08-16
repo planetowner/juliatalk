@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -303,6 +304,47 @@ void main() {
     expect(result!.assets.length, 10);
     expect(result!.collage, isTrue);
   });
+
+  testWidgets(
+    'send keeps its label and includes the loaded thumbnail while pending',
+    (WidgetTester tester) async {
+      final _FakePhotoLibrary library = _FakePhotoLibrary();
+      final Completer<void> sendCompleter = Completer<void>();
+      ChatPhotoSelectionResult? result;
+
+      await tester.pumpWidget(
+        _buildPicker(
+          library: library,
+          onSend: (ChatPhotoSelectionResult value) {
+            result = value;
+            return sendCompleter.future;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _tapPhotoAsset(tester, 'asset-0');
+
+      final Finder sendButton = find.byKey(
+        const ValueKey<String>('photo-picker-send'),
+      );
+      await tester.tap(sendButton);
+      await tester.pump();
+
+      expect(find.text('1 Send'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: sendButton,
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsNothing,
+      );
+      expect(result, isNotNull);
+      expect(result!.previewBytesByAssetId['asset-0'], same(_testPng));
+
+      sendCompleter.complete();
+      await tester.pump();
+    },
+  );
 
   testWidgets(
     'album list changes the visible album without clearing selections',

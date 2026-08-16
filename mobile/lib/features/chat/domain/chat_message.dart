@@ -1,5 +1,12 @@
 import 'dart:typed_data';
 
+typedef ChatPhotoUploadProgressCallback =
+    void Function({
+      required String assetId,
+      required int uploadedBytes,
+      required int totalBytes,
+    });
+
 enum ChatTranslationStatus { none, translating, translated, failed }
 
 enum ChatCallKind { voice, video }
@@ -141,6 +148,9 @@ final class ChatMessage {
     this.translationFailureReason,
     this.replyTo,
     this.photoAttachments = const <ChatPhotoAttachment>[],
+    this.photoUploadPending = false,
+    this.photoUploadedBytes,
+    this.photoUploadTotalBytes,
     this.fileAttachment,
     this.callAttachment,
     this.voiceMemoAttachment,
@@ -162,6 +172,9 @@ final class ChatMessage {
   final String? translationFailureReason;
   final ChatReplyReference? replyTo;
   final List<ChatPhotoAttachment> photoAttachments;
+  final bool photoUploadPending;
+  final int? photoUploadedBytes;
+  final int? photoUploadTotalBytes;
   final ChatFileAttachment? fileAttachment;
   final ChatCallAttachment? callAttachment;
   final ChatVoiceMemoAttachment? voiceMemoAttachment;
@@ -232,6 +245,9 @@ final class ChatMessage {
     String? translationFailureReason,
     ChatReplyReference? replyTo,
     List<ChatPhotoAttachment>? photoAttachments,
+    bool? photoUploadPending,
+    int? photoUploadedBytes,
+    int? photoUploadTotalBytes,
     ChatFileAttachment? fileAttachment,
     ChatCallAttachment? callAttachment,
     ChatVoiceMemoAttachment? voiceMemoAttachment,
@@ -268,6 +284,10 @@ final class ChatMessage {
       photoAttachments: clearPhotoAttachments
           ? const <ChatPhotoAttachment>[]
           : photoAttachments ?? this.photoAttachments,
+      photoUploadPending: photoUploadPending ?? this.photoUploadPending,
+      photoUploadedBytes: photoUploadedBytes ?? this.photoUploadedBytes,
+      photoUploadTotalBytes:
+          photoUploadTotalBytes ?? this.photoUploadTotalBytes,
       fileAttachment: clearFileAttachment
           ? null
           : fileAttachment ?? this.fileAttachment,

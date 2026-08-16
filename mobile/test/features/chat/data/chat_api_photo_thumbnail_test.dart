@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -46,11 +47,13 @@ void main() {
   });
 
   test(
-    'uploads the original and chat thumbnail before completing a photo',
+    'uploads the original and chat thumbnail together before completion',
     () async {
-      final Uint8List originalBytes = Uint8List.fromList(<int>[1, 2, 3]);
+      final Uint8List originalBytes = Uint8List(65537);
       final Uint8List thumbnailBytes = Uint8List.fromList(<int>[4, 5]);
       final List<Uri> requestedUrls = <Uri>[];
+      final List<(String, int, int)> uploadProgress = <(String, int, int)>[];
+      final Completer<void> thumbnailUploadStarted = Completer<void>();
       final MockClient client = MockClient((http.Request request) async {
         requestedUrls.add(request.url);
 
@@ -77,12 +80,16 @@ void main() {
         if (request.url == Uri.parse('https://storage.example.com/original')) {
           expect(request.method, 'PUT');
           expect(request.bodyBytes, originalBytes);
+          await thumbnailUploadStarted.future.timeout(
+            const Duration(seconds: 5),
+          );
           return http.Response('', 200, request: request);
         }
 
         if (request.url == Uri.parse('https://storage.example.com/thumbnail')) {
           expect(request.method, 'PUT');
           expect(request.bodyBytes, thumbnailBytes);
+          thumbnailUploadStarted.complete();
           return http.Response('', 200, request: request);
         }
 
@@ -157,14 +164,31 @@ void main() {
             uploadBytes: originalBytes,
           ),
         ],
+        onUploadProgress:
+            ({
+              required String assetId,
+              required int uploadedBytes,
+              required int totalBytes,
+            }) {
+              uploadProgress.add((assetId, uploadedBytes, totalBytes));
+            },
       );
 
-      expect(requestedUrls, <Uri>[
+      expect(
+        requestedUrls.first,
         Uri.parse('https://api.example.com/media-assets'),
+      );
+      expect(requestedUrls.sublist(1, 3).toSet(), <Uri>{
         Uri.parse('https://storage.example.com/original'),
         Uri.parse('https://storage.example.com/thumbnail'),
+      });
+      expect(requestedUrls.sublist(3), <Uri>[
         Uri.parse('https://api.example.com/media-assets/photo-1/complete'),
         Uri.parse('https://api.example.com/messages'),
+      ]);
+      expect(uploadProgress, <(String, int, int)>[
+        ('local-photo', 65536, originalBytes.length),
+        ('local-photo', originalBytes.length, originalBytes.length),
       ]);
     },
   );

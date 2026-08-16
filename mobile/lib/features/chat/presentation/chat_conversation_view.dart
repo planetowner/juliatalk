@@ -92,6 +92,7 @@ typedef ChatPhotoMessageSender =
       required List<ChatPhotoAttachment> attachments,
       required bool collage,
       ChatReplyReference? replyTo,
+      ChatPhotoUploadProgressCallback? onUploadProgress,
     });
 
 typedef ChatFileMessageSender =
@@ -315,9 +316,28 @@ StrutStyle _buildMessageStrutStyle(TextStyle style) {
   );
 }
 
+final class ChatConversationViewController {
+  _ChatConversationViewState? _state;
+
+  Future<void> prepareInitialCachedPhotos() {
+    return _state?._prepareInitialCachedPhotos() ?? Future<void>.value();
+  }
+
+  void _attach(_ChatConversationViewState state) {
+    _state = state;
+  }
+
+  void _detach(_ChatConversationViewState state) {
+    if (identical(_state, state)) {
+      _state = null;
+    }
+  }
+}
+
 final class ChatConversationView extends StatefulWidget {
   const ChatConversationView({
     super.key,
+    this.controller,
     this.photoLibrary,
     this.initialMessages,
     this.showingLatestWindow = true,
@@ -357,6 +377,7 @@ final class ChatConversationView extends StatefulWidget {
     this.nextLocalMessageId = 1,
   });
 
+  final ChatConversationViewController? controller;
   final ChatPhotoLibrary? photoLibrary;
   final List<ChatMessage>? initialMessages;
   final bool showingLatestWindow;
@@ -495,6 +516,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   void initState() {
     super.initState();
 
+    widget.controller?._attach(this);
     _photoLibrary = widget.photoLibrary ?? PhotoManagerChatPhotoLibrary();
 
     WidgetsBinding.instance.addObserver(this);
@@ -505,6 +527,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   void didUpdateWidget(covariant ChatConversationView oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller?._detach(this);
+      widget.controller?._attach(this);
+    }
+
     if (oldWidget.onCreateMediaAssetAccessUrl !=
         widget.onCreateMediaAssetAccessUrl) {
       _mediaAssetAccessUrlFutures.clear();
@@ -513,6 +540,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
   @override
   void dispose() {
+    widget.controller?._detach(this);
     WidgetsBinding.instance.removeObserver(this);
 
     _messageFocusNode.removeListener(_handleMessageFocusChanged);
@@ -532,6 +560,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _searchFocusNode.dispose();
 
     super.dispose();
+  }
+
+  Future<void> _prepareInitialCachedPhotos() async {
+    await _messageListKey.currentState?.prepareInitialCachedPhotos();
   }
 
   ChatMediaAssetAccessUrlCreator? get _cachedMediaAssetAccessUrlCreator {
@@ -689,6 +721,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         return;
       }
 
+      if (photoLibrary case final ChatPhotoLibraryPreloader preloader) {
+        unawaited(_preloadPhotoLibrary(preloader));
+      }
+
       final ChatPhotoAsset? asset = await photoLibrary.loadLatestPhoto();
       final DateTime? createdAt = asset?.createdAt;
 
@@ -758,6 +794,16 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       });
     } catch (_) {
       // 빠른 전송 조회가 실패해도 첨부 메뉴는 그대로 열어요.
+    }
+  }
+
+  Future<void> _preloadPhotoLibrary(
+    ChatPhotoLibraryPreloader photoLibrary,
+  ) async {
+    try {
+      await photoLibrary.preload();
+    } catch (_) {
+      // 미리 준비하지 못해도 Photo를 누르면 기존 흐름으로 불러와요.
     }
   }
 
@@ -940,18 +986,17 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _heldBottomSurfaceHeight = null;
   }
 
-  // 첨부(사진·카메라·파일) 전송 직후 진행 중인 전환·타이머를 정리하고
-  // 하단 서피스를 닫은 뒤 최신 메시지로 스크롤해요.
   void _dismissComposerAfterAttachmentSend() {
     _stopKeyboardTransition();
-    _stopComposerResizePin();
+    // 하단 서피스가 접히는 동안 최신 메시지의 화면 위치를 유지해요.
+    _startComposerResizePin();
     _bottomSurfaceHoldTimer?.cancel();
 
     _messageFocusNode.unfocus();
 
     setState(_resetBottomSurfaceState);
 
-    _scheduleScrollToBottom(animate: true);
+    _scheduleScrollToBottom(animate: false);
   }
 
   ChatReplyReference? _currentReplyReference() {
@@ -980,49 +1025,87 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   Future<void> _sendSelectedPhotos(ChatPhotoSelectionResult result) async {
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null || result.assets.isEmpty) {
+      return;
+    }
+
+    final ChatReplyReference? replyTo = _currentReplyReference();
+    final List<ChatPhotoAttachment> pendingAttachments = result.assets
+        .map(
+          (ChatPhotoAsset asset) => ChatPhotoAttachment(
+            assetId: asset.id,
+            previewBytes: result.previewBytesByAssetId[asset.id],
+            width: asset.width,
+            height: asset.height,
+          ),
+        )
+        .toList(growable: false);
+    final ChatPhotoMessageSender? sender = widget.onSendPhotoMessages;
+    final List<ChatMessage> pendingMessages = messageListState
+        .addOutgoingPhotoMessages(
+          attachments: pendingAttachments,
+          collage: result.collage,
+          replyTo: replyTo,
+          photoUploadPending: sender != null,
+        );
+
+    _dismissComposerAfterAttachmentSend();
+
+    if (sender != null) {
+      unawaited(
+        _completeSelectedPhotoSend(
+          result: result,
+          sender: sender,
+          pendingMessages: pendingMessages,
+          replyTo: replyTo,
+        ),
+      );
+    }
+  }
+
+  Future<void> _completeSelectedPhotoSend({
+    required ChatPhotoSelectionResult result,
+    required ChatPhotoMessageSender sender,
+    required List<ChatMessage> pendingMessages,
+    required ChatReplyReference? replyTo,
+  }) async {
     final List<ChatPhotoAttachment?> loadedAttachments =
         await Future.wait<ChatPhotoAttachment?>(
           result.assets.map((ChatPhotoAsset asset) async {
-            final ChatPhotoFile? originalFile = await _photoLibrary
-                .loadOriginalFile(assetId: asset.id);
+            try {
+              final ChatPhotoFile? originalFile = await _photoLibrary
+                  .loadOriginalFile(assetId: asset.id);
 
-            if (originalFile == null) {
+              if (originalFile == null) {
+                return null;
+              }
+
+              final Uint8List? previewBytes = await _photoLibrary
+                  .loadMessagePreview(assetId: asset.id);
+
+              return ChatPhotoAttachment(
+                assetId: asset.id,
+                previewBytes: previewBytes ?? originalFile.bytes,
+                width: asset.width,
+                height: asset.height,
+                fileName: originalFile.fileName,
+                mimeType: originalFile.mimeType,
+                sizeBytes: originalFile.sizeBytes,
+                uploadBytes: originalFile.bytes,
+              );
+            } catch (_) {
               return null;
             }
-
-            final Uint8List? previewBytes = await _photoLibrary
-                .loadMessagePreview(assetId: asset.id);
-
-            return ChatPhotoAttachment(
-              assetId: asset.id,
-              previewBytes: previewBytes ?? originalFile.bytes,
-              width: asset.width,
-              height: asset.height,
-              fileName: originalFile.fileName,
-              mimeType: originalFile.mimeType,
-              sizeBytes: originalFile.sizeBytes,
-              uploadBytes: originalFile.bytes,
-            );
           }),
         );
-
-    if (!mounted) {
-      return;
-    }
 
     final List<ChatPhotoAttachment> attachments = loadedAttachments
         .whereType<ChatPhotoAttachment>()
         .toList(growable: false);
 
-    if (attachments.isEmpty) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('The selected photos could not be loaded.'),
-          ),
-        );
-
+    if (!mounted) {
       return;
     }
 
@@ -1032,33 +1115,94 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       return;
     }
 
-    final ChatPhotoMessageSender? sender = widget.onSendPhotoMessages;
-
-    if (sender == null) {
-      messageListState.addOutgoingPhotoMessages(
-        attachments: attachments,
-        collage: result.collage,
+    if (attachments.isEmpty) {
+      messageListState.completeOutgoingPhotoMessages(
+        pendingMessages: pendingMessages,
+        sentMessages: const <ChatMessage>[],
       );
-    } else {
-      try {
-        final List<ChatMessage> messages = await sender(
-          attachments: attachments,
-          collage: result.collage,
-          replyTo: _currentReplyReference(),
-        );
-
-        if (!mounted) {
-          return;
-        }
-
-        messageListState.addMessages(messages);
-      } catch (_) {
-        _showChatOperationFailure('Photo sending failed.');
-        return;
-      }
+      _showChatOperationFailure('The selected photos could not be loaded.');
+      return;
     }
 
-    _dismissComposerAfterAttachmentSend();
+    final Map<String, ChatMessage> pendingMessageByAssetId =
+        <String, ChatMessage>{
+          for (final ChatMessage message in pendingMessages)
+            for (final ChatPhotoAttachment photo in message.photoAttachments)
+              photo.assetId: message,
+        };
+    final Map<String, int> uploadedBytesByAssetId = <String, int>{};
+    final Map<String, int> totalBytesByAssetId = <String, int>{
+      for (final ChatPhotoAttachment photo in attachments)
+        photo.assetId: photo.uploadBytes?.length ?? photo.sizeBytes ?? 0,
+    };
+
+    void updatePendingMessage(ChatMessage pendingMessage) {
+      int uploadedBytes = 0;
+      int totalBytes = 0;
+
+      for (final ChatPhotoAttachment photo in pendingMessage.photoAttachments) {
+        uploadedBytes += uploadedBytesByAssetId[photo.assetId] ?? 0;
+        totalBytes += totalBytesByAssetId[photo.assetId] ?? 0;
+      }
+
+      _messageListKey.currentState?.updateOutgoingPhotoUploadProgress(
+        messageId: pendingMessage.id,
+        uploadedBytes: uploadedBytes,
+        totalBytes: totalBytes,
+      );
+    }
+
+    for (final ChatMessage pendingMessage in pendingMessages) {
+      updatePendingMessage(pendingMessage);
+    }
+
+    try {
+      final List<ChatMessage> messages = await sender(
+        attachments: attachments,
+        collage: result.collage,
+        replyTo: replyTo,
+        onUploadProgress:
+            ({
+              required String assetId,
+              required int uploadedBytes,
+              required int totalBytes,
+            }) {
+              if (!mounted) {
+                return;
+              }
+
+              final ChatMessage? pendingMessage =
+                  pendingMessageByAssetId[assetId];
+
+              if (pendingMessage == null) {
+                return;
+              }
+
+              uploadedBytesByAssetId[assetId] = uploadedBytes;
+              totalBytesByAssetId[assetId] = totalBytes;
+              updatePendingMessage(pendingMessage);
+            },
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _messageListKey.currentState?.completeOutgoingPhotoMessages(
+        pendingMessages: pendingMessages,
+        sentMessages: messages,
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      _messageListKey.currentState?.completeOutgoingPhotoMessages(
+        pendingMessages: pendingMessages,
+        sentMessages: const <ChatMessage>[],
+      );
+      _showChatOperationFailure('Photo sending failed.');
+    }
   }
 
   Future<void> _openQuickPhotoPreview() async {
@@ -1108,7 +1252,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     setState(_clearQuickPhotoPrompt);
 
     await _sendSelectedPhotos(
-      ChatPhotoSelectionResult(assets: <ChatPhotoAsset>[asset], collage: true),
+      ChatPhotoSelectionResult(
+        assets: <ChatPhotoAsset>[asset],
+        collage: true,
+        previewBytesByAssetId: <String, Uint8List>{asset.id: thumbnailBytes},
+      ),
     );
   }
 
@@ -6508,6 +6656,33 @@ final class _MessageListState extends State<_MessageList>
   late List<ChatMessage> _messages;
   late int _nextMessageId;
 
+  Future<void> prepareInitialCachedPhotos() async {
+    await _waitForBottomSettle();
+    if (!mounted) {
+      return;
+    }
+
+    final List<_PhotoMessageImageState> photoStates =
+        <_PhotoMessageImageState>[];
+
+    void collectPhotoStates(Element element) {
+      if (element is StatefulElement &&
+          element.state is _PhotoMessageImageState) {
+        photoStates.add(element.state as _PhotoMessageImageState);
+      }
+
+      element.visitChildren(collectPhotoStates);
+    }
+
+    (context as Element).visitChildren(collectPhotoStates);
+    await Future.wait(
+      photoStates.map(
+        (_PhotoMessageImageState state) =>
+            state.prepareCachedFileForFirstFrame(),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -6584,6 +6759,14 @@ final class _MessageListState extends State<_MessageList>
     }
 
     return completion.future;
+  }
+
+  Future<void> _waitForBottomSettle() {
+    if (!_bottomSettleActive) {
+      return Future<void>.value();
+    }
+
+    return (_bottomSettleCompletion ??= Completer<void>()).future;
   }
 
   void _completeBottomSettle() {
@@ -7126,9 +7309,26 @@ final class _MessageListState extends State<_MessageList>
     final List<String> previousMessageIds = _messages
         .map((ChatMessage message) => message.id)
         .toList(growable: false);
-    _messages = List<ChatMessage>.of(
-      widget.initialMessages ?? const <ChatMessage>[],
-    );
+    final Map<String, ChatMessage> previousMessagesById = <String, ChatMessage>{
+      for (final ChatMessage message in _messages) message.id: message,
+    };
+    final Set<String> nextMessageIds = <String>{
+      for (final ChatMessage message
+          in widget.initialMessages ?? const <ChatMessage>[])
+        message.id,
+    };
+    _messages = <ChatMessage>[
+      for (final ChatMessage message
+          in widget.initialMessages ?? const <ChatMessage>[])
+        if (previousMessagesById[message.id] case final ChatMessage previous)
+          _retainVisiblePhotoPreviews(previous: previous, next: message)
+        else
+          message,
+      for (final ChatMessage message in previousMessagesById.values)
+        if (message.photoUploadPending && !nextMessageIds.contains(message.id))
+          message,
+    ];
+    _messages.sort(compareChatMessages);
     if (!_olderMessagesLoadInProgress && !_newerMessagesLoadInProgress) {
       final Set<String> previousMessageIdSet = previousMessageIds.toSet();
 
@@ -7330,6 +7530,49 @@ final class _MessageListState extends State<_MessageList>
     }
   }
 
+  static ChatMessage _retainVisiblePhotoPreviews({
+    required ChatMessage previous,
+    required ChatMessage next,
+  }) {
+    final List<ChatPhotoAttachment> previousPhotos = previous.photoAttachments;
+    final List<ChatPhotoAttachment> nextPhotos = next.photoAttachments;
+
+    if (previousPhotos.length != nextPhotos.length || nextPhotos.isEmpty) {
+      return next;
+    }
+
+    bool retainedPreview = false;
+    final List<ChatPhotoAttachment> mergedPhotos =
+        List<ChatPhotoAttachment>.generate(nextPhotos.length, (int index) {
+          final ChatPhotoAttachment previousPhoto = previousPhotos[index];
+          final ChatPhotoAttachment nextPhoto = nextPhotos[index];
+
+          if (nextPhoto.previewBytes != null ||
+              previousPhoto.previewBytes == null ||
+              nextPhoto.mediaAssetId == null ||
+              nextPhoto.mediaAssetId != previousPhoto.mediaAssetId) {
+            return nextPhoto;
+          }
+
+          retainedPreview = true;
+          return ChatPhotoAttachment(
+            assetId: nextPhoto.assetId,
+            mediaAssetId: nextPhoto.mediaAssetId,
+            previewBytes: previousPhoto.previewBytes,
+            width: nextPhoto.width,
+            height: nextPhoto.height,
+            fileName: nextPhoto.fileName,
+            mimeType: nextPhoto.mimeType,
+            sizeBytes: nextPhoto.sizeBytes,
+            uploadBytes: nextPhoto.uploadBytes,
+          );
+        }, growable: false);
+
+    return retainedPreview
+        ? next.copyWith(photoAttachments: mergedPhotos)
+        : next;
+  }
+
   void addMessage(ChatMessage message) {
     final List<String> previousMessageIds = _messageIdsSnapshot();
     final bool isNewMessage = !_messages.any(
@@ -7349,7 +7592,10 @@ final class _MessageListState extends State<_MessageList>
       if (existingIndex == -1) {
         _messages.add(message);
       } else {
-        _messages[existingIndex] = message;
+        _messages[existingIndex] = _retainVisiblePhotoPreviews(
+          previous: _messages[existingIndex],
+          next: message,
+        );
       }
 
       _messages.sort(compareChatMessages);
@@ -7382,7 +7628,10 @@ final class _MessageListState extends State<_MessageList>
         if (existingIndex == -1) {
           _messages.add(message);
         } else {
-          _messages[existingIndex] = message;
+          _messages[existingIndex] = _retainVisiblePhotoPreviews(
+            previous: _messages[existingIndex],
+            next: message,
+          );
         }
       }
 
@@ -7402,7 +7651,10 @@ final class _MessageListState extends State<_MessageList>
     }
 
     setState(() {
-      _messages[messageIndex] = message;
+      _messages[messageIndex] = _retainVisiblePhotoPreviews(
+        previous: _messages[messageIndex],
+        next: message,
+      );
       _messages.sort(compareChatMessages);
       _syncMessageClockWith(message);
     });
@@ -7436,55 +7688,188 @@ final class _MessageListState extends State<_MessageList>
     _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
   }
 
-  void addOutgoingPhotoMessages({
+  List<ChatMessage> addOutgoingPhotoMessages({
     required List<ChatPhotoAttachment> attachments,
     required bool collage,
+    ChatReplyReference? replyTo,
+    bool photoUploadPending = false,
   }) {
     if (attachments.isEmpty) {
-      return;
+      return const <ChatMessage>[];
     }
 
     final List<String> previousMessageIds = _messageIdsSnapshot();
+    final List<ChatMessage> messages = <ChatMessage>[];
+    final DateTime baseCreatedAt = DateTime.now();
+
+    if (collage) {
+      messages.add(
+        ChatMessage(
+          id: _nextLocalMessageId(),
+          senderId: widget.currentUserId,
+          recipientId: widget.otherParticipantId,
+          content: '',
+          createdAt: baseCreatedAt,
+          replyTo: replyTo,
+          photoAttachments: List<ChatPhotoAttachment>.unmodifiable(attachments),
+          photoUploadPending: photoUploadPending,
+        ),
+      );
+    } else {
+      for (int index = 0; index < attachments.length; index++) {
+        messages.add(
+          ChatMessage(
+            id: _nextLocalMessageId(),
+            senderId: widget.currentUserId,
+            recipientId: widget.otherParticipantId,
+            content: '',
+            createdAt: baseCreatedAt.add(Duration(seconds: index)),
+            replyTo: replyTo,
+            photoAttachments: <ChatPhotoAttachment>[attachments[index]],
+            photoUploadPending: photoUploadPending,
+          ),
+        );
+      }
+    }
 
     setState(() {
-      final DateTime baseCreatedAt = DateTime.now();
-
-      if (collage) {
-        _messages.add(
-          ChatMessage(
-            id: _nextLocalMessageId(),
-            senderId: widget.currentUserId,
-            recipientId: widget.otherParticipantId,
-            content: '',
-            createdAt: baseCreatedAt,
-            photoAttachments: List<ChatPhotoAttachment>.unmodifiable(
-              attachments,
-            ),
-          ),
-        );
-
-        _messageClock = baseCreatedAt;
-        return;
-      }
-
-      for (int index = 0; index < attachments.length; index++) {
-        final DateTime createdAt = baseCreatedAt.add(Duration(seconds: index));
-
-        _messages.add(
-          ChatMessage(
-            id: _nextLocalMessageId(),
-            senderId: widget.currentUserId,
-            recipientId: widget.otherParticipantId,
-            content: '',
-            createdAt: createdAt,
-            photoAttachments: <ChatPhotoAttachment>[attachments[index]],
-          ),
-        );
-
-        _messageClock = createdAt;
-      }
+      _messages.addAll(messages);
+      _messageClock = messages.last.createdAt;
     });
     _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
+
+    return List<ChatMessage>.unmodifiable(messages);
+  }
+
+  void updateOutgoingPhotoUploadProgress({
+    required String messageId,
+    required int uploadedBytes,
+    required int totalBytes,
+  }) {
+    final int messageIndex = _messages.indexWhere(
+      (ChatMessage message) => message.id == messageId,
+    );
+
+    if (messageIndex == -1 || !_messages[messageIndex].photoUploadPending) {
+      return;
+    }
+
+    setState(() {
+      _messages[messageIndex] = _messages[messageIndex].copyWith(
+        photoUploadedBytes: uploadedBytes,
+        photoUploadTotalBytes: totalBytes,
+      );
+    });
+  }
+
+  void completeOutgoingPhotoMessages({
+    required List<ChatMessage> pendingMessages,
+    required List<ChatMessage> sentMessages,
+  }) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+    final Set<String> pendingMessageIds = pendingMessages
+        .map((ChatMessage message) => message.id)
+        .toSet();
+    final List<ChatMessage> completedMessages = List<ChatMessage>.generate(
+      sentMessages.length,
+      (int index) {
+        final ChatMessage sentMessage = sentMessages[index];
+        ChatMessage? matchingPendingMessage;
+
+        for (final ChatMessage pendingMessage in pendingMessages) {
+          final Set<String> pendingAssetIds = pendingMessage.photoAttachments
+              .map((ChatPhotoAttachment photo) => photo.assetId)
+              .toSet();
+
+          if (sentMessage.photoAttachments.any(
+            (ChatPhotoAttachment photo) =>
+                pendingAssetIds.contains(photo.assetId),
+          )) {
+            matchingPendingMessage = pendingMessage;
+            break;
+          }
+        }
+
+        matchingPendingMessage ??= index < pendingMessages.length
+            ? pendingMessages[index]
+            : null;
+
+        if (matchingPendingMessage == null) {
+          return sentMessage;
+        }
+
+        return _retainPendingPhotoPreviews(
+          pending: matchingPendingMessage,
+          sent: sentMessage,
+        );
+      },
+      growable: false,
+    );
+
+    setState(() {
+      _messages.removeWhere(
+        (ChatMessage message) => pendingMessageIds.contains(message.id),
+      );
+
+      for (final ChatMessage message in completedMessages) {
+        final int existingIndex = _messages.indexWhere(
+          (ChatMessage existingMessage) => existingMessage.id == message.id,
+        );
+
+        if (existingIndex == -1) {
+          _messages.add(message);
+        } else {
+          _messages[existingIndex] = _retainVisiblePhotoPreviews(
+            previous: _messages[existingIndex],
+            next: message,
+          );
+        }
+      }
+
+      _messages.sort(compareChatMessages);
+      _syncMessageClockWithMessages(completedMessages);
+    });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
+  }
+
+  static ChatMessage _retainPendingPhotoPreviews({
+    required ChatMessage pending,
+    required ChatMessage sent,
+  }) {
+    final List<ChatPhotoAttachment> pendingPhotos = pending.photoAttachments;
+    final List<ChatPhotoAttachment> sentPhotos = sent.photoAttachments;
+
+    if (pendingPhotos.length != sentPhotos.length || sentPhotos.isEmpty) {
+      return sent;
+    }
+
+    final List<ChatPhotoAttachment> mergedPhotos =
+        List<ChatPhotoAttachment>.generate(sentPhotos.length, (int index) {
+          final ChatPhotoAttachment pendingPhoto = pendingPhotos[index];
+          final ChatPhotoAttachment sentPhoto = sentPhotos[index];
+
+          if (sentPhoto.previewBytes != null ||
+              pendingPhoto.previewBytes == null) {
+            return sentPhoto;
+          }
+
+          return ChatPhotoAttachment(
+            assetId: sentPhoto.assetId,
+            mediaAssetId: sentPhoto.mediaAssetId,
+            previewBytes: pendingPhoto.previewBytes,
+            width: sentPhoto.width,
+            height: sentPhoto.height,
+            fileName: sentPhoto.fileName,
+            mimeType: sentPhoto.mimeType,
+            sizeBytes: sentPhoto.sizeBytes,
+            uploadBytes: sentPhoto.uploadBytes,
+          );
+        }, growable: false);
+
+    return sent.copyWith(
+      photoAttachments: mergedPhotos,
+      photoUploadPending: false,
+    );
   }
 
   void addOutgoingFileMessage({required String name, required int sizeBytes}) {
@@ -11185,6 +11570,9 @@ final class _IncomingMessageRow extends StatelessWidget {
         messageId: message.id,
         measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
         attachments: message.photoAttachments,
+        isUploading: false,
+        uploadedBytes: null,
+        totalBytes: null,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerLeft,
         onCreateMediaAssetAccessUrl: onCreatePhotoThumbnailAccessUrl,
@@ -12181,6 +12569,9 @@ final class _OutgoingMessageRow extends StatelessWidget {
         messageId: message.id,
         measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
         attachments: message.photoAttachments,
+        isUploading: message.photoUploadPending,
+        uploadedBytes: message.photoUploadedBytes,
+        totalBytes: message.photoUploadTotalBytes,
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerRight,
         onCreateMediaAssetAccessUrl: onCreatePhotoThumbnailAccessUrl,
@@ -12297,6 +12688,9 @@ final class _PhotoMessage extends StatefulWidget {
   const _PhotoMessage({
     required this.messageId,
     required this.attachments,
+    required this.isUploading,
+    required this.uploadedBytes,
+    required this.totalBytes,
     required this.isHighlighted,
     required this.measurementKey,
     required this.pulseAlignment,
@@ -12306,6 +12700,9 @@ final class _PhotoMessage extends StatefulWidget {
 
   final String messageId;
   final List<ChatPhotoAttachment> attachments;
+  final bool isUploading;
+  final int? uploadedBytes;
+  final int? totalBytes;
   final bool isHighlighted;
   final Key measurementKey;
   final Alignment pulseAlignment;
@@ -12424,6 +12821,26 @@ final class _PhotoMessageState extends State<_PhotoMessage>
               key: widget.measurementKey,
               children: [
                 child!,
+                if (widget.isUploading)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: ClipRRect(
+                        borderRadius: const BorderRadius.all(
+                          Radius.circular(14),
+                        ),
+                        child: ColoredBox(
+                          color: AppColors.black.withAlpha(70),
+                          child: _PhotoUploadProgress(
+                            key: ValueKey<String>(
+                              'photo-upload-progress-${widget.messageId}',
+                            ),
+                            uploadedBytes: widget.uploadedBytes,
+                            totalBytes: widget.totalBytes,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 if (progress > 0)
                   Positioned.fill(
                     child: IgnorePointer(
@@ -12457,6 +12874,153 @@ final class _PhotoMessageState extends State<_PhotoMessage>
       },
     );
   }
+}
+
+final class _PhotoUploadProgress extends StatelessWidget {
+  const _PhotoUploadProgress({
+    required this.uploadedBytes,
+    required this.totalBytes,
+    super.key,
+  });
+
+  final int? uploadedBytes;
+  final int? totalBytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final int total = totalBytes ?? 0;
+    final int uploaded = total <= 0
+        ? 0
+        : (uploadedBytes ?? 0).clamp(0, total).toInt();
+    final bool showByteProgress = total > 0 && uploaded < total;
+    final bool showProgressRing = showByteProgress && uploaded > 0;
+
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox.square(
+            dimension: 42,
+            child: Center(
+              child: SizedBox.square(
+                dimension: showProgressRing ? 42 : 34,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: AppColors.black.withAlpha(88),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      if (showProgressRing)
+                        CircularProgressIndicator(
+                          value: uploaded / total,
+                          strokeWidth: 2.2,
+                          color: AppColors.white,
+                          backgroundColor: Colors.transparent,
+                        ),
+                      if (showProgressRing)
+                        const Icon(
+                          Icons.close_rounded,
+                          size: 20,
+                          color: AppColors.white,
+                        )
+                      else
+                        const SizedBox.square(
+                          key: ValueKey<String>('photo-upload-image-icon'),
+                          dimension: 16,
+                          child: CustomPaint(
+                            painter: _PhotoUploadIconPainter(),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (showByteProgress) ...[
+            const SizedBox(height: 5),
+            Text(
+              _formatPhotoUploadProgress(uploaded, total),
+              style: AppTypography.subTypography11.copyWith(
+                color: AppColors.white,
+                fontWeight: AppTypography.semibold,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+final class _PhotoUploadIconPainter extends CustomPainter {
+  const _PhotoUploadIconPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint whitePaint = Paint()..color = AppColors.white;
+    final Paint blackPaint = Paint()..color = AppColors.black;
+    final RRect background = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      const Radius.circular(2.5),
+    );
+
+    canvas.drawRRect(background, whitePaint);
+    canvas.drawCircle(
+      Offset(size.width * 0.72, size.height * 0.31),
+      size.width * 0.075,
+      blackPaint,
+    );
+
+    final Path mountains = Path()
+      ..moveTo(size.width * 0.16, size.height * 0.79)
+      ..lineTo(size.width * 0.42, size.height * 0.49)
+      ..quadraticBezierTo(
+        size.width * 0.46,
+        size.height * 0.44,
+        size.width * 0.51,
+        size.height * 0.49,
+      )
+      ..lineTo(size.width * 0.62, size.height * 0.61)
+      ..lineTo(size.width * 0.72, size.height * 0.50)
+      ..quadraticBezierTo(
+        size.width * 0.77,
+        size.height * 0.44,
+        size.width * 0.82,
+        size.height * 0.50,
+      )
+      ..lineTo(size.width * 0.88, size.height * 0.57)
+      ..lineTo(size.width * 0.88, size.height * 0.81)
+      ..close();
+
+    canvas.drawPath(mountains, blackPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PhotoUploadIconPainter oldDelegate) => false;
+}
+
+String _formatPhotoUploadProgress(int uploadedBytes, int totalBytes) {
+  const List<String> units = <String>['B', 'KB', 'MB', 'GB', 'TB'];
+  int unitIndex = 0;
+  double divisor = 1;
+
+  while (unitIndex < units.length - 1 && totalBytes / divisor >= 1000) {
+    divisor *= 1000;
+    unitIndex++;
+  }
+
+  String formatValue(int bytes) {
+    final double value = bytes / divisor;
+    final String fixed = value.toStringAsFixed(1);
+
+    return fixed.endsWith('.0') ? fixed.substring(0, fixed.length - 2) : fixed;
+  }
+
+  return '${formatValue(uploadedBytes)} / '
+      '${formatValue(totalBytes)} ${units[unitIndex]}';
 }
 
 final class _PhotoMessageCollage extends StatelessWidget {
@@ -12739,6 +13303,46 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   Uri? _resolvedAccessUrl;
   Future<File?>? _cacheFileFuture;
   File? _resolvedCacheFile;
+  String? _preparedCacheFilePath;
+
+  Future<void> prepareCachedFileForFirstFrame() async {
+    if (!mounted ||
+        !widget.persistToDisk ||
+        widget.attachment.previewBytes != null) {
+      return;
+    }
+
+    final String? mediaAssetId = widget.attachment.mediaAssetId;
+    if (mediaAssetId == null) {
+      return;
+    }
+
+    final File? file = await _ChatPhotoDiskCache.findCached(mediaAssetId);
+    if (file == null || !mounted) {
+      return;
+    }
+
+    final RenderObject? renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
+      return;
+    }
+
+    final ImageProvider<Object> imageProvider = _cachedFileImageProvider(
+      file,
+      BoxConstraints.tight(renderObject.size),
+    );
+    await precacheImage(imageProvider, context);
+
+    if (!mounted || widget.attachment.mediaAssetId != mediaAssetId) {
+      return;
+    }
+
+    setState(() {
+      _resolvedCacheFile = file;
+      _cacheFileFuture = null;
+      _preparedCacheFilePath = file.path;
+    });
+  }
 
   static void rememberAccessUrl(String mediaAssetId, Uri url) {
     _resolvedAccessUrls[mediaAssetId] = _ResolvedPhotoAccessUrl(
@@ -12766,6 +13370,8 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   }
 
   void _syncAccessUrlFuture() {
+    _preparedCacheFilePath = null;
+
     if (widget.attachment.previewBytes != null) {
       _accessUrlFuture = null;
       _resolvedAccessUrl = null;
@@ -12938,28 +13544,23 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   Widget _buildCachedFileImage(File file) {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
-        final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
-        final int? cacheWidth = constraints.hasBoundedWidth
-            ? (constraints.maxWidth * pixelRatio).ceil().clamp(1, 1280).toInt()
-            : null;
-        final int? cacheHeight = constraints.hasBoundedHeight
-            ? (constraints.maxHeight * pixelRatio).ceil().clamp(1, 1280).toInt()
-            : null;
+        final ImageProvider<Object> imageProvider = _cachedFileImageProvider(
+          file,
+          constraints,
+        );
 
         return Stack(
           fit: StackFit.expand,
           children: <Widget>[
             _buildPlaceholder(),
-            Image.file(
-              file,
+            Image(
+              image: imageProvider,
               key: ValueKey<String>(widget.imageKey ?? _defaultRemoteImageKey),
               width: widget.width,
               height: widget.height,
               fit: widget.fit,
               gaplessPlayback: true,
               filterQuality: widget.filterQuality,
-              cacheWidth: cacheWidth,
-              cacheHeight: cacheHeight,
               frameBuilder:
                   (
                     BuildContext context,
@@ -12967,7 +13568,8 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
                     int? frame,
                     bool wasSynchronouslyLoaded,
                   ) {
-                    if (wasSynchronouslyLoaded) {
+                    if (wasSynchronouslyLoaded ||
+                        _preparedCacheFilePath == file.path) {
                       return child;
                     }
 
@@ -12994,6 +13596,19 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
     );
   }
 
+  ImageProvider<Object> _cachedFileImageProvider(
+    File file,
+    BoxConstraints constraints,
+  ) {
+    final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    final int? cacheWidth = constraints.hasBoundedWidth
+        ? (constraints.maxWidth * pixelRatio).ceil().clamp(1, 1280).toInt()
+        : null;
+
+    // 두 축을 함께 지정하면 긴 사진이 버블 비율로 눌릴 수 있어요.
+    return ResizeImage.resizeIfNeeded(cacheWidth, null, FileImage(file));
+  }
+
   Widget _buildPlaceholder() {
     return _PhotoMessagePlaceholder(width: widget.width, height: widget.height);
   }
@@ -13018,11 +13633,41 @@ final class _ResolvedPhotoAccessUrl {
 
 final class _ChatPhotoDiskCache {
   static final Map<String, File> _resolvedFiles = <String, File>{};
+  static final Map<String, Future<File?>> _pendingCacheLookups =
+      <String, Future<File?>>{};
   static final Map<String, Future<File?>> _pendingLoads =
       <String, Future<File?>>{};
 
   static File? resolvedFile(String mediaAssetId) {
     return _resolvedFiles[mediaAssetId];
+  }
+
+  static Future<File?> findCached(String mediaAssetId) {
+    final File? resolved = _resolvedFiles[mediaAssetId];
+    if (resolved != null) {
+      return Future<File?>.value(resolved);
+    }
+
+    return _pendingCacheLookups.putIfAbsent(mediaAssetId, () async {
+      try {
+        final Directory cacheDirectory = await getApplicationCacheDirectory();
+        final File file = File(
+          '${cacheDirectory.path}/chat-photo-thumbnails/$mediaAssetId.jpg',
+        );
+
+        final bool exists = await file.exists();
+        if (exists && await file.length() > 0) {
+          _resolvedFiles[mediaAssetId] = file;
+          return file;
+        }
+
+        return null;
+      } catch (_) {
+        return null;
+      } finally {
+        _pendingCacheLookups.remove(mediaAssetId);
+      }
+    });
   }
 
   static Future<File?> load({
@@ -13037,16 +13682,16 @@ final class _ChatPhotoDiskCache {
 
     return _pendingLoads.putIfAbsent(mediaAssetId, () async {
       try {
+        final File? cachedFile = await findCached(mediaAssetId);
+        if (cachedFile != null) {
+          return cachedFile;
+        }
+
         final Directory cacheDirectory = await getApplicationCacheDirectory();
         final Directory photoDirectory = Directory(
           '${cacheDirectory.path}/chat-photo-thumbnails',
         );
         final File file = File('${photoDirectory.path}/$mediaAssetId.jpg');
-
-        if (await file.exists() && await file.length() > 0) {
-          _resolvedFiles[mediaAssetId] = file;
-          return file;
-        }
 
         final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
         final http.Response response = await http.get(accessUrl);

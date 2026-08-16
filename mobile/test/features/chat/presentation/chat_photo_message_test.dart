@@ -143,7 +143,7 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
         createdAt: DateTime(2026, 7, 1, 12, 52),
         photoAttachments: const <ChatPhotoAttachment>[
           ChatPhotoAttachment(
-            assetId: 'refreshed-photo',
+            assetId: 'server-photo',
             mediaAssetId: 'refreshed-photo-media',
             width: 1179,
             height: 2556,
@@ -164,7 +164,88 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
   }
 }
 
+final class _PhotoMessageIdentityHarness extends StatefulWidget {
+  const _PhotoMessageIdentityHarness({super.key});
+
+  @override
+  State<_PhotoMessageIdentityHarness> createState() {
+    return _PhotoMessageIdentityHarnessState();
+  }
+}
+
+final class _PhotoMessageIdentityHarnessState
+    extends State<_PhotoMessageIdentityHarness> {
+  ChatMessage _message = ChatMessage(
+    id: 'local-photo-message',
+    senderId: '1',
+    recipientId: '2',
+    content: '',
+    createdAt: DateTime(2026, 7, 1, 12, 52),
+    photoAttachments: <ChatPhotoAttachment>[
+      ChatPhotoAttachment(
+        assetId: 'stable-photo-preview',
+        previewBytes: _testPng,
+        width: 1200,
+        height: 900,
+      ),
+    ],
+  );
+
+  void replaceWithServerMessage() {
+    setState(() {
+      _message = ChatMessage(
+        id: 'server-photo-message',
+        senderId: '1',
+        recipientId: '2',
+        content: '',
+        createdAt: DateTime(2026, 7, 1, 12, 52),
+        photoAttachments: <ChatPhotoAttachment>[
+          ChatPhotoAttachment(
+            assetId: 'stable-photo-preview',
+            previewBytes: _testPng,
+            width: 1200,
+            height: 900,
+          ),
+        ],
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ChatConversationView(initialMessages: <ChatMessage>[_message]);
+  }
+}
+
 void main() {
+  testWidgets(
+    'photo element stays mounted when the server id replaces the local id',
+    (WidgetTester tester) async {
+      final GlobalKey<_PhotoMessageIdentityHarnessState> harnessKey =
+          GlobalKey<_PhotoMessageIdentityHarnessState>();
+
+      await tester.pumpWidget(
+        MaterialApp(home: _PhotoMessageIdentityHarness(key: harnessKey)),
+      );
+      await tester.pumpAndSettle();
+
+      const ValueKey<String> photoKey = ValueKey<String>(
+        'photo-message-stable-photo-preview-0',
+      );
+      final Element photoElementBeforeCompletion = tester.element(
+        find.byKey(photoKey),
+      );
+
+      harnessKey.currentState!.replaceWithServerMessage();
+      await tester.pump();
+
+      expect(
+        tester.element(find.byKey(photoKey)),
+        photoElementBeforeCompletion,
+      );
+    },
+  );
+
   testWidgets('new incoming photo row fades in at its final position', (
     WidgetTester tester,
   ) async {
@@ -396,7 +477,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final Finder bubbleFinder = find.byKey(
-      const ValueKey<String>('outgoing-bubble-1'),
+      const ValueKey<String>('outgoing-bubble-photo-photo-preview-0'),
     );
 
     expect(bubbleFinder, findsOneWidget);
@@ -428,7 +509,9 @@ void main() {
     await tester.pump();
 
     expect(
-      find.byKey(const ValueKey<String>('photo-upload-progress-1')),
+      find.byKey(
+        const ValueKey<String>('photo-upload-progress-photo-photo-preview-0'),
+      ),
       findsOneWidget,
     );
     expect(
@@ -439,7 +522,7 @@ void main() {
       tester.getSize(
         find.byKey(const ValueKey<String>('photo-upload-image-icon')),
       ),
-      const Size.square(16),
+      const Size.square(15),
     );
     expect(find.text('0 / 998 KB'), findsOneWidget);
 
@@ -461,8 +544,16 @@ void main() {
     final CircularProgressIndicator progressIndicator = tester.widget(
       find.byType(CircularProgressIndicator),
     );
+    expect(
+      tester.getSize(
+        find.byKey(const ValueKey<String>('photo-upload-progress-circle')),
+      ),
+      const Size.square(40),
+    );
     expect(progressIndicator.strokeWidth, 2.2);
     expect(progressIndicator.backgroundColor, Colors.transparent);
+    final Text progressText = tester.widget<Text>(find.text('0.5 / 1.2 MB'));
+    expect(progressText.style?.fontSize, 13);
 
     await tester.pumpWidget(
       _buildPhotoMessageScreen(
@@ -489,7 +580,9 @@ void main() {
     await tester.pump();
 
     expect(
-      find.byKey(const ValueKey<String>('photo-upload-progress-1')),
+      find.byKey(
+        const ValueKey<String>('photo-upload-progress-photo-photo-preview-0'),
+      ),
       findsNothing,
     );
   });

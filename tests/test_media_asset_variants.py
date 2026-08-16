@@ -2,11 +2,11 @@ import asyncio
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from app.routes import media_assets
-from app.schemas import MediaAssetUploadCreate
+from app.routes import media_assets, messages
+from app.schemas import MediaAssetUploadCreate, MessageCreate
 
 
 class _FakeObjectStorage:
@@ -49,6 +49,56 @@ class _FakeSession:
 
 
 class MediaAssetVariantTests(unittest.TestCase):
+    def test_photo_message_completes_uploads_and_creates_message_together(
+        self,
+    ) -> None:
+        first_asset_id = uuid4()
+        second_asset_id = uuid4()
+        current_user = SimpleNamespace(id=uuid4())
+        session = SimpleNamespace()
+        background_tasks = SimpleNamespace()
+        message_data = MessageCreate(
+            recipient_id=uuid4(),
+            message_type="photo",
+            metadata={
+                "media_asset_ids": [str(first_asset_id), str(second_asset_id)],
+            },
+        )
+        expected_message = SimpleNamespace(id=uuid4())
+
+        with (
+            patch.object(
+                messages,
+                "complete_media_asset_upload",
+                new=AsyncMock(),
+            ) as complete_upload,
+            patch.object(
+                messages,
+                "create_message",
+                new=AsyncMock(return_value=expected_message),
+            ) as create_message,
+        ):
+            result = asyncio.run(
+                messages.complete_photo_uploads_and_create_message(
+                    message_data,
+                    background_tasks,
+                    current_user,
+                    session,
+                )
+            )
+
+        self.assertIs(result, expected_message)
+        self.assertEqual(
+            [call.args[0] for call in complete_upload.await_args_list],
+            [first_asset_id, second_asset_id],
+        )
+        create_message.assert_awaited_once_with(
+            message_data,
+            background_tasks,
+            current_user,
+            session,
+        )
+
     def test_photo_upload_prepares_original_and_chat_thumbnail(self) -> None:
         storage = _FakeObjectStorage()
         session = _FakeSession()

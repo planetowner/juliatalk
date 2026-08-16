@@ -491,6 +491,7 @@ final class ChatApi {
             thumbnailBytes: photo.previewBytes,
             width: photo.width,
             height: photo.height,
+            completeUpload: false,
             onUploadProgress: (int uploadedBytes, int totalBytes) {
               onUploadProgress?.call(
                 assetId: photo.assetId,
@@ -504,6 +505,7 @@ final class ChatApi {
     }
 
     final ChatMessage message = await _createMessage(
+      endpointPath: '/messages/photo',
       recipientId: recipientId,
       messageType: 'photo',
       replyToMessageId: replyToMessageId,
@@ -589,13 +591,14 @@ final class ChatApi {
     int? height,
     Duration? duration,
     Map<String, Object?>? metadata,
+    bool completeUpload = true,
     void Function(int uploadedBytes, int totalBytes)? onUploadProgress,
   }) async {
     if (bytes == null || bytes.isEmpty) {
       throw const ChatApiException('The selected media file is empty.');
     }
 
-    // 서버가 발급한 URL로 원본과 채팅용 미리보기를 올린 뒤 완료를 알려요.
+    // 서버가 발급한 URL로 원본과 채팅용 미리보기를 함께 올려요.
     final http.Response createResponse = await _client.post(
       _baseUri.resolve('/media-assets'),
       headers: _jsonHeaders,
@@ -701,20 +704,22 @@ final class ChatApi {
       }
     }
 
-    final http.Response completeResponse = await _client.post(
-      _baseUri.resolve('/media-assets/$mediaAssetId/complete'),
-      headers: _headers,
-    );
-
-    if (completeResponse.statusCode != 200) {
-      throw ChatApiException(
-        _readErrorMessage(
-          completeResponse,
-          fallback:
-              'Media upload completion failed with status code '
-              '${completeResponse.statusCode}.',
-        ),
+    if (completeUpload) {
+      final http.Response completeResponse = await _client.post(
+        _baseUri.resolve('/media-assets/$mediaAssetId/complete'),
+        headers: _headers,
       );
+
+      if (completeResponse.statusCode != 200) {
+        throw ChatApiException(
+          _readErrorMessage(
+            completeResponse,
+            fallback:
+                'Media upload completion failed with status code '
+                '${completeResponse.statusCode}.',
+          ),
+        );
+      }
     }
 
     return mediaAssetId;
@@ -994,6 +999,7 @@ final class ChatApi {
   }
 
   Future<ChatMessage> _createMessage({
+    String endpointPath = '/messages',
     required String recipientId,
     required String messageType,
     String content = '',
@@ -1011,7 +1017,7 @@ final class ChatApi {
     };
 
     final http.Response response = await _client.post(
-      _baseUri.resolve('/messages'),
+      _baseUri.resolve(endpointPath),
       headers: _jsonHeaders,
       body: jsonEncode(body),
     );

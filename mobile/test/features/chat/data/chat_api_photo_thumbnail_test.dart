@@ -47,7 +47,7 @@ void main() {
   });
 
   test(
-    'uploads the original and chat thumbnail together before completion',
+    'uploads the original and thumbnail before one photo message request',
     () async {
       final Uint8List originalBytes = Uint8List(65537);
       final Uint8List thumbnailBytes = Uint8List.fromList(<int>[4, 5]);
@@ -93,23 +93,17 @@ void main() {
           return http.Response('', 200, request: request);
         }
 
-        if (request.url ==
-            Uri.parse(
-              'https://api.example.com/media-assets/photo-1/complete',
-            )) {
-          expect(request.method, 'POST');
-          return http.Response(
-            jsonEncode(<String, Object?>{
-              'media_asset_id': 'photo-1',
-              'upload_status': 'complete',
-            }),
-            200,
-            request: request,
-          );
-        }
-
-        expect(request.url, Uri.parse('https://api.example.com/messages'));
+        expect(
+          request.url,
+          Uri.parse('https://api.example.com/messages/photo'),
+        );
         expect(request.method, 'POST');
+        expect(
+          jsonDecode(request.body),
+          containsPair('metadata', <String, Object?>{
+            'media_asset_ids': <String>['photo-1'],
+          }),
+        );
 
         return http.Response(
           jsonEncode(<String, Object?>{
@@ -183,8 +177,7 @@ void main() {
         Uri.parse('https://storage.example.com/thumbnail'),
       });
       expect(requestedUrls.sublist(3), <Uri>[
-        Uri.parse('https://api.example.com/media-assets/photo-1/complete'),
-        Uri.parse('https://api.example.com/messages'),
+        Uri.parse('https://api.example.com/messages/photo'),
       ]);
       expect(uploadProgress, <(String, int, int)>[
         ('local-photo', 65536, originalBytes.length),

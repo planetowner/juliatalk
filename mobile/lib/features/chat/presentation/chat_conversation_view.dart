@@ -67,6 +67,14 @@ typedef _MessageLongPressCallback =
 
 typedef _MessageBubbleKeyFor = GlobalKey Function(String messageId);
 
+String _messagePresentationId(ChatMessage message) {
+  if (!message.isPhotoMessage) {
+    return message.id;
+  }
+
+  return 'photo-${message.photoAttachments.first.assetId}';
+}
+
 typedef _ReplyQuoteTapCallback =
     Future<void> Function({
       required String replyMessageId,
@@ -1075,15 +1083,16 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         await Future.wait<ChatPhotoAttachment?>(
           result.assets.map((ChatPhotoAsset asset) async {
             try {
-              final ChatPhotoFile? originalFile = await _photoLibrary
+              final Future<ChatPhotoFile?> originalFileFuture = _photoLibrary
                   .loadOriginalFile(assetId: asset.id);
+              final Future<Uint8List?> previewBytesFuture = _photoLibrary
+                  .loadMessagePreview(assetId: asset.id);
+              final ChatPhotoFile? originalFile = await originalFileFuture;
+              final Uint8List? previewBytes = await previewBytesFuture;
 
               if (originalFile == null) {
                 return null;
               }
-
-              final Uint8List? previewBytes = await _photoLibrary
-                  .loadMessagePreview(assetId: asset.id);
 
               return ChatPhotoAttachment(
                 assetId: asset.id,
@@ -7344,12 +7353,16 @@ final class _MessageListState extends State<_MessageList>
     } else {
       _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
     }
+    final Set<String> currentMessagePresentationIds = _messages
+        .map(_messagePresentationId)
+        .toSet();
+    _messageBubbleKeys.removeWhere(
+      (String presentationId, GlobalKey _) =>
+          !currentMessagePresentationIds.contains(presentationId),
+    );
     final Set<String> currentMessageIds = _messages
         .map((ChatMessage message) => message.id)
         .toSet();
-    _messageBubbleKeys.removeWhere(
-      (String messageId, GlobalKey _) => !currentMessageIds.contains(messageId),
-    );
     _incomingPhotoRevealStartedAt.removeWhere(
       (String messageId, DateTime _) => !currentMessageIds.contains(messageId),
     );
@@ -7556,7 +7569,7 @@ final class _MessageListState extends State<_MessageList>
 
           retainedPreview = true;
           return ChatPhotoAttachment(
-            assetId: nextPhoto.assetId,
+            assetId: previousPhoto.assetId,
             mediaAssetId: nextPhoto.mediaAssetId,
             previewBytes: previousPhoto.previewBytes,
             width: nextPhoto.width,
@@ -7848,13 +7861,12 @@ final class _MessageListState extends State<_MessageList>
           final ChatPhotoAttachment pendingPhoto = pendingPhotos[index];
           final ChatPhotoAttachment sentPhoto = sentPhotos[index];
 
-          if (sentPhoto.previewBytes != null ||
-              pendingPhoto.previewBytes == null) {
+          if (pendingPhoto.previewBytes == null) {
             return sentPhoto;
           }
 
           return ChatPhotoAttachment(
-            assetId: sentPhoto.assetId,
+            assetId: pendingPhoto.assetId,
             mediaAssetId: sentPhoto.mediaAssetId,
             previewBytes: pendingPhoto.previewBytes,
             width: sentPhoto.width,
@@ -10166,7 +10178,9 @@ final class _MessageListState extends State<_MessageList>
     ];
 
     return KeyedSubtree(
-      key: ValueKey<String>('timeline-group-${groupRange.startMessageId}'),
+      key: ValueKey<String>(
+        'timeline-group-${_messagePresentationId(group.messages.first)}',
+      ),
       child: timeline.length == 1
           ? timeline.single
           : Column(mainAxisSize: MainAxisSize.min, children: timeline),
@@ -11419,7 +11433,9 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   },
                   onMessageLongPress: onMessageLongPress,
                   onReplyQuoteTap: onReplyQuoteTap,
-                  bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
+                  bubbleInteractionKey: messageBubbleKeyFor(
+                    _messagePresentationId(messages[index]),
+                  ),
                 ),
                 if (index != messages.length - 1) const SizedBox(height: 5),
               ],
@@ -12499,7 +12515,9 @@ final class _OutgoingMessageGroup extends StatelessWidget {
             onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
             onMessageLongPress: onMessageLongPress,
             onReplyQuoteTap: onReplyQuoteTap,
-            bubbleInteractionKey: messageBubbleKeyFor(messages[index].id),
+            bubbleInteractionKey: messageBubbleKeyFor(
+              _messagePresentationId(messages[index]),
+            ),
           ),
           if (messages[index].id == latestReadMessageId) ...[
             const SizedBox(height: 3),
@@ -12565,9 +12583,10 @@ final class _OutgoingMessageRow extends StatelessWidget {
     final Widget content;
 
     if (message.isPhotoMessage) {
+      final String presentationId = _messagePresentationId(message);
       content = _PhotoMessage(
-        messageId: message.id,
-        measurementKey: ValueKey<String>('outgoing-bubble-${message.id}'),
+        messageId: presentationId,
+        measurementKey: ValueKey<String>('outgoing-bubble-$presentationId'),
         attachments: message.photoAttachments,
         isUploading: message.photoUploadPending,
         uploadedBytes: message.photoUploadedBytes,
@@ -12900,10 +12919,11 @@ final class _PhotoUploadProgress extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox.square(
-            dimension: 42,
+            dimension: 40,
             child: Center(
               child: SizedBox.square(
-                dimension: showProgressRing ? 42 : 34,
+                key: const ValueKey<String>('photo-upload-progress-circle'),
+                dimension: showProgressRing ? 40 : 32,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: AppColors.black.withAlpha(88),
@@ -12922,13 +12942,13 @@ final class _PhotoUploadProgress extends StatelessWidget {
                       if (showProgressRing)
                         const Icon(
                           Icons.close_rounded,
-                          size: 20,
+                          size: 18,
                           color: AppColors.white,
                         )
                       else
                         const SizedBox.square(
                           key: ValueKey<String>('photo-upload-image-icon'),
-                          dimension: 16,
+                          dimension: 15,
                           child: CustomPaint(
                             painter: _PhotoUploadIconPainter(),
                           ),
@@ -12940,10 +12960,10 @@ final class _PhotoUploadProgress extends StatelessWidget {
             ),
           ),
           if (showByteProgress) ...[
-            const SizedBox(height: 5),
+            const SizedBox(height: 3),
             Text(
               _formatPhotoUploadProgress(uploaded, total),
-              style: AppTypography.subTypography11.copyWith(
+              style: AppTypography.typography7.copyWith(
                 color: AppColors.white,
                 fontWeight: AppTypography.semibold,
               ),

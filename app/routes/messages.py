@@ -49,6 +49,7 @@ from app.models import (
     User,
 )
 from app.notifications import send_message_notification
+from app.routes.media_assets import complete_media_asset_upload
 from app.schemas import (
     CallOutcomeUpdate,
     MessageCreate,
@@ -1122,6 +1123,41 @@ async def translate_and_publish_message(message_id: UUID) -> None:
     await send_to_direct_participants(
         direct_conversation,
         websocket_event,
+    )
+
+
+@router.post(
+    "/photo",
+    response_model=MessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def complete_photo_uploads_and_create_message(
+    message_data: MessageCreate,
+    background_tasks: BackgroundTasks,
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+) -> MessageRead:
+    if message_data.message_type != "photo":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="message_type must be photo",
+        )
+
+    validate_message_metadata("photo", message_data.metadata)
+    assert message_data.metadata is not None
+
+    for media_asset_id in require_media_asset_ids(message_data.metadata):
+        await complete_media_asset_upload(
+            media_asset_id,
+            current_user,
+            session,
+        )
+
+    return await create_message(
+        message_data,
+        background_tasks,
+        current_user,
+        session,
     )
 
 

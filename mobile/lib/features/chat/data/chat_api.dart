@@ -19,6 +19,7 @@ void _logPhotoSendTiming(
   int? photoIndex,
   int? originalBytes,
   int? previewBytes,
+  int? uploadWorkers,
 }) {
   final List<String> fields = <String>[
     '[photo-send]',
@@ -28,6 +29,7 @@ void _logPhotoSendTiming(
     if (photoIndex != null) 'photo_index=$photoIndex',
     if (originalBytes != null) 'original_bytes=$originalBytes',
     if (previewBytes != null) 'preview_bytes=$previewBytes',
+    if (uploadWorkers != null) 'upload_workers=$uploadWorkers',
   ];
   recordPhotoSendDiagnostic(fields.join(' '));
 }
@@ -67,6 +69,7 @@ final class ChatApi {
   final Uri _baseUri;
   final String _accessToken;
 
+  static const int _maxConcurrentPhotoUploads = 3;
   static const Duration _conversationRequestTimeout = Duration(seconds: 15);
   Map<String, String> get _headers {
     return <String, String>{
@@ -500,40 +503,57 @@ final class ChatApi {
   }) async {
     final Stopwatch totalStopwatch = Stopwatch()..start();
     final Stopwatch uploadsStopwatch = Stopwatch()..start();
-    final List<String> mediaAssetIds = <String>[];
+    final List<String?> resolvedMediaAssetIds = List<String?>.filled(
+      photos.length,
+      null,
+    );
+    int nextPhotoIndex = 0;
 
-    for (int index = 0; index < photos.length; index += 1) {
-      final ChatPhotoAttachment photo = photos[index];
-      final String mediaAssetId =
-          photo.mediaAssetId ??
-          await _uploadMediaAsset(
-            kind: 'photo',
-            fileName: photo.fileName ?? '${photo.assetId}.jpg',
-            mimeType: photo.mimeType ?? 'image/jpeg',
-            sizeBytes: photo.sizeBytes ?? photo.uploadBytes?.length ?? 0,
-            bytes: photo.uploadBytes,
-            thumbnailBytes: photo.previewBytes,
-            width: photo.width,
-            height: photo.height,
-            completeUpload: false,
-            photoIndex: index + 1,
-            photoCount: photos.length,
-            onUploadProgress: (int uploadedBytes, int totalBytes) {
-              onUploadProgress?.call(
-                assetId: photo.assetId,
-                uploadedBytes: uploadedBytes,
-                totalBytes: totalBytes,
-              );
-            },
-          );
-
-      mediaAssetIds.add(mediaAssetId);
+    Future<void> uploadNextPhoto() async {
+      while (nextPhotoIndex < photos.length) {
+        final int index = nextPhotoIndex;
+        nextPhotoIndex += 1;
+        final ChatPhotoAttachment photo = photos[index];
+        resolvedMediaAssetIds[index] =
+            photo.mediaAssetId ??
+            await _uploadMediaAsset(
+              kind: 'photo',
+              fileName: photo.fileName ?? '${photo.assetId}.jpg',
+              mimeType: photo.mimeType ?? 'image/jpeg',
+              sizeBytes: photo.sizeBytes ?? photo.uploadBytes?.length ?? 0,
+              bytes: photo.uploadBytes,
+              thumbnailBytes: photo.previewBytes,
+              width: photo.width,
+              height: photo.height,
+              completeUpload: false,
+              photoIndex: index + 1,
+              photoCount: photos.length,
+              onUploadProgress: (int uploadedBytes, int totalBytes) {
+                onUploadProgress?.call(
+                  assetId: photo.assetId,
+                  uploadedBytes: uploadedBytes,
+                  totalBytes: totalBytes,
+                );
+              },
+            );
+      }
     }
+
+    final int uploadWorkerCount = photos.length < _maxConcurrentPhotoUploads
+        ? photos.length
+        : _maxConcurrentPhotoUploads;
+    await Future.wait<void>(
+      List<Future<void>>.generate(uploadWorkerCount, (_) => uploadNextPhoto()),
+    );
+    final List<String> mediaAssetIds = resolvedMediaAssetIds
+        .map((String? mediaAssetId) => mediaAssetId!)
+        .toList(growable: false);
     uploadsStopwatch.stop();
     _logPhotoSendTiming(
       'asset_uploads',
       uploadsStopwatch,
       photoCount: photos.length,
+      uploadWorkers: uploadWorkerCount,
       originalBytes: photos.fold<int>(
         0,
         (int total, ChatPhotoAttachment photo) =>
@@ -781,7 +801,7 @@ final class ChatApi {
           stopwatch,
           photoCount: photoCount,
           photoIndex: photoIndex,
-          previewBytes: thumbnailBytes!.length,
+          previewBytes: thumbnailBytes.length,
         );
       }
 

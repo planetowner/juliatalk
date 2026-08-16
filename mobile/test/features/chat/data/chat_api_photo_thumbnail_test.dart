@@ -185,4 +185,148 @@ void main() {
       ]);
     },
   );
+
+  test(
+    'uploads at most three photos concurrently and preserves order',
+    () async {
+      final List<Completer<void>> uploadStarted =
+          List<Completer<void>>.generate(4, (_) => Completer<void>());
+      final List<Completer<void>> releaseUpload =
+          List<Completer<void>>.generate(4, (_) => Completer<void>());
+      int activeUploads = 0;
+      int maxActiveUploads = 0;
+      List<String>? requestedMediaAssetIds;
+
+      final MockClient client = MockClient((http.Request request) async {
+        if (request.url == Uri.parse('https://api.example.com/media-assets')) {
+          final Map<String, dynamic> body =
+              jsonDecode(request.body) as Map<String, dynamic>;
+          final String fileName = body['file_name'] as String;
+          final int photoNumber = <String, int>{
+            'photo-1.jpg': 1,
+            'photo-2.jpg': 2,
+            'photo-3.jpg': 3,
+            'photo-4.jpg': 4,
+          }[fileName]!;
+
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'media_asset_id': 'photo-$photoNumber',
+              'storage_key': 'original/photo-$photoNumber.jpg',
+              'upload_url': 'https://storage.example.com/$photoNumber',
+              'upload_headers': <String, String>{'Content-Type': 'image/jpeg'},
+              'expires_in_seconds': 900,
+            }),
+            201,
+            request: request,
+          );
+        }
+
+        if (request.url.host == 'storage.example.com') {
+          final int photoIndex = int.parse(request.url.pathSegments.single) - 1;
+          activeUploads += 1;
+          if (activeUploads > maxActiveUploads) {
+            maxActiveUploads = activeUploads;
+          }
+          uploadStarted[photoIndex].complete();
+          await releaseUpload[photoIndex].future.timeout(
+            const Duration(seconds: 5),
+          );
+          activeUploads -= 1;
+          return http.Response('', 200, request: request);
+        }
+
+        expect(
+          request.url,
+          Uri.parse('https://api.example.com/messages/photo'),
+        );
+        final Map<String, dynamic> body =
+            jsonDecode(request.body) as Map<String, dynamic>;
+        final Map<String, dynamic> metadata =
+            body['metadata'] as Map<String, dynamic>;
+        requestedMediaAssetIds = List<String>.from(
+          metadata['media_asset_ids'] as List<dynamic>,
+        );
+
+        return http.Response(
+          jsonEncode(<String, Object?>{
+            'id': 'message-1',
+            'sender_id': 'current-user',
+            'recipient_id': 'other-user',
+            'content': '',
+            'message_type': 'photo',
+            'metadata': <String, Object?>{
+              'photos': List<Map<String, Object?>>.generate(
+                4,
+                (int index) => <String, Object?>{
+                  'media_asset_id': 'photo-${index + 1}',
+                  'asset_id': 'photo-${index + 1}',
+                  'width': 1200,
+                  'height': 900,
+                  'file_name': 'photo-${index + 1}.jpg',
+                  'mime_type': 'image/jpeg',
+                  'size_bytes': index + 1,
+                },
+              ),
+            },
+            'created_at': '2026-08-16T04:00:00Z',
+            'edited_at': null,
+            'read_at': null,
+            'translation_status': 'none',
+            'translated_content': null,
+            'source_language': null,
+            'translated_language': null,
+            'reply_to': null,
+          }),
+          201,
+          request: request,
+        );
+      });
+      final ChatApi chatApi = ChatApi(
+        client: client,
+        baseUri: Uri.parse('https://api.example.com'),
+        accessToken: 'test-token',
+      );
+      final Future<ChatMessage> sendFuture = chatApi.sendPhotoMessage(
+        recipientId: 'other-user',
+        photos: List<ChatPhotoAttachment>.generate(
+          4,
+          (int index) => ChatPhotoAttachment(
+            assetId: 'local-photo-${index + 1}',
+            width: 1200,
+            height: 900,
+            fileName: 'photo-${index + 1}.jpg',
+            mimeType: 'image/jpeg',
+            sizeBytes: index + 1,
+            uploadBytes: Uint8List(index + 1),
+          ),
+        ),
+      );
+
+      await Future.wait<void>(<Future<void>>[
+        uploadStarted[0].future,
+        uploadStarted[1].future,
+        uploadStarted[2].future,
+      ]).timeout(const Duration(seconds: 5));
+      expect(uploadStarted[3].isCompleted, isFalse);
+      expect(maxActiveUploads, 3);
+
+      releaseUpload[0].complete();
+      await uploadStarted[3].future.timeout(const Duration(seconds: 5));
+      expect(maxActiveUploads, 3);
+
+      releaseUpload[1].complete();
+      releaseUpload[2].complete();
+      releaseUpload[3].complete();
+      await sendFuture.timeout(const Duration(seconds: 5));
+
+      expect(activeUploads, 0);
+      expect(requestedMediaAssetIds, <String>[
+        'photo-1',
+        'photo-2',
+        'photo-3',
+        'photo-4',
+      ]);
+    },
+  );
 }

@@ -116,6 +116,9 @@ final class _PhotoRefreshHarness extends StatefulWidget {
 }
 
 final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
+  final Uint8List completedPreviewBytes = Uint8List.fromList(_testPng);
+  final Uint8List serverPreviewBytes = Uint8List.fromList(_testPng);
+
   ChatMessage _message = ChatMessage(
     id: 'refreshed-photo-message',
     senderId: '1',
@@ -145,7 +148,7 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
           ChatPhotoAttachment(
             assetId: 'refreshed-photo',
             mediaAssetId: 'refreshed-photo-media',
-            previewBytes: _testPng,
+            previewBytes: completedPreviewBytes,
             width: 1179,
             height: 2556,
           ),
@@ -166,7 +169,7 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
           ChatPhotoAttachment(
             assetId: 'server-photo',
             mediaAssetId: 'refreshed-photo-media',
-            previewBytes: Uint8List.fromList(_testPng),
+            previewBytes: serverPreviewBytes,
             width: 1179,
             height: 2556,
           ),
@@ -432,33 +435,65 @@ void main() {
     );
   });
 
-  testWidgets(
-    'a sent photo keeps its rendered image when the parent refreshes it',
-    (WidgetTester tester) async {
-      final GlobalKey<_PhotoRefreshHarnessState> harnessKey =
-          GlobalKey<_PhotoRefreshHarnessState>();
+  testWidgets('a sent photo keeps its element while upgrading its preview', (
+    WidgetTester tester,
+  ) async {
+    final GlobalKey<_PhotoRefreshHarnessState> harnessKey =
+        GlobalKey<_PhotoRefreshHarnessState>();
 
-      await tester.pumpWidget(
-        MaterialApp(home: _PhotoRefreshHarness(key: harnessKey)),
-      );
-      await tester.pump();
+    await tester.pumpWidget(
+      MaterialApp(home: _PhotoRefreshHarness(key: harnessKey)),
+    );
+    await tester.pump();
 
-      const ValueKey<String> previewKey = ValueKey<String>(
-        'photo-message-refreshed-photo-0',
-      );
-      expect(find.byKey(previewKey), findsOneWidget);
+    const ValueKey<String> previewKey = ValueKey<String>(
+      'photo-message-refreshed-photo-0',
+    );
+    expect(find.byKey(previewKey), findsOneWidget);
+    final Element initialImageElement = tester.element(find.byKey(previewKey));
+    expect(
+      identical(
+        (tester.widget<Image>(find.byKey(previewKey)).image as MemoryImage)
+            .bytes,
+        _testPng,
+      ),
+      isTrue,
+    );
 
-      harnessKey.currentState!.completeWithLocalPreview();
-      await tester.pump();
+    harnessKey.currentState!.completeWithLocalPreview();
+    await tester.pump();
 
-      expect(find.byKey(previewKey), findsOneWidget);
+    expect(find.byKey(previewKey), findsOneWidget);
+    expect(
+      identical(tester.element(find.byKey(previewKey)), initialImageElement),
+      isTrue,
+    );
+    expect(
+      identical(
+        (tester.widget<Image>(find.byKey(previewKey)).image as MemoryImage)
+            .bytes,
+        harnessKey.currentState!.completedPreviewBytes,
+      ),
+      isTrue,
+    );
 
-      harnessKey.currentState!.replaceWithServerMessage();
-      await tester.pump();
+    harnessKey.currentState!.replaceWithServerMessage();
+    await tester.pump();
 
-      expect(find.byKey(previewKey), findsOneWidget);
-    },
-  );
+    expect(find.byKey(previewKey), findsOneWidget);
+    expect(
+      identical(tester.element(find.byKey(previewKey)), initialImageElement),
+      isTrue,
+    );
+    expect(
+      identical(
+        (tester.widget<Image>(find.byKey(previewKey)).image as MemoryImage)
+            .bytes,
+        harnessKey.currentState!.serverPreviewBytes,
+      ),
+      isTrue,
+    );
+  });
 
   testWidgets('incoming photo messages render as incoming media bubbles', (
     WidgetTester tester,

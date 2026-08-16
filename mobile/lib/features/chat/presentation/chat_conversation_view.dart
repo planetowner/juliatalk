@@ -7659,7 +7659,7 @@ final class _MessageListState extends State<_MessageList>
           return ChatPhotoAttachment(
             assetId: previousPhoto.assetId,
             mediaAssetId: nextPhoto.mediaAssetId,
-            previewBytes: previousPhoto.previewBytes,
+            previewBytes: nextPhoto.previewBytes ?? previousPhoto.previewBytes,
             width: nextPhoto.width,
             height: nextPhoto.height,
             fileName: nextPhoto.fileName,
@@ -7956,7 +7956,7 @@ final class _MessageListState extends State<_MessageList>
           return ChatPhotoAttachment(
             assetId: pendingPhoto.assetId,
             mediaAssetId: sentPhoto.mediaAssetId,
-            previewBytes: pendingPhoto.previewBytes,
+            previewBytes: sentPhoto.previewBytes ?? pendingPhoto.previewBytes,
             width: sentPhoto.width,
             height: sentPhoto.height,
             fileName: sentPhoto.fileName,

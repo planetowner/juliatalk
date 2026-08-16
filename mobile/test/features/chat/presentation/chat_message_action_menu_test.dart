@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
@@ -43,9 +45,9 @@ double _gapBetweenMessageAndComposer(
       tester.getRect(messageFinder).bottom;
 }
 
-  // 목록을 실제 대화의 마지막 메시지가 보이는 맨 아래로 옮겨요.
-  // 초기 화면은 맨 위(오래된 메시지)에서 시작하므로, 최신 메시지를
-  // 기준으로 검증하는 테스트는 먼저 이 헬퍼로 하단으로 내려가요.
+// 목록을 실제 대화의 마지막 메시지가 보이는 맨 아래로 옮겨요.
+// 초기 화면은 맨 위(오래된 메시지)에서 시작하므로, 최신 메시지를
+// 기준으로 검증하는 테스트는 먼저 이 헬퍼로 하단으로 내려가요.
 Future<void> _scrollChatToBottom(WidgetTester tester) async {
   await tester.drag(
     find.byKey(const ValueKey<String>('message-list')),
@@ -64,8 +66,8 @@ Future<void> _showMessage(WidgetTester tester, Finder messageFinder) async {
       return;
     }
 
-  // 목록이 최신 위치에서 시작하므로 손가락을 아래로 움직여
-  // 과거 메시지 방향으로 스크롤해요.
+    // 목록이 최신 위치에서 시작하므로 손가락을 아래로 움직여
+    // 과거 메시지 방향으로 스크롤해요.
     await tester.drag(listFinder, const Offset(0, 300));
     await tester.pumpAndSettle();
   }
@@ -632,6 +634,70 @@ void main() {
     expect(find.byIcon(Icons.emoji_emotions_outlined), findsNothing);
   });
 
+  testWidgets('text send ignores repeated taps while the request is pending', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    final Completer<ChatMessage> sendCompleter = Completer<ChatMessage>();
+    final List<String> sentContents = <String>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatConversationView(
+          initialMessages: const <ChatMessage>[],
+          currentUserId: 'current-user',
+          otherParticipantId: 'other-user',
+          initialClock: DateTime(2026, 8, 16, 12, 48),
+          onSendTextMessage:
+              ({required String content, ChatReplyReference? replyTo}) {
+                sentContents.add(content);
+                return sendCompleter.future;
+              },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey<String>('message-input')),
+      'Hello',
+    );
+    await tester.pumpAndSettle();
+
+    final Finder sendButton = find.byKey(
+      const ValueKey<String>('message-send'),
+    );
+    await tester.tap(sendButton);
+    await tester.tap(sendButton);
+    await tester.pump();
+
+    expect(sentContents, <String>['Hello']);
+
+    final InkWell pendingSendInkWell = tester.widget<InkWell>(
+      find.descendant(of: sendButton, matching: find.byType(InkWell)),
+    );
+    expect(pendingSendInkWell.onTap, isNull);
+
+    sendCompleter.complete(
+      ChatMessage(
+        id: 'sent-message',
+        senderId: 'current-user',
+        recipientId: 'other-user',
+        content: 'Hello',
+        createdAt: DateTime(2026, 8, 16, 12, 48),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey<String>('message-send')), findsNothing);
+    expect(find.byKey(const ValueKey<String>('message-voice')), findsOneWidget);
+  });
+
   testWidgets(
     'reply composer uses a transparent input without extra action buttons',
     (WidgetTester tester) async {
@@ -1159,7 +1225,7 @@ void main() {
       tester.getCenter(messageListFinder),
     );
 
-      // 첫 이동으로 터치 슬롭을 넘어 실제 스크롤 드래그를 시작해요.
+    // 첫 이동으로 터치 슬롭을 넘어 실제 스크롤 드래그를 시작해요.
     await gesture.moveBy(const Offset(0, 30));
     await tester.pump();
 
@@ -1292,8 +1358,8 @@ void main() {
   testWidgets('tapping an empty chat area dismisses the keyboard', (
     WidgetTester tester,
   ) async {
-      // 모든 메시지가 화면 안에 들어와 목록 하단에
-      // 실제 빈 공간이 생기도록 충분히 높은 화면을 사용해요.
+    // 모든 메시지가 화면 안에 들어와 목록 하단에
+    // 실제 빈 공간이 생기도록 충분히 높은 화면을 사용해요.
     await tester.binding.setSurfaceSize(const Size(420, 2600));
 
     addTearDown(() async {
@@ -2151,7 +2217,7 @@ void main() {
 
     expect(editableText.controller.text, '작성 중인 메시지');
 
-      // 첨부 패널 상태의 같은 버튼은 × 역할을 해요.
+    // 첨부 패널 상태의 같은 버튼은 × 역할을 해요.
     await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
     await tester.pumpAndSettle();
 

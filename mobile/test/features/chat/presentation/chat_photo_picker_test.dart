@@ -327,6 +327,13 @@ void main() {
       final Finder sendButton = find.byKey(
         const ValueKey<String>('photo-picker-send'),
       );
+      final InkWell sendInkWell = tester.widget<InkWell>(
+        find.descendant(of: sendButton, matching: find.byType(InkWell)),
+      );
+
+      expect(sendInkWell.splashFactory, same(NoSplash.splashFactory));
+      expect(sendInkWell.highlightColor, Colors.transparent);
+
       await tester.tap(sendButton);
       await tester.pump();
 

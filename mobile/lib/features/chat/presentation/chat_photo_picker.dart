@@ -1108,6 +1108,8 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
                 borderRadius: const BorderRadius.all(Radius.circular(22)),
                 clipBehavior: Clip.antiAlias,
                 child: InkWell(
+                  splashFactory: NoSplash.splashFactory,
+                  highlightColor: Colors.transparent,
                   onTap: canSend
                       ? () {
                           unawaited(_sendSelection());

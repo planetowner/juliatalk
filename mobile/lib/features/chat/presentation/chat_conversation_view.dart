@@ -508,6 +508,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   bool _pinBottomDuringComposerResize = false;
   bool _pinBottomAfterKeyboardDismiss = false;
   bool _postSendBottomSettlePending = false;
+  bool _textMessageSending = false;
 
   bool _attachmentPanelOpen = false;
   bool _photoPickerOpen = false;
@@ -2568,7 +2569,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   Future<void> _sendMessage() async {
-    if (_editingMessage != null) {
+    if (_editingMessage != null || _textMessageSending) {
       return;
     }
 
@@ -2590,7 +2591,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     _stopKeyboardTransition();
     _stopComposerResizePin();
-    setState(_markPostSendBottomSettlePending);
+    setState(() {
+      _textMessageSending = true;
+      _markPostSendBottomSettlePending();
+    });
 
     final ChatTextMessageSender? sender = widget.onSendTextMessage;
 
@@ -2604,6 +2608,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         );
 
         if (!mounted) {
+          _textMessageSending = false;
           return;
         }
 
@@ -2611,6 +2616,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       } catch (_) {
         if (mounted) {
           setState(() {
+            _textMessageSending = false;
             _pinBottomAfterKeyboardDismiss = false;
             _postSendBottomSettlePending = false;
           });
@@ -2624,6 +2630,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     _messageController.clear();
 
     setState(() {
+      _textMessageSending = false;
       _replyingToMessage = null;
       _replyingToContent = null;
     });
@@ -3121,9 +3128,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                                   attachmentPanelOpen: _attachmentPanelOpen,
                                   onCancelReply: _cancelReply,
                                   onCancelEdit: _cancelEdit,
-                                  onSend: () {
-                                    unawaited(_sendMessage());
-                                  },
+                                  onSend: _textMessageSending
+                                      ? null
+                                      : () {
+                                          unawaited(_sendMessage());
+                                        },
                                   onSaveEdit: () {
                                     unawaited(_saveEdit());
                                   },
@@ -16261,7 +16270,7 @@ final class _MessageComposer extends StatelessWidget {
 
   final VoidCallback onCancelReply;
   final VoidCallback onCancelEdit;
-  final VoidCallback onSend;
+  final VoidCallback? onSend;
   final VoidCallback onSaveEdit;
   final ValueChanged<String> onTextChanged;
   final VoidCallback onToggleAttachmentPanel;
@@ -16752,7 +16761,7 @@ final class _ComposerCircleButton extends StatelessWidget {
   final double iconSize;
   final Color backgroundColor;
   final Color foregroundColor;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {

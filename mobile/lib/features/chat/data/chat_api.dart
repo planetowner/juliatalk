@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../../auth/domain/app_user.dart';
@@ -10,6 +11,26 @@ import '../domain/chat_message.dart';
 import 'chat_api_exception.dart';
 import 'chat_realtime_event_state.dart';
 import 'device_link_preview_fetcher.dart';
+
+void _logPhotoSendTiming(
+  String stage,
+  Stopwatch stopwatch, {
+  required int photoCount,
+  int? photoIndex,
+  int? originalBytes,
+  int? previewBytes,
+}) {
+  final List<String> fields = <String>[
+    '[photo-send]',
+    'stage=$stage',
+    'elapsed_ms=${(stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1)}',
+    'photo_count=$photoCount',
+    if (photoIndex != null) 'photo_index=$photoIndex',
+    if (originalBytes != null) 'original_bytes=$originalBytes',
+    if (previewBytes != null) 'preview_bytes=$previewBytes',
+  ];
+  debugPrint(fields.join(' '));
+}
 
 final class ChatConversationPage {
   ChatConversationPage({
@@ -477,9 +498,12 @@ final class ChatApi {
     String? replyToMessageId,
     ChatPhotoUploadProgressCallback? onUploadProgress,
   }) async {
+    final Stopwatch totalStopwatch = Stopwatch()..start();
+    final Stopwatch uploadsStopwatch = Stopwatch()..start();
     final List<String> mediaAssetIds = <String>[];
 
-    for (final ChatPhotoAttachment photo in photos) {
+    for (int index = 0; index < photos.length; index += 1) {
+      final ChatPhotoAttachment photo = photos[index];
       final String mediaAssetId =
           photo.mediaAssetId ??
           await _uploadMediaAsset(
@@ -492,6 +516,8 @@ final class ChatApi {
             width: photo.width,
             height: photo.height,
             completeUpload: false,
+            photoIndex: index + 1,
+            photoCount: photos.length,
             onUploadProgress: (int uploadedBytes, int totalBytes) {
               onUploadProgress?.call(
                 assetId: photo.assetId,
@@ -503,7 +529,24 @@ final class ChatApi {
 
       mediaAssetIds.add(mediaAssetId);
     }
+    uploadsStopwatch.stop();
+    _logPhotoSendTiming(
+      'asset_uploads',
+      uploadsStopwatch,
+      photoCount: photos.length,
+      originalBytes: photos.fold<int>(
+        0,
+        (int total, ChatPhotoAttachment photo) =>
+            total + (photo.uploadBytes?.length ?? photo.sizeBytes ?? 0),
+      ),
+      previewBytes: photos.fold<int>(
+        0,
+        (int total, ChatPhotoAttachment photo) =>
+            total + (photo.previewBytes?.length ?? 0),
+      ),
+    );
 
+    final Stopwatch messageStopwatch = Stopwatch()..start();
     final ChatMessage message = await _createMessage(
       endpointPath: '/messages/photo',
       recipientId: recipientId,
@@ -511,8 +554,20 @@ final class ChatApi {
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{'media_asset_ids': mediaAssetIds},
     );
+    messageStopwatch.stop();
+    _logPhotoSendTiming(
+      'server_finalize',
+      messageStopwatch,
+      photoCount: photos.length,
+    );
 
-    return _withLocalPhotoPreviews(message, photos);
+    final ChatMessage resolvedMessage = _withLocalPhotoPreviews(
+      message,
+      photos,
+    );
+    totalStopwatch.stop();
+    _logPhotoSendTiming('api_total', totalStopwatch, photoCount: photos.length);
+    return resolvedMessage;
   }
 
   Future<ChatMessage> sendFileMessage({
@@ -592,6 +647,8 @@ final class ChatApi {
     Duration? duration,
     Map<String, Object?>? metadata,
     bool completeUpload = true,
+    int? photoIndex,
+    int? photoCount,
     void Function(int uploadedBytes, int totalBytes)? onUploadProgress,
   }) async {
     if (bytes == null || bytes.isEmpty) {
@@ -599,6 +656,7 @@ final class ChatApi {
     }
 
     // 서버가 발급한 URL로 원본과 채팅용 미리보기를 함께 올려요.
+    final Stopwatch preparationStopwatch = Stopwatch()..start();
     final http.Response createResponse = await _client.post(
       _baseUri.resolve('/media-assets'),
       headers: _jsonHeaders,
@@ -613,6 +671,18 @@ final class ChatApi {
         if (metadata != null && metadata.isNotEmpty) 'metadata': metadata,
       }),
     );
+    preparationStopwatch.stop();
+
+    if (photoIndex != null && photoCount != null) {
+      _logPhotoSendTiming(
+        'upload_prepare',
+        preparationStopwatch,
+        photoCount: photoCount,
+        photoIndex: photoIndex,
+        originalBytes: bytes.length,
+        previewBytes: thumbnailBytes?.length ?? 0,
+      );
+    }
 
     if (createResponse.statusCode != 201) {
       throw ChatApiException(
@@ -666,19 +736,55 @@ final class ChatApi {
         thumbnailUploadUrl != null &&
         thumbnailBytes != null &&
         thumbnailBytes.isNotEmpty;
-    final List<Future<http.Response>> uploadFutures = <Future<http.Response>>[
-      _putMediaBytes(
+
+    Future<http.Response> uploadOriginal() async {
+      final Stopwatch stopwatch = Stopwatch()..start();
+      final http.Response response = await _putMediaBytes(
         url: Uri.parse(uploadUrl),
         headers: uploadHeaders,
         bytes: bytes,
         onUploadProgress: onUploadProgress,
-      ),
-      if (hasThumbnail)
-        _client.put(
-          Uri.parse(thumbnailUploadUrl!),
-          headers: thumbnailUploadHeaders,
-          body: thumbnailBytes!,
-        ),
+      );
+      stopwatch.stop();
+
+      if (photoIndex != null && photoCount != null) {
+        _logPhotoSendTiming(
+          'original_upload',
+          stopwatch,
+          photoCount: photoCount,
+          photoIndex: photoIndex,
+          originalBytes: bytes.length,
+        );
+      }
+
+      return response;
+    }
+
+    Future<http.Response> uploadThumbnail() async {
+      final Stopwatch stopwatch = Stopwatch()..start();
+      final http.Response response = await _client.put(
+        Uri.parse(thumbnailUploadUrl!),
+        headers: thumbnailUploadHeaders,
+        body: thumbnailBytes!,
+      );
+      stopwatch.stop();
+
+      if (photoIndex != null && photoCount != null) {
+        _logPhotoSendTiming(
+          'preview_upload',
+          stopwatch,
+          photoCount: photoCount,
+          photoIndex: photoIndex,
+          previewBytes: thumbnailBytes!.length,
+        );
+      }
+
+      return response;
+    }
+
+    final List<Future<http.Response>> uploadFutures = <Future<http.Response>>[
+      uploadOriginal(),
+      if (hasThumbnail) uploadThumbnail(),
     ];
     final List<http.Response> uploadResponses = await Future.wait(
       uploadFutures,

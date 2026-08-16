@@ -141,6 +141,7 @@ class MediaAssetVariantTests(unittest.TestCase):
         asset = SimpleNamespace(
             id=asset_id,
             owner_user_id=owner_id,
+            kind=media_assets.MediaKind.PHOTO,
             upload_status="pending",
             storage_key="media/original.jpg",
             thumbnail_storage_key="media/thumbnail/chat.jpg",

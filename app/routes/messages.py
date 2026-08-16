@@ -8,6 +8,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
+from time import perf_counter
 from typing import Annotated, Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
@@ -1145,20 +1146,50 @@ async def complete_photo_uploads_and_create_message(
 
     validate_message_metadata("photo", message_data.metadata)
     assert message_data.metadata is not None
+    media_asset_ids = require_media_asset_ids(message_data.metadata)
+    request_started_at = perf_counter()
+    completion_started_at = perf_counter()
 
-    for media_asset_id in require_media_asset_ids(message_data.metadata):
+    for index, media_asset_id in enumerate(media_asset_ids, start=1):
+        asset_started_at = perf_counter()
         await complete_media_asset_upload(
             media_asset_id,
             current_user,
             session,
         )
+        logger.info(
+            "photo_send_timing stage=asset_complete elapsed_ms=%.1f "
+            "photo_count=%d photo_index=%d",
+            (perf_counter() - asset_started_at) * 1000,
+            len(media_asset_ids),
+            index,
+        )
 
-    return await create_message(
+    logger.info(
+        "photo_send_timing stage=asset_completions elapsed_ms=%.1f "
+        "photo_count=%d",
+        (perf_counter() - completion_started_at) * 1000,
+        len(media_asset_ids),
+    )
+
+    message_started_at = perf_counter()
+    message = await create_message(
         message_data,
         background_tasks,
         current_user,
         session,
     )
+    logger.info(
+        "photo_send_timing stage=message_create elapsed_ms=%.1f photo_count=%d",
+        (perf_counter() - message_started_at) * 1000,
+        len(media_asset_ids),
+    )
+    logger.info(
+        "photo_send_timing stage=server_total elapsed_ms=%.1f photo_count=%d",
+        (perf_counter() - request_started_at) * 1000,
+        len(media_asset_ids),
+    )
+    return message
 
 
 @router.post(
@@ -1172,6 +1203,9 @@ async def create_message(
     current_user: CurrentUserDependency,
     session: SessionDependency,
 ) -> MessageRead:
+    photo_timing_started_at = (
+        perf_counter() if message_data.message_type == "photo" else None
+    )
     recipient = await session.get(User, message_data.recipient_id)
 
     if recipient is None:
@@ -1306,6 +1340,18 @@ async def create_message(
         message,
         direct_conversation=direct_conversation,
     )
+    photo_count = 0
+
+    if photo_timing_started_at is not None:
+        assert message_metadata is not None
+        photo_count = len(require_media_asset_ids(message_metadata))
+        logger.info(
+            "photo_send_timing stage=message_database elapsed_ms=%.1f "
+            "photo_count=%d",
+            (perf_counter() - photo_timing_started_at) * 1000,
+            photo_count,
+        )
+
     message_created_event = {
         "type": "message.created",
         "message": message_read.model_dump(mode="json"),
@@ -1316,6 +1362,7 @@ async def create_message(
         current_user.id,
     )
     # 수신자 이벤트에는 서버가 다시 계산한 읽지 않은 개수도 함께 보내요.
+    realtime_started_at = perf_counter()
     await connection_manager.send_to_user(
         user_id=current_user.id,
         data=message_created_event,
@@ -1326,6 +1373,20 @@ async def create_message(
         event=message_created_event,
         cause_message_id=message.id,
     )
+
+    if photo_timing_started_at is not None:
+        logger.info(
+            "photo_send_timing stage=realtime_publish elapsed_ms=%.1f "
+            "photo_count=%d",
+            (perf_counter() - realtime_started_at) * 1000,
+            photo_count,
+        )
+        logger.info(
+            "photo_send_timing stage=message_total elapsed_ms=%.1f "
+            "photo_count=%d",
+            (perf_counter() - photo_timing_started_at) * 1000,
+            photo_count,
+        )
 
     if should_translate_created_message:
         background_tasks.add_task(translate_and_publish_message, message.id)

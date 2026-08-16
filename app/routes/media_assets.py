@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 from pathlib import PurePosixPath
+from time import perf_counter
 from typing import Any, Literal, Optional
 from uuid import UUID, uuid4
 
@@ -29,6 +31,9 @@ from app.schemas import (
     MediaAssetUploadCreate,
     MediaAssetUploadRead,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -213,6 +218,8 @@ async def complete_media_asset_upload(
             detail="Media asset has no storage key",
         )
 
+    measure_photo = media_asset.kind == MediaKind.PHOTO
+
     try:
         object_storage = get_object_storage_client()
     except RuntimeError as error:
@@ -236,10 +243,21 @@ async def complete_media_asset_upload(
             )
         )
 
+    metadata_started_at = perf_counter()
     metadata_results = await asyncio.gather(
         *metadata_futures,
         return_exceptions=True,
     )
+
+    if measure_photo:
+        logger.info(
+            "photo_send_timing stage=storage_metadata elapsed_ms=%.1f "
+            "original_bytes=%d has_preview=%s",
+            (perf_counter() - metadata_started_at) * 1000,
+            media_asset.size_bytes,
+            media_asset.thumbnail_storage_key is not None,
+        )
+
     metadata = metadata_results[0]
 
     if isinstance(metadata, FileNotFoundError):
@@ -280,7 +298,16 @@ async def complete_media_asset_upload(
             raise thumbnail_metadata
 
     media_asset.upload_status = "complete"
+    commit_started_at = perf_counter()
     await session.commit()
+
+    if measure_photo:
+        logger.info(
+            "photo_send_timing stage=asset_commit elapsed_ms=%.1f "
+            "original_bytes=%d",
+            (perf_counter() - commit_started_at) * 1000,
+            media_asset.size_bytes,
+        )
 
     return MediaAssetCompleteRead(
         media_asset_id=media_asset.id,

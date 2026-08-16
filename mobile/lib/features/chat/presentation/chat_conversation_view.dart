@@ -75,6 +75,26 @@ String _messagePresentationId(ChatMessage message) {
   return 'photo-${message.photoAttachments.first.assetId}';
 }
 
+void _logPhotoPreparationTiming(
+  String stage,
+  Stopwatch stopwatch, {
+  required int photoCount,
+  int? photoIndex,
+  int? bytes,
+  int? loadedCount,
+}) {
+  final List<String> fields = <String>[
+    '[photo-send]',
+    'stage=$stage',
+    'elapsed_ms=${(stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1)}',
+    'photo_count=$photoCount',
+    if (photoIndex != null) 'photo_index=$photoIndex',
+    if (bytes != null) 'bytes=$bytes',
+    if (loadedCount != null) 'loaded_count=$loadedCount',
+  ];
+  debugPrint(fields.join(' '));
+}
+
 typedef _ReplyQuoteTapCallback =
     Future<void> Function({
       required String replyMessageId,
@@ -1079,14 +1099,50 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     required List<ChatMessage> pendingMessages,
     required ChatReplyReference? replyTo,
   }) async {
+    final Stopwatch totalStopwatch = Stopwatch()..start();
+    final Stopwatch preparationStopwatch = Stopwatch()..start();
     final List<ChatPhotoAttachment?> loadedAttachments =
         await Future.wait<ChatPhotoAttachment?>(
-          result.assets.map((ChatPhotoAsset asset) async {
+          List<Future<ChatPhotoAttachment?>>.generate(result.assets.length, (
+            int index,
+          ) async {
+            final ChatPhotoAsset asset = result.assets[index];
+
             try {
-              final Future<ChatPhotoFile?> originalFileFuture = _photoLibrary
-                  .loadOriginalFile(assetId: asset.id);
-              final Future<Uint8List?> previewBytesFuture = _photoLibrary
-                  .loadMessagePreview(assetId: asset.id);
+              Future<ChatPhotoFile?> loadOriginalFile() async {
+                final Stopwatch stopwatch = Stopwatch()..start();
+                final ChatPhotoFile? file = await _photoLibrary
+                    .loadOriginalFile(assetId: asset.id);
+                stopwatch.stop();
+                _logPhotoPreparationTiming(
+                  'local_original',
+                  stopwatch,
+                  photoCount: result.assets.length,
+                  photoIndex: index + 1,
+                  bytes: file?.sizeBytes,
+                );
+                return file;
+              }
+
+              Future<Uint8List?> loadPreviewBytes() async {
+                final Stopwatch stopwatch = Stopwatch()..start();
+                final Uint8List? bytes = await _photoLibrary.loadMessagePreview(
+                  assetId: asset.id,
+                );
+                stopwatch.stop();
+                _logPhotoPreparationTiming(
+                  'local_preview',
+                  stopwatch,
+                  photoCount: result.assets.length,
+                  photoIndex: index + 1,
+                  bytes: bytes?.length,
+                );
+                return bytes;
+              }
+
+              final Future<ChatPhotoFile?> originalFileFuture =
+                  loadOriginalFile();
+              final Future<Uint8List?> previewBytesFuture = loadPreviewBytes();
               final ChatPhotoFile? originalFile = await originalFileFuture;
               final Uint8List? previewBytes = await previewBytesFuture;
 
@@ -1113,6 +1169,13 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     final List<ChatPhotoAttachment> attachments = loadedAttachments
         .whereType<ChatPhotoAttachment>()
         .toList(growable: false);
+    preparationStopwatch.stop();
+    _logPhotoPreparationTiming(
+      'local_prepare_total',
+      preparationStopwatch,
+      photoCount: result.assets.length,
+      loadedCount: attachments.length,
+    );
 
     if (!mounted) {
       return;
@@ -1200,6 +1263,13 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _messageListKey.currentState?.completeOutgoingPhotoMessages(
         pendingMessages: pendingMessages,
         sentMessages: messages,
+      );
+      totalStopwatch.stop();
+      _logPhotoPreparationTiming(
+        'ui_total',
+        totalStopwatch,
+        photoCount: result.assets.length,
+        loadedCount: attachments.length,
       );
     } catch (_) {
       if (!mounted) {

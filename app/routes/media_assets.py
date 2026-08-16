@@ -135,7 +135,7 @@ async def create_media_asset_upload(
             user_id=current_user.id,
             media_asset_id=media_asset_id,
         )
-        if media_data.kind == "photo"
+        if media_data.kind in {"photo", "video"}
         else None
     )
 

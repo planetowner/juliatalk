@@ -7,6 +7,9 @@ typedef ChatPhotoUploadProgressCallback =
       required int totalBytes,
     });
 
+typedef ChatVideoUploadProgressCallback =
+    void Function({required int uploadedBytes, required int totalBytes});
+
 enum ChatTranslationStatus { none, translating, translated, failed }
 
 enum ChatCallKind { voice, video }
@@ -54,6 +57,34 @@ final class ChatPhotoAttachment {
   final String? mimeType;
   final int? sizeBytes;
   final Uint8List? uploadBytes;
+}
+
+final class ChatVideoAttachment {
+  const ChatVideoAttachment({
+    required this.assetId,
+    required this.width,
+    required this.height,
+    required this.duration,
+    this.mediaAssetId,
+    this.previewBytes,
+    this.fileName,
+    this.mimeType,
+    this.sizeBytes,
+    this.uploadBytes,
+    this.localPath,
+  });
+
+  final String assetId;
+  final int width;
+  final int height;
+  final Duration duration;
+  final String? mediaAssetId;
+  final Uint8List? previewBytes;
+  final String? fileName;
+  final String? mimeType;
+  final int? sizeBytes;
+  final Uint8List? uploadBytes;
+  final String? localPath;
 }
 
 final class ChatFileAttachment {
@@ -151,6 +182,11 @@ final class ChatMessage {
     this.photoUploadPending = false,
     this.photoUploadedBytes,
     this.photoUploadTotalBytes,
+    this.videoAttachment,
+    this.videoUploadPending = false,
+    this.videoEncodingPending = false,
+    this.videoUploadedBytes,
+    this.videoUploadTotalBytes,
     this.fileAttachment,
     this.callAttachment,
     this.voiceMemoAttachment,
@@ -175,6 +211,11 @@ final class ChatMessage {
   final bool photoUploadPending;
   final int? photoUploadedBytes;
   final int? photoUploadTotalBytes;
+  final ChatVideoAttachment? videoAttachment;
+  final bool videoUploadPending;
+  final bool videoEncodingPending;
+  final int? videoUploadedBytes;
+  final int? videoUploadTotalBytes;
   final ChatFileAttachment? fileAttachment;
   final ChatCallAttachment? callAttachment;
   final ChatVoiceMemoAttachment? voiceMemoAttachment;
@@ -186,6 +227,10 @@ final class ChatMessage {
 
   bool get isFileMessage {
     return fileAttachment != null;
+  }
+
+  bool get isVideoMessage {
+    return videoAttachment != null;
   }
 
   bool get isCallMessage {
@@ -203,6 +248,10 @@ final class ChatMessage {
   String get replyPreviewContent {
     if (isVoiceMemoMessage) {
       return 'Voice Memo';
+    }
+
+    if (isVideoMessage) {
+      return 'Video';
     }
 
     if (isLinkMessage) {
@@ -248,6 +297,11 @@ final class ChatMessage {
     bool? photoUploadPending,
     int? photoUploadedBytes,
     int? photoUploadTotalBytes,
+    ChatVideoAttachment? videoAttachment,
+    bool? videoUploadPending,
+    bool? videoEncodingPending,
+    int? videoUploadedBytes,
+    int? videoUploadTotalBytes,
     ChatFileAttachment? fileAttachment,
     ChatCallAttachment? callAttachment,
     ChatVoiceMemoAttachment? voiceMemoAttachment,
@@ -258,6 +312,7 @@ final class ChatMessage {
     bool clearTranslationFailureReason = false,
     bool clearReplyTo = false,
     bool clearPhotoAttachments = false,
+    bool clearVideoAttachment = false,
     bool clearFileAttachment = false,
     bool clearCallAttachment = false,
     bool clearVoiceMemoAttachment = false,
@@ -288,6 +343,14 @@ final class ChatMessage {
       photoUploadedBytes: photoUploadedBytes ?? this.photoUploadedBytes,
       photoUploadTotalBytes:
           photoUploadTotalBytes ?? this.photoUploadTotalBytes,
+      videoAttachment: clearVideoAttachment
+          ? null
+          : videoAttachment ?? this.videoAttachment,
+      videoUploadPending: videoUploadPending ?? this.videoUploadPending,
+      videoEncodingPending: videoEncodingPending ?? this.videoEncodingPending,
+      videoUploadedBytes: videoUploadedBytes ?? this.videoUploadedBytes,
+      videoUploadTotalBytes:
+          videoUploadTotalBytes ?? this.videoUploadTotalBytes,
       fileAttachment: clearFileAttachment
           ? null
           : fileAttachment ?? this.fileAttachment,

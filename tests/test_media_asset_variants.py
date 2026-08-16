@@ -140,6 +140,42 @@ class MediaAssetVariantTests(unittest.TestCase):
             asset.thumbnail_storage_key.endswith("/thumbnail/chat.jpg")
         )
 
+    def test_video_upload_prepares_original_and_chat_thumbnail(self) -> None:
+        storage = _FakeObjectStorage()
+        session = _FakeSession()
+        current_user = SimpleNamespace(id=uuid4())
+
+        with patch.object(
+            media_assets,
+            "get_object_storage_client",
+            return_value=storage,
+        ):
+            result = asyncio.run(
+                media_assets.create_media_asset_upload(
+                    MediaAssetUploadCreate(
+                        kind="video",
+                        file_name="video.mov",
+                        mime_type="video/quicktime",
+                        size_bytes=3,
+                        width=1080,
+                        height=1920,
+                        duration_ms=14000,
+                    ),
+                    current_user,
+                    session,
+                )
+            )
+
+        asset = session.added[0]
+        self.assertIsNotNone(result.thumbnail_upload_url)
+        self.assertEqual(
+            result.thumbnail_upload_headers,
+            {"Content-Type": "image/jpeg"},
+        )
+        self.assertTrue(
+            asset.thumbnail_storage_key.endswith("/thumbnail/chat.jpg")
+        )
+
     def test_completion_checks_original_and_thumbnail_together(self) -> None:
         storage = _ConcurrentMetadataObjectStorage()
         owner_id = uuid4()

@@ -282,7 +282,7 @@ void main() {
 
     await _tapPhotoAsset(tester, 'asset-10');
 
-    expect(find.text('You can select up to 10 photos.'), findsOneWidget);
+    expect(find.text('You can select up to 10 items.'), findsOneWidget);
 
     expect(
       find.descendant(
@@ -303,6 +303,49 @@ void main() {
     expect(result, isNotNull);
     expect(result!.assets.length, 10);
     expect(result!.collage, isTrue);
+  });
+
+  testWidgets('video tiles show duration and send one video at a time', (
+    WidgetTester tester,
+  ) async {
+    final _FakePhotoLibrary library = _FakePhotoLibrary();
+    library.assetsByAlbum['all']!.insert(
+      0,
+      const ChatPhotoAsset(
+        id: 'video-0',
+        width: 1080,
+        height: 1920,
+        type: ChatPhotoAssetType.video,
+        duration: Duration(seconds: 14),
+      ),
+    );
+    ChatPhotoSelectionResult? result;
+
+    await tester.pumpWidget(
+      _buildPicker(
+        library: library,
+        onSend: (ChatPhotoSelectionResult value) async {
+          result = value;
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('0:14'), findsOneWidget);
+
+    await _tapPhotoAsset(tester, 'asset-0');
+    await _tapPhotoAsset(tester, 'video-0');
+
+    expect(find.text('1 Send'), findsOneWidget);
+    expect(find.text('Collage Photos'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey<String>('photo-picker-send')));
+    await tester.pumpAndSettle();
+
+    expect(result?.assets, hasLength(1));
+    expect(result?.assets.single.id, 'video-0');
+    expect(result?.assets.single.isVideo, isTrue);
+    expect(result?.collage, isFalse);
   });
 
   testWidgets(

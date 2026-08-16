@@ -1879,6 +1879,25 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
     return messages;
   }
 
+  Future<ChatMessage> _sendVideoMessage({
+    required ChatVideoAttachment attachment,
+    ChatReplyReference? replyTo,
+    ChatVideoUploadProgressCallback? onUploadProgress,
+  }) async {
+    final ChatMessage message = await widget.chatApi.sendVideoMessage(
+      recipientId: widget.otherUser.id,
+      video: attachment,
+      replyToMessageId: replyTo?.messageId,
+      onUploadProgress: onUploadProgress,
+    );
+
+    if (mounted) {
+      _upsertMessage(message);
+    }
+
+    return message;
+  }
+
   Future<ChatMessage> _sendFileMessage({
     required ChatFileAttachment file,
     ChatReplyReference? replyTo,
@@ -2037,6 +2056,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         otherParticipantProfileImageUrl: widget.otherUser.profileImageUrl,
         onSendTextMessage: _sendTextMessage,
         onSendPhotoMessages: _sendPhotoMessages,
+        onSendVideoMessage: _sendVideoMessage,
         onSendFileMessage: _sendFileMessage,
         onSendVoiceMemoMessage: _sendVoiceMemoMessage,
         onSendCallMessage: _sendCallMessage,

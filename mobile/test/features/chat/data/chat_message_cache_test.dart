@@ -274,4 +274,44 @@ void main() {
     ]);
     expect(newerPage?.hasMoreNewer, isTrue);
   });
+
+  test('persists video attachment metadata', () async {
+    final ChatMessage videoMessage = ChatMessage(
+      id: '33333333-3333-4333-8333-333333333350',
+      senderId: '11111111-1111-4111-8111-111111111111',
+      recipientId: '22222222-2222-4222-8222-222222222222',
+      content: '',
+      createdAt: DateTime.utc(2026, 8, 17, 6, 30),
+      videoAttachment: const ChatVideoAttachment(
+        assetId: '44444444-4444-4444-8444-444444444444',
+        mediaAssetId: '44444444-4444-4444-8444-444444444444',
+        width: 1080,
+        height: 1920,
+        duration: Duration(seconds: 14),
+        fileName: 'video.mov',
+        mimeType: 'video/quicktime',
+        sizeBytes: 1820000,
+      ),
+    );
+    final ChatMessageCache cache = createCache();
+
+    await cache.mergeLatestConversation(
+      otherUserId: '22222222-2222-4222-8222-222222222222',
+      messages: <ChatMessage>[videoMessage],
+      hasMoreOlder: false,
+    );
+
+    final ChatCachedConversation conversation = await createCache()
+        .readConversation('22222222-2222-4222-8222-222222222222');
+    final ChatVideoAttachment? video =
+        conversation.messages.single.videoAttachment;
+
+    expect(video?.mediaAssetId, '44444444-4444-4444-8444-444444444444');
+    expect(video?.width, 1080);
+    expect(video?.height, 1920);
+    expect(video?.duration, const Duration(seconds: 14));
+    expect(video?.fileName, 'video.mov');
+    expect(video?.mimeType, 'video/quicktime');
+    expect(video?.sizeBytes, 1820000);
+  });
 }

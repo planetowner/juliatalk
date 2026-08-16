@@ -596,6 +596,46 @@ final class ChatApi {
     return resolvedMessage;
   }
 
+  Future<ChatMessage> sendVideoMessage({
+    required String recipientId,
+    required ChatVideoAttachment video,
+    String? replyToMessageId,
+    ChatVideoUploadProgressCallback? onUploadProgress,
+  }) async {
+    final String mediaAssetId =
+        video.mediaAssetId ??
+        await _uploadMediaAsset(
+          kind: 'video',
+          fileName: video.fileName ?? '${video.assetId}.mp4',
+          mimeType: video.mimeType ?? 'video/mp4',
+          sizeBytes: video.sizeBytes ?? video.uploadBytes?.length ?? 0,
+          bytes: video.uploadBytes,
+          thumbnailBytes: video.previewBytes,
+          width: video.width,
+          height: video.height,
+          duration: video.duration,
+          onUploadProgress: onUploadProgress == null
+              ? null
+              : (int uploadedBytes, int totalBytes) {
+                  onUploadProgress(
+                    uploadedBytes: uploadedBytes,
+                    totalBytes: totalBytes,
+                  );
+                },
+        );
+
+    final ChatMessage message = await _createMessage(
+      recipientId: recipientId,
+      messageType: 'video',
+      replyToMessageId: replyToMessageId,
+      metadata: <String, Object?>{
+        'media_asset_ids': <String>[mediaAssetId],
+      },
+    );
+
+    return _withLocalVideoPreview(message, video);
+  }
+
   Future<ChatMessage> sendFileMessage({
     required String recipientId,
     required ChatFileAttachment file,
@@ -830,7 +870,7 @@ final class ChatApi {
       if (thumbnailUploadResponse.statusCode < 200 ||
           thumbnailUploadResponse.statusCode >= 300) {
         throw ChatApiException(
-          'Photo thumbnail upload failed with status code '
+          'Media thumbnail upload failed with status code '
           '${thumbnailUploadResponse.statusCode}.',
         );
       }
@@ -979,6 +1019,34 @@ final class ChatApi {
           );
         },
         growable: false,
+      ),
+    );
+  }
+
+  ChatMessage _withLocalVideoPreview(
+    ChatMessage message,
+    ChatVideoAttachment localVideo,
+  ) {
+    final ChatVideoAttachment? serverVideo = message.videoAttachment;
+
+    if (serverVideo == null) {
+      return message;
+    }
+
+    return message.copyWith(
+      videoAttachment: ChatVideoAttachment(
+        assetId: serverVideo.assetId,
+        width: serverVideo.width > 0 ? serverVideo.width : localVideo.width,
+        height: serverVideo.height > 0 ? serverVideo.height : localVideo.height,
+        duration: serverVideo.duration > Duration.zero
+            ? serverVideo.duration
+            : localVideo.duration,
+        mediaAssetId: serverVideo.mediaAssetId,
+        previewBytes: serverVideo.previewBytes ?? localVideo.previewBytes,
+        fileName: serverVideo.fileName ?? localVideo.fileName,
+        mimeType: serverVideo.mimeType ?? localVideo.mimeType,
+        sizeBytes: serverVideo.sizeBytes ?? localVideo.sizeBytes,
+        localPath: localVideo.localPath,
       ),
     );
   }
@@ -1212,8 +1280,10 @@ final class ChatApi {
       photoAttachments: messageType == 'photo' && metadata != null
           ? _photosFromMetadata(metadata)
           : const <ChatPhotoAttachment>[],
-      fileAttachment:
-          (messageType == 'file' || messageType == 'video') && metadata != null
+      videoAttachment: messageType == 'video' && metadata != null
+          ? _videoFromMetadata(metadata)
+          : null,
+      fileAttachment: messageType == 'file' && metadata != null
           ? _fileFromMetadata(metadata)
           : null,
       voiceMemoAttachment: messageType == 'voice_memo' && metadata != null
@@ -1248,6 +1318,20 @@ final class ChatApi {
               },
             )
             .toList(growable: false),
+      };
+    } else if (message.isVideoMessage) {
+      final ChatVideoAttachment video = message.videoAttachment!;
+      messageType = 'video';
+      metadata = <String, Object?>{
+        'video': <String, Object?>{
+          'media_asset_id': video.mediaAssetId,
+          'file_name': video.fileName,
+          'mime_type': video.mimeType,
+          'size_bytes': video.sizeBytes,
+          'width': video.width,
+          'height': video.height,
+          'duration_ms': video.duration.inMilliseconds,
+        },
       };
     } else if (message.isFileMessage) {
       final ChatFileAttachment file = message.fileAttachment!;
@@ -1431,8 +1515,34 @@ final class ChatApi {
         .toList(growable: false);
   }
 
+  ChatVideoAttachment _videoFromMetadata(Map<String, dynamic> metadata) {
+    final Object? video = metadata['video'];
+
+    if (video is! Map<String, dynamic>) {
+      throw const ChatApiException(
+        'The server returned an invalid video message.',
+      );
+    }
+
+    final String mediaAssetId = _requiredString(
+      video['media_asset_id'],
+      'media_asset_id',
+    );
+
+    return ChatVideoAttachment(
+      assetId: video['asset_id'] as String? ?? mediaAssetId,
+      mediaAssetId: mediaAssetId,
+      width: video['width'] as int? ?? 0,
+      height: video['height'] as int? ?? 0,
+      duration: Duration(milliseconds: video['duration_ms'] as int? ?? 0),
+      fileName: video['file_name'] as String?,
+      mimeType: video['mime_type'] as String?,
+      sizeBytes: video['size_bytes'] as int?,
+    );
+  }
+
   ChatFileAttachment _fileFromMetadata(Map<String, dynamic> metadata) {
-    final Object? file = metadata['file'] ?? metadata['video'];
+    final Object? file = metadata['file'];
 
     if (file is! Map<String, dynamic>) {
       throw const ChatApiException(

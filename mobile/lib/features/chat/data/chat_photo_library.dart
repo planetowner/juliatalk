@@ -6,6 +6,8 @@ import 'package:photo_manager/photo_manager.dart';
 
 enum ChatPhotoAccessState { authorized, limited, denied }
 
+enum ChatPhotoAssetType { image, video }
+
 final class ChatPhotoAlbum {
   const ChatPhotoAlbum({
     required this.id,
@@ -28,12 +30,18 @@ final class ChatPhotoAsset {
     required this.width,
     required this.height,
     this.createdAt,
+    this.type = ChatPhotoAssetType.image,
+    this.duration = Duration.zero,
   });
 
   final String id;
   final int width;
   final int height;
   final DateTime? createdAt;
+  final ChatPhotoAssetType type;
+  final Duration duration;
+
+  bool get isVideo => type == ChatPhotoAssetType.video;
 }
 
 final class ChatPhotoFile {
@@ -42,12 +50,14 @@ final class ChatPhotoFile {
     required this.fileName,
     required this.mimeType,
     required this.sizeBytes,
+    this.localPath,
   });
 
   final Uint8List bytes;
   final String fileName;
   final String mimeType;
   final int sizeBytes;
+  final String? localPath;
 }
 
 abstract interface class ChatPhotoLibrary {
@@ -122,7 +132,7 @@ final class PhotoManagerChatPhotoLibrary
       PermissionRequestOption(
         iosAccessLevel: IosAccessLevel.readWrite,
         androidPermission: AndroidPermission(
-          type: RequestType.image,
+          type: RequestType.common,
           mediaLocation: false,
         ),
       );
@@ -477,7 +487,7 @@ final class PhotoManagerChatPhotoLibrary
     final FilterOptionGroup filterOption = _createFilterOption();
 
     final List<AssetPathEntity> paths = await PhotoManager.getAssetPathList(
-      type: RequestType.image,
+      type: RequestType.common,
       hasAll: true,
       onlyAll: false,
       filterOption: filterOption,
@@ -793,7 +803,9 @@ final class PhotoManagerChatPhotoLibrary
       return null;
     }
 
-    final String fallbackName = '$assetId.jpg';
+    final String fallbackName = entity.type == AssetType.video
+        ? '$assetId.mp4'
+        : '$assetId.jpg';
     final String? entityTitle = entity.title;
     final String fileName = entityTitle == null || entityTitle.isEmpty
         ? fallbackName
@@ -802,8 +814,11 @@ final class PhotoManagerChatPhotoLibrary
     return ChatPhotoFile(
       bytes: bytes,
       fileName: fileName,
-      mimeType: imageMimeTypeForFileName(fileName),
+      mimeType: entity.type == AssetType.video
+          ? videoMimeTypeForFileName(fileName)
+          : imageMimeTypeForFileName(fileName),
       sizeBytes: bytes.length,
+      localPath: file.path,
     );
   }
 
@@ -846,6 +861,12 @@ final class PhotoManagerChatPhotoLibrary
       width: entity.orientatedWidth,
       height: entity.orientatedHeight,
       createdAt: entity.createDateTime,
+      type: entity.type == AssetType.video
+          ? ChatPhotoAssetType.video
+          : ChatPhotoAssetType.image,
+      duration: entity.type == AssetType.video
+          ? entity.videoDuration
+          : Duration.zero,
     );
   }
 }
@@ -853,6 +874,11 @@ final class PhotoManagerChatPhotoLibrary
 String imageMimeTypeForFileName(String fileName) {
   final String mimeType = mimeTypeForFileName(fileName);
   return mimeType.startsWith('image/') ? mimeType : 'image/jpeg';
+}
+
+String videoMimeTypeForFileName(String fileName) {
+  final String mimeType = mimeTypeForFileName(fileName);
+  return mimeType.startsWith('video/') ? mimeType : 'video/mp4';
 }
 
 String mimeTypeForFileName(String fileName) {

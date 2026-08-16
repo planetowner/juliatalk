@@ -695,11 +695,26 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
       return;
     }
 
+    final bool selectingDifferentMediaType = _selectedAssets.any(
+      (ChatPhotoAsset selectedAsset) => selectedAsset.isVideo != asset.isVideo,
+    );
+
+    if (selectingDifferentMediaType ||
+        (asset.isVideo && _selectedAssets.isNotEmpty)) {
+      setState(() {
+        _selectedAssets
+          ..clear()
+          ..add(asset);
+        _collagePhotos = !asset.isVideo;
+      });
+      return;
+    }
+
     if (_selectedAssets.length >= _maximumSelectionCount) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          const SnackBar(content: Text('You can select up to 10 photos.')),
+          const SnackBar(content: Text('You can select up to 10 items.')),
         );
 
       return;
@@ -1009,7 +1024,8 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
             _buildHeader(),
             const Divider(height: 1, thickness: 1, color: AppColors.grey100),
             Expanded(child: _buildBody()),
-            if (_accessState != ChatPhotoAccessState.denied)
+            if (_accessState != ChatPhotoAccessState.denied &&
+                !_selectedAssets.any((ChatPhotoAsset asset) => asset.isVideo))
               _buildCollageControl(),
           ],
         ),
@@ -1472,11 +1488,49 @@ final class _PhotoGridTile extends StatelessWidget {
                 selectedNumber: selectedNumber,
               ),
             ),
+            if (asset.isVideo)
+              Positioned(
+                right: 7,
+                bottom: 6,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: AppColors.black.withAlpha(138),
+                    borderRadius: const BorderRadius.all(Radius.circular(4)),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    child: Text(
+                      _formatVideoDuration(asset.duration),
+                      style: AppTypography.subTypography11.copyWith(
+                        color: AppColors.white,
+                        fontWeight: AppTypography.medium,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
     );
   }
+}
+
+String _formatVideoDuration(Duration duration) {
+  final int totalSeconds = duration.inSeconds;
+  final int hours = totalSeconds ~/ 3600;
+  final int minutes = (totalSeconds % 3600) ~/ 60;
+  final int seconds = totalSeconds % 60;
+  final String secondText = seconds.toString().padLeft(2, '0');
+
+  if (hours > 0) {
+    return '$hours:${minutes.toString().padLeft(2, '0')}:$secondText';
+  }
+
+  return '$minutes:$secondText';
 }
 
 final class _PhotoSelectionBadge extends StatelessWidget {

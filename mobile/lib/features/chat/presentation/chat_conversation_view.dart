@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../../design_system/app_colors.dart';
 import '../../../design_system/app_radius.dart';
@@ -69,6 +70,10 @@ typedef _MessageLongPressCallback =
 typedef _MessageBubbleKeyFor = GlobalKey Function(String messageId);
 
 String _messagePresentationId(ChatMessage message) {
+  if (message.isVideoMessage) {
+    return 'video-${message.videoAttachment!.assetId}';
+  }
+
   if (!message.isPhotoMessage) {
     return message.id;
   }
@@ -122,6 +127,13 @@ typedef ChatPhotoMessageSender =
       required bool collage,
       ChatReplyReference? replyTo,
       ChatPhotoUploadProgressCallback? onUploadProgress,
+    });
+
+typedef ChatVideoMessageSender =
+    Future<ChatMessage> Function({
+      required ChatVideoAttachment attachment,
+      ChatReplyReference? replyTo,
+      ChatVideoUploadProgressCallback? onUploadProgress,
     });
 
 typedef ChatFileMessageSender =
@@ -387,6 +399,7 @@ final class ChatConversationView extends StatefulWidget {
     this.otherParticipantProfileImageUrl,
     this.onSendTextMessage,
     this.onSendPhotoMessages,
+    this.onSendVideoMessage,
     this.onSendFileMessage,
     this.onSendVoiceMemoMessage,
     this.onSendCallMessage,
@@ -427,6 +440,7 @@ final class ChatConversationView extends StatefulWidget {
   final String? otherParticipantProfileImageUrl;
   final ChatTextMessageSender? onSendTextMessage;
   final ChatPhotoMessageSender? onSendPhotoMessages;
+  final ChatVideoMessageSender? onSendVideoMessage;
   final ChatFileMessageSender? onSendFileMessage;
   final ChatVoiceMemoMessageSender? onSendVoiceMemoMessage;
   final ChatCallMessageSender? onSendCallMessage;
@@ -1055,6 +1069,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   Future<void> _sendSelectedPhotos(ChatPhotoSelectionResult result) async {
+    if (result.assets.length == 1 && result.assets.first.isVideo) {
+      await _sendSelectedVideo(result);
+      return;
+    }
+
     final _MessageListState? messageListState = _messageListKey.currentState;
 
     if (messageListState == null || result.assets.isEmpty) {
@@ -1092,6 +1111,126 @@ final class _ChatConversationViewState extends State<ChatConversationView>
           replyTo: replyTo,
         ),
       );
+    }
+  }
+
+  Future<void> _sendSelectedVideo(ChatPhotoSelectionResult result) async {
+    final _MessageListState? messageListState = _messageListKey.currentState;
+
+    if (messageListState == null || result.assets.length != 1) {
+      return;
+    }
+
+    final ChatPhotoAsset asset = result.assets.single;
+    final ChatReplyReference? replyTo = _currentReplyReference();
+    final ChatVideoMessageSender? sender = widget.onSendVideoMessage;
+    final ChatMessage pendingMessage = messageListState.addOutgoingVideoMessage(
+      attachment: ChatVideoAttachment(
+        assetId: asset.id,
+        width: asset.width,
+        height: asset.height,
+        duration: asset.duration,
+        previewBytes: result.previewBytesByAssetId[asset.id],
+      ),
+      replyTo: replyTo,
+      videoEncodingPending: sender != null,
+    );
+
+    _dismissComposerAfterAttachmentSend();
+
+    if (sender != null) {
+      unawaited(
+        _completeSelectedVideoSend(
+          asset: asset,
+          sender: sender,
+          pendingMessage: pendingMessage,
+          replyTo: replyTo,
+        ),
+      );
+    }
+  }
+
+  Future<void> _completeSelectedVideoSend({
+    required ChatPhotoAsset asset,
+    required ChatVideoMessageSender sender,
+    required ChatMessage pendingMessage,
+    required ChatReplyReference? replyTo,
+  }) async {
+    try {
+      final Future<ChatPhotoFile?> originalFileFuture = _photoLibrary
+          .loadOriginalFile(assetId: asset.id);
+      final Future<Uint8List?> previewBytesFuture = _photoLibrary
+          .loadMessagePreview(assetId: asset.id);
+      final ChatPhotoFile? originalFile = await originalFileFuture;
+      final Uint8List? previewBytes = await previewBytesFuture;
+
+      if (!mounted) {
+        return;
+      }
+
+      if (originalFile == null) {
+        _messageListKey.currentState?.completeOutgoingVideoMessage(
+          pendingMessage: pendingMessage,
+          sentMessage: null,
+        );
+        _showChatOperationFailure('The selected video could not be loaded.');
+        return;
+      }
+
+      final ChatVideoAttachment attachment = ChatVideoAttachment(
+        assetId: asset.id,
+        width: asset.width,
+        height: asset.height,
+        duration: asset.duration,
+        previewBytes:
+            previewBytes ?? pendingMessage.videoAttachment?.previewBytes,
+        fileName: originalFile.fileName,
+        mimeType: originalFile.mimeType,
+        sizeBytes: originalFile.sizeBytes,
+        uploadBytes: originalFile.bytes,
+        localPath: originalFile.localPath,
+      );
+
+      _messageListKey.currentState?.prepareOutgoingVideoMessage(
+        messageId: pendingMessage.id,
+        attachment: attachment,
+      );
+
+      final ChatMessage sentMessage = await sender(
+        attachment: attachment,
+        replyTo: replyTo,
+        onUploadProgress:
+            ({required int uploadedBytes, required int totalBytes}) {
+              if (!mounted) {
+                return;
+              }
+
+              _messageListKey.currentState?.updateOutgoingVideoUploadProgress(
+                messageId: pendingMessage.id,
+                uploadedBytes: uploadedBytes,
+                totalBytes: totalBytes,
+              );
+            },
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _messageListKey.currentState?.completeOutgoingVideoMessage(
+        pendingMessage: pendingMessage,
+        sentMessage: sentMessage,
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      _messageListKey.currentState?.completeOutgoingVideoMessage(
+        pendingMessage: pendingMessage,
+        sentMessage: null,
+      );
+      _showChatOperationFailure('Video sending failed.');
     }
   }
 
@@ -6265,6 +6404,7 @@ List<String> _searchableTextSegmentsFor(ChatMessage message) {
   final List<String> segments = <String>[];
 
   if (!message.isPhotoMessage &&
+      !message.isVideoMessage &&
       !message.isFileMessage &&
       !message.isCallMessage) {
     if (message.content.trim().isNotEmpty) {
@@ -6306,6 +6446,7 @@ bool _messageNeedsTranslation(
   required String currentUserPreferredLanguage,
 }) {
   if (message.isPhotoMessage ||
+      message.isVideoMessage ||
       message.isFileMessage ||
       message.isCallMessage ||
       message.isLinkMessage ||
@@ -7418,7 +7559,8 @@ final class _MessageListState extends State<_MessageList>
         else
           message,
       for (final ChatMessage message in previousMessagesById.values)
-        if (message.photoUploadPending && !nextMessageIds.contains(message.id))
+        if ((message.photoUploadPending || message.videoUploadPending) &&
+            !nextMessageIds.contains(message.id))
           message,
     ];
     _messages.sort(compareChatMessages);
@@ -7624,6 +7766,20 @@ final class _MessageListState extends State<_MessageList>
           );
         }
       }
+
+      final ChatVideoAttachment? video = message.videoAttachment;
+      final String? videoMediaAssetId = video?.mediaAssetId;
+
+      if (video != null &&
+          video.previewBytes == null &&
+          videoMediaAssetId != null) {
+        unawaited(
+          _ChatPhotoDiskCache.load(
+            mediaAssetId: videoMediaAssetId,
+            createAccessUrl: createAccessUrl,
+          ).then<void>((_) {}),
+        );
+      }
     }
   }
 
@@ -7631,6 +7787,37 @@ final class _MessageListState extends State<_MessageList>
     required ChatMessage previous,
     required ChatMessage next,
   }) {
+    final ChatVideoAttachment? previousVideo = previous.videoAttachment;
+    final ChatVideoAttachment? nextVideo = next.videoAttachment;
+
+    if (previousVideo != null &&
+        nextVideo != null &&
+        nextVideo.mediaAssetId != null &&
+        (previousVideo.mediaAssetId == null ||
+            previousVideo.mediaAssetId == nextVideo.mediaAssetId) &&
+        (previousVideo.previewBytes != null ||
+            previousVideo.localPath != null)) {
+      return next.copyWith(
+        videoAttachment: ChatVideoAttachment(
+          assetId: previousVideo.assetId,
+          width: nextVideo.width > 0 ? nextVideo.width : previousVideo.width,
+          height: nextVideo.height > 0
+              ? nextVideo.height
+              : previousVideo.height,
+          duration: nextVideo.duration > Duration.zero
+              ? nextVideo.duration
+              : previousVideo.duration,
+          mediaAssetId: nextVideo.mediaAssetId,
+          previewBytes: nextVideo.previewBytes ?? previousVideo.previewBytes,
+          fileName: nextVideo.fileName ?? previousVideo.fileName,
+          mimeType: nextVideo.mimeType ?? previousVideo.mimeType,
+          sizeBytes: nextVideo.sizeBytes ?? previousVideo.sizeBytes,
+          uploadBytes: previousVideo.uploadBytes,
+          localPath: previousVideo.localPath,
+        ),
+      );
+    }
+
     final List<ChatPhotoAttachment> previousPhotos = previous.photoAttachments;
     final List<ChatPhotoAttachment> nextPhotos = next.photoAttachments;
 
@@ -7840,6 +8027,149 @@ final class _MessageListState extends State<_MessageList>
     _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
 
     return List<ChatMessage>.unmodifiable(messages);
+  }
+
+  ChatMessage addOutgoingVideoMessage({
+    required ChatVideoAttachment attachment,
+    ChatReplyReference? replyTo,
+    bool videoEncodingPending = false,
+  }) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+    final DateTime createdAt = DateTime.now();
+    final ChatMessage message = ChatMessage(
+      id: _nextLocalMessageId(),
+      senderId: widget.currentUserId,
+      recipientId: widget.otherParticipantId,
+      content: '',
+      createdAt: createdAt,
+      replyTo: replyTo,
+      videoAttachment: attachment,
+      videoUploadPending: videoEncodingPending,
+      videoEncodingPending: videoEncodingPending,
+    );
+
+    setState(() {
+      _messages.add(message);
+      _messageClock = createdAt;
+    });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
+
+    return message;
+  }
+
+  void prepareOutgoingVideoMessage({
+    required String messageId,
+    required ChatVideoAttachment attachment,
+  }) {
+    final int messageIndex = _messages.indexWhere(
+      (ChatMessage message) => message.id == messageId,
+    );
+
+    if (messageIndex == -1) {
+      return;
+    }
+
+    setState(() {
+      _messages[messageIndex] = _messages[messageIndex].copyWith(
+        videoAttachment: attachment,
+        videoUploadPending: true,
+        videoEncodingPending: false,
+        videoUploadedBytes: 0,
+        videoUploadTotalBytes:
+            attachment.uploadBytes?.length ?? attachment.sizeBytes ?? 0,
+      );
+    });
+  }
+
+  void updateOutgoingVideoUploadProgress({
+    required String messageId,
+    required int uploadedBytes,
+    required int totalBytes,
+  }) {
+    final int messageIndex = _messages.indexWhere(
+      (ChatMessage message) => message.id == messageId,
+    );
+
+    if (messageIndex == -1 || !_messages[messageIndex].videoUploadPending) {
+      return;
+    }
+
+    setState(() {
+      _messages[messageIndex] = _messages[messageIndex].copyWith(
+        videoUploadedBytes: uploadedBytes,
+        videoUploadTotalBytes: totalBytes,
+      );
+    });
+  }
+
+  void completeOutgoingVideoMessage({
+    required ChatMessage pendingMessage,
+    required ChatMessage? sentMessage,
+  }) {
+    final List<String> previousMessageIds = _messageIdsSnapshot();
+    final ChatMessage visiblePendingMessage = _messages.firstWhere(
+      (ChatMessage message) => message.id == pendingMessage.id,
+      orElse: () => pendingMessage,
+    );
+    final ChatMessage? completedMessage = sentMessage == null
+        ? null
+        : _retainPendingVideoPreview(
+            pending: visiblePendingMessage,
+            sent: sentMessage,
+          );
+
+    setState(() {
+      _messages.removeWhere(
+        (ChatMessage message) => message.id == pendingMessage.id,
+      );
+
+      if (completedMessage != null) {
+        final int existingIndex = _messages.indexWhere(
+          (ChatMessage message) => message.id == completedMessage.id,
+        );
+
+        if (existingIndex == -1) {
+          _messages.add(completedMessage);
+        } else {
+          _messages[existingIndex] = completedMessage;
+        }
+
+        _messages.sort(compareChatMessages);
+        _syncMessageClockWith(completedMessage);
+      }
+    });
+    _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
+  }
+
+  static ChatMessage _retainPendingVideoPreview({
+    required ChatMessage pending,
+    required ChatMessage sent,
+  }) {
+    final ChatVideoAttachment? pendingVideo = pending.videoAttachment;
+    final ChatVideoAttachment? sentVideo = sent.videoAttachment;
+
+    if (pendingVideo == null || sentVideo == null) {
+      return sent;
+    }
+
+    return sent.copyWith(
+      videoAttachment: ChatVideoAttachment(
+        assetId: pendingVideo.assetId,
+        width: sentVideo.width > 0 ? sentVideo.width : pendingVideo.width,
+        height: sentVideo.height > 0 ? sentVideo.height : pendingVideo.height,
+        duration: sentVideo.duration > Duration.zero
+            ? sentVideo.duration
+            : pendingVideo.duration,
+        mediaAssetId: sentVideo.mediaAssetId,
+        previewBytes: sentVideo.previewBytes ?? pendingVideo.previewBytes,
+        fileName: sentVideo.fileName ?? pendingVideo.fileName,
+        mimeType: sentVideo.mimeType ?? pendingVideo.mimeType,
+        sizeBytes: sentVideo.sizeBytes ?? pendingVideo.sizeBytes,
+        localPath: pendingVideo.localPath,
+      ),
+      videoUploadPending: false,
+      videoEncodingPending: false,
+    );
   }
 
   void updateOutgoingPhotoUploadProgress({
@@ -9654,6 +9984,7 @@ final class _MessageListState extends State<_MessageList>
 
   String _displayedContentFor(ChatMessage message) {
     if (message.isPhotoMessage ||
+        message.isVideoMessage ||
         message.isFileMessage ||
         message.isCallMessage) {
       return message.replyPreviewContent;
@@ -9708,6 +10039,7 @@ final class _MessageListState extends State<_MessageList>
       now: actionNow,
       isMedia:
           message.isPhotoMessage ||
+          message.isVideoMessage ||
           message.isFileMessage ||
           message.isVoiceMemoMessage,
       isCall: message.isCallMessage,
@@ -11650,6 +11982,7 @@ final class _IncomingMessageRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final bool isFileMessage = message.isFileMessage;
     final bool isPhotoMessage = message.isPhotoMessage;
+    final bool isVideoMessage = message.isVideoMessage;
     final bool isCallMessage = message.isCallMessage;
     final bool isVoiceMemoMessage = message.isVoiceMemoMessage;
     final bool isLinkMessage = message.isLinkMessage;
@@ -11660,6 +11993,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     final bool canTapBubble =
         isFileMessage ||
         (!isPhotoMessage &&
+            !isVideoMessage &&
             !isCallMessage &&
             !isVoiceMemoMessage &&
             canUseTranslation &&
@@ -11669,7 +12003,15 @@ final class _IncomingMessageRow extends StatelessWidget {
 
     final Widget content;
 
-    if (isPhotoMessage) {
+    if (isVideoMessage) {
+      content = _VideoMessage(
+        message: message,
+        isOutgoing: false,
+        measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+        onCreateThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
+      );
+    } else if (isPhotoMessage) {
       content = _PhotoMessage(
         messageId: message.id,
         measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
@@ -12670,7 +13012,17 @@ final class _OutgoingMessageRow extends StatelessWidget {
 
     final Widget content;
 
-    if (message.isPhotoMessage) {
+    if (message.isVideoMessage) {
+      final String presentationId = _messagePresentationId(message);
+      content = _VideoMessage(
+        key: ValueKey<String>(presentationId),
+        message: message,
+        isOutgoing: true,
+        measurementKey: ValueKey<String>('outgoing-bubble-$presentationId'),
+        onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+        onCreateThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
+      );
+    } else if (message.isPhotoMessage) {
       final String presentationId = _messagePresentationId(message);
       content = _PhotoMessage(
         messageId: presentationId,
@@ -12789,6 +13141,456 @@ final class _OutgoingMessageRow extends StatelessWidget {
       ],
     );
   }
+}
+
+final class _VideoMessage extends StatefulWidget {
+  const _VideoMessage({
+    required this.message,
+    required this.isOutgoing,
+    required this.measurementKey,
+    required this.onCreateMediaAssetAccessUrl,
+    required this.onCreateThumbnailAccessUrl,
+    super.key,
+  });
+
+  final ChatMessage message;
+  final bool isOutgoing;
+  final Key measurementKey;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreateThumbnailAccessUrl;
+
+  @override
+  State<_VideoMessage> createState() => _VideoMessageState();
+}
+
+final class _VideoMessageState extends State<_VideoMessage> {
+  VideoPlayerController? _videoController;
+  Future<void>? _downloadFuture;
+  File? _localFile;
+  String? _activeMediaAssetId;
+  bool _downloadInProgress = false;
+  bool _showVideoFrame = false;
+  int _downloadedBytes = 0;
+  int _downloadTotalBytes = 0;
+
+  ChatVideoAttachment get _attachment => widget.message.videoAttachment!;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncVideoSource();
+  }
+
+  @override
+  void didUpdateWidget(_VideoMessage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final ChatVideoAttachment? oldAttachment =
+        oldWidget.message.videoAttachment;
+    final ChatVideoAttachment attachment = _attachment;
+
+    if (oldAttachment?.mediaAssetId != attachment.mediaAssetId ||
+        oldAttachment?.localPath != attachment.localPath ||
+        (oldWidget.message.videoUploadPending &&
+            !widget.message.videoUploadPending)) {
+      _syncVideoSource();
+    }
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    super.dispose();
+  }
+
+  void _syncVideoSource() {
+    final ChatVideoAttachment attachment = _attachment;
+    final String? localPath = attachment.localPath;
+
+    if (localPath != null && localPath.isNotEmpty) {
+      _localFile = File(localPath);
+      return;
+    }
+
+    if (widget.message.videoUploadPending) {
+      return;
+    }
+
+    final String? mediaAssetId = attachment.mediaAssetId;
+    final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+        widget.onCreateMediaAssetAccessUrl;
+
+    if (mediaAssetId == null || createAccessUrl == null) {
+      return;
+    }
+
+    if (_activeMediaAssetId != mediaAssetId) {
+      _activeMediaAssetId = mediaAssetId;
+      _downloadFuture = null;
+      _localFile = null;
+      _downloadedBytes = 0;
+      _downloadTotalBytes = attachment.sizeBytes ?? 0;
+    }
+
+    if (_downloadFuture == null) {
+      _downloadInProgress = true;
+      _downloadFuture = _loadRemoteVideo(
+        mediaAssetId: mediaAssetId,
+        createAccessUrl: createAccessUrl,
+      );
+    }
+  }
+
+  Future<void> _loadRemoteVideo({
+    required String mediaAssetId,
+    required ChatMediaAssetAccessUrlCreator createAccessUrl,
+  }) async {
+    final Directory cacheDirectory = await getApplicationCacheDirectory();
+    final Directory videoDirectory = Directory(
+      '${cacheDirectory.path}/chat-videos',
+    );
+    final String extension = _videoFileExtension(_attachment.fileName);
+    final File file = File('$videoDirectory/$mediaAssetId.$extension');
+
+    if (await file.exists() && await file.length() > 0) {
+      if (mounted && _attachment.mediaAssetId == mediaAssetId) {
+        setState(() {
+          _localFile = file;
+          _downloadInProgress = false;
+        });
+      }
+      return;
+    }
+
+    final File partialFile = File('${file.path}.part');
+    http.Client? client;
+    RandomAccessFile? output;
+
+    try {
+      if (mounted && _attachment.mediaAssetId == mediaAssetId) {
+        setState(() {
+          _downloadInProgress = true;
+          _downloadedBytes = 0;
+        });
+      }
+
+      await videoDirectory.create(recursive: true);
+      final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
+      client = http.Client();
+      final http.StreamedResponse response = await client.send(
+        http.Request('GET', accessUrl),
+      );
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException('Video download failed.', uri: accessUrl);
+      }
+
+      final int responseLength = response.contentLength ?? 0;
+      final int totalBytes = responseLength > 0
+          ? responseLength
+          : (_attachment.sizeBytes ?? 0);
+      output = await partialFile.open(mode: FileMode.write);
+      int downloadedBytes = 0;
+
+      await for (final List<int> chunk in response.stream) {
+        await output.writeFrom(chunk);
+        downloadedBytes += chunk.length;
+
+        if (mounted && _attachment.mediaAssetId == mediaAssetId) {
+          setState(() {
+            _downloadedBytes = downloadedBytes;
+            _downloadTotalBytes = totalBytes;
+          });
+        }
+      }
+
+      await output.close();
+      output = null;
+
+      if (await file.exists()) {
+        await file.delete();
+      }
+      await partialFile.rename(file.path);
+
+      if (mounted && _attachment.mediaAssetId == mediaAssetId) {
+        setState(() {
+          _localFile = file;
+          _downloadInProgress = false;
+          _downloadedBytes = downloadedBytes;
+          _downloadTotalBytes = totalBytes;
+        });
+      }
+    } catch (_) {
+      if (mounted && _attachment.mediaAssetId == mediaAssetId) {
+        setState(() {
+          _downloadInProgress = false;
+        });
+      }
+      if (await partialFile.exists()) {
+        await partialFile.delete();
+      }
+    } finally {
+      if (output != null) {
+        await output.close();
+      }
+      client?.close();
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    final File? localFile = _localFile;
+
+    if (localFile == null) {
+      _syncVideoSource();
+      return;
+    }
+
+    VideoPlayerController? controller = _videoController;
+
+    if (controller == null) {
+      controller = VideoPlayerController.file(localFile);
+      _videoController = controller;
+      await controller.initialize();
+      controller.addListener(_handlePlaybackChanged);
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    if (controller.value.isPlaying) {
+      await controller.pause();
+      setState(() {
+        _showVideoFrame = false;
+      });
+      return;
+    }
+
+    if (controller.value.position >= controller.value.duration) {
+      await controller.seekTo(Duration.zero);
+    }
+    await controller.play();
+
+    if (mounted) {
+      setState(() {
+        _showVideoFrame = true;
+      });
+    }
+  }
+
+  void _handlePlaybackChanged() {
+    final VideoPlayerController? controller = _videoController;
+
+    if (!mounted || controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    final Duration duration = controller.value.duration;
+    final Duration position = controller.value.position;
+
+    if (_showVideoFrame &&
+        !controller.value.isPlaying &&
+        duration > Duration.zero &&
+        position >= duration - const Duration(milliseconds: 50)) {
+      setState(() {
+        _showVideoFrame = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ChatVideoAttachment attachment = _attachment;
+    final Size videoSize = _videoBubbleSize(context, attachment);
+    final bool isUploading = widget.message.videoUploadPending;
+    final bool isTransferring = isUploading || _downloadInProgress;
+    final VideoPlayerController? controller = _videoController;
+    final bool showVideo =
+        _showVideoFrame && controller != null && controller.value.isInitialized;
+    final int uploadedBytes = isUploading
+        ? widget.message.videoUploadedBytes ?? 0
+        : _downloadedBytes;
+    final int totalBytes = isUploading
+        ? widget.message.videoUploadTotalBytes ?? attachment.sizeBytes ?? 0
+        : _downloadTotalBytes;
+    final ChatPhotoAttachment thumbnail = ChatPhotoAttachment(
+      assetId: attachment.assetId,
+      width: attachment.width,
+      height: attachment.height,
+      mediaAssetId: attachment.mediaAssetId,
+      previewBytes: attachment.previewBytes,
+      fileName: attachment.fileName,
+      mimeType: 'image/jpeg',
+      sizeBytes: attachment.sizeBytes,
+    );
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: isTransferring ? null : _togglePlayback,
+      child: ClipRRect(
+        key: widget.measurementKey,
+        borderRadius: const BorderRadius.all(Radius.circular(14)),
+        child: SizedBox(
+          width: videoSize.width,
+          height: videoSize.height,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _PhotoMessageImage(
+                attachment: thumbnail,
+                itemIndex: 0,
+                width: videoSize.width,
+                height: videoSize.height,
+                onCreateMediaAssetAccessUrl: widget.onCreateThumbnailAccessUrl,
+                persistToDisk: true,
+              ),
+              if (showVideo)
+                FittedBox(
+                  fit: BoxFit.cover,
+                  clipBehavior: Clip.hardEdge,
+                  child: SizedBox(
+                    width: controller.value.size.width,
+                    height: controller.value.size.height,
+                    child: VideoPlayer(controller),
+                  ),
+                ),
+              if (!showVideo) ColoredBox(color: AppColors.black.withAlpha(96)),
+              if (!showVideo && widget.message.videoEncodingPending)
+                const _VideoEncodingIndicator()
+              else if (!showVideo && isTransferring)
+                _PhotoUploadProgress(
+                  uploadedBytes: uploadedBytes,
+                  totalBytes: totalBytes,
+                )
+              else if (!showVideo)
+                _VideoPlayIndicator(duration: attachment.duration),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VideoEncodingIndicator extends StatelessWidget {
+  const _VideoEncodingIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox.square(
+            dimension: 32,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Color(0x58000000),
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: SizedBox.square(
+                  dimension: 15,
+                  child: CustomPaint(painter: _PhotoUploadIconPainter()),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            'Encoding…',
+            style: AppTypography.typography7.copyWith(
+              color: AppColors.white,
+              fontWeight: AppTypography.semibold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _VideoPlayIndicator extends StatelessWidget {
+  const _VideoPlayIndicator({required this.duration});
+
+  final Duration duration;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox.square(
+            dimension: 40,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Color(0x58000000),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.play_arrow_rounded,
+                size: 26,
+                color: AppColors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            _formatChatVideoDuration(duration),
+            style: AppTypography.typography7.copyWith(
+              color: AppColors.white,
+              fontWeight: AppTypography.semibold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Size _videoBubbleSize(BuildContext context, ChatVideoAttachment attachment) {
+  final double maximumWidth = math.min(
+    260,
+    MediaQuery.sizeOf(context).width * 0.68,
+  );
+  final double sourceRatio = attachment.width > 0 && attachment.height > 0
+      ? attachment.width / attachment.height
+      : 1;
+  final double ratio = sourceRatio.clamp(0.66, 1.5).toDouble();
+  double width = maximumWidth;
+  double height = width / ratio;
+
+  if (height > 250) {
+    height = 250;
+    width = height * ratio;
+  }
+
+  return Size(width, height);
+}
+
+String _videoFileExtension(String? fileName) {
+  final String name = fileName ?? '';
+  final int dotIndex = name.lastIndexOf('.');
+
+  if (dotIndex < 0 || dotIndex == name.length - 1) {
+    return 'mp4';
+  }
+
+  return name.substring(dotIndex + 1).toLowerCase();
+}
+
+String _formatChatVideoDuration(Duration duration) {
+  final int totalSeconds = duration.inSeconds;
+  final int hours = totalSeconds ~/ 3600;
+  final int minutes = (totalSeconds % 3600) ~/ 60;
+  final int seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return '$hours:${minutes.toString().padLeft(2, '0')}:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }
 
 final class _PhotoMessage extends StatefulWidget {

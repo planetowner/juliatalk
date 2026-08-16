@@ -187,6 +187,129 @@ void main() {
   );
 
   test(
+    'uploads a video thumbnail and preserves the local playback source',
+    () async {
+      final Uint8List originalBytes = Uint8List.fromList(<int>[1, 2, 3, 4]);
+      final Uint8List thumbnailBytes = Uint8List.fromList(<int>[5, 6]);
+      final List<Uri> requestedUrls = <Uri>[];
+      final MockClient client = MockClient((http.Request request) async {
+        requestedUrls.add(request.url);
+
+        if (request.url == Uri.parse('https://api.example.com/media-assets')) {
+          final Map<String, dynamic> body =
+              jsonDecode(request.body) as Map<String, dynamic>;
+          expect(body['kind'], 'video');
+          expect(body['duration_ms'], 14000);
+
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'media_asset_id': 'video-1',
+              'storage_key': 'original/video.mov',
+              'upload_url': 'https://storage.example.com/video-original',
+              'upload_headers': <String, String>{
+                'Content-Type': 'video/quicktime',
+              },
+              'thumbnail_upload_url':
+                  'https://storage.example.com/video-thumbnail',
+              'thumbnail_upload_headers': <String, String>{
+                'Content-Type': 'image/jpeg',
+              },
+              'expires_in_seconds': 900,
+            }),
+            201,
+            request: request,
+          );
+        }
+
+        if (request.url.host == 'storage.example.com') {
+          expect(request.method, 'PUT');
+          return http.Response('', 200, request: request);
+        }
+
+        if (request.url ==
+            Uri.parse(
+              'https://api.example.com/media-assets/video-1/complete',
+            )) {
+          expect(request.method, 'POST');
+          return http.Response('', 200, request: request);
+        }
+
+        expect(request.url, Uri.parse('https://api.example.com/messages'));
+        expect(request.method, 'POST');
+
+        return http.Response(
+          jsonEncode(<String, Object?>{
+            'id': 'message-video-1',
+            'sender_id': 'current-user',
+            'recipient_id': 'other-user',
+            'content': '',
+            'message_type': 'video',
+            'metadata': <String, Object?>{
+              'video': <String, Object?>{
+                'media_asset_id': 'video-1',
+                'width': 1080,
+                'height': 1920,
+                'duration_ms': 14000,
+                'file_name': 'video.mov',
+                'mime_type': 'video/quicktime',
+                'size_bytes': originalBytes.length,
+              },
+            },
+            'created_at': '2026-08-17T06:30:00Z',
+            'edited_at': null,
+            'read_at': null,
+            'translation_status': 'none',
+            'translated_content': null,
+            'source_language': null,
+            'translated_language': null,
+            'reply_to': null,
+          }),
+          201,
+          request: request,
+        );
+      });
+      final ChatApi chatApi = ChatApi(
+        client: client,
+        baseUri: Uri.parse('https://api.example.com'),
+        accessToken: 'test-token',
+      );
+
+      final ChatMessage message = await chatApi.sendVideoMessage(
+        recipientId: 'other-user',
+        video: ChatVideoAttachment(
+          assetId: 'local-video',
+          width: 1080,
+          height: 1920,
+          duration: const Duration(seconds: 14),
+          previewBytes: thumbnailBytes,
+          fileName: 'video.mov',
+          mimeType: 'video/quicktime',
+          sizeBytes: originalBytes.length,
+          uploadBytes: originalBytes,
+          localPath: '/tmp/video.mov',
+        ),
+      );
+
+      expect(
+        requestedUrls.first,
+        Uri.parse('https://api.example.com/media-assets'),
+      );
+      expect(requestedUrls.sublist(1, 3).toSet(), <Uri>{
+        Uri.parse('https://storage.example.com/video-original'),
+        Uri.parse('https://storage.example.com/video-thumbnail'),
+      });
+      expect(
+        requestedUrls[3],
+        Uri.parse('https://api.example.com/media-assets/video-1/complete'),
+      );
+      expect(requestedUrls[4], Uri.parse('https://api.example.com/messages'));
+      expect(message.videoAttachment?.previewBytes, thumbnailBytes);
+      expect(message.videoAttachment?.localPath, '/tmp/video.mov');
+      expect(message.videoAttachment?.duration, const Duration(seconds: 14));
+    },
+  );
+
+  test(
     'uploads at most three photos concurrently and preserves order',
     () async {
       final List<Completer<void>> uploadStarted =

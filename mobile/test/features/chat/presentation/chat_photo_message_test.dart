@@ -122,16 +122,37 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
     recipientId: '2',
     content: '',
     createdAt: DateTime(2026, 7, 1, 12, 52),
+    photoUploadPending: true,
     photoAttachments: <ChatPhotoAttachment>[
       ChatPhotoAttachment(
         assetId: 'refreshed-photo',
-        mediaAssetId: 'refreshed-photo-media',
         previewBytes: _testPng,
         width: 1179,
         height: 2556,
       ),
     ],
   );
+
+  void completeWithLocalPreview() {
+    setState(() {
+      _message = ChatMessage(
+        id: 'refreshed-photo-message',
+        senderId: '1',
+        recipientId: '2',
+        content: '',
+        createdAt: DateTime(2026, 7, 1, 12, 52),
+        photoAttachments: <ChatPhotoAttachment>[
+          ChatPhotoAttachment(
+            assetId: 'refreshed-photo',
+            mediaAssetId: 'refreshed-photo-media',
+            previewBytes: _testPng,
+            width: 1179,
+            height: 2556,
+          ),
+        ],
+      );
+    });
+  }
 
   void replaceWithServerMessage() {
     setState(() {
@@ -141,10 +162,11 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
         recipientId: '2',
         content: '',
         createdAt: DateTime(2026, 7, 1, 12, 52),
-        photoAttachments: const <ChatPhotoAttachment>[
+        photoAttachments: <ChatPhotoAttachment>[
           ChatPhotoAttachment(
             assetId: 'server-photo',
             mediaAssetId: 'refreshed-photo-media',
+            previewBytes: Uint8List.fromList(_testPng),
             width: 1179,
             height: 2556,
           ),
@@ -410,27 +432,33 @@ void main() {
     );
   });
 
-  testWidgets('a server refresh keeps the visible local photo preview', (
-    WidgetTester tester,
-  ) async {
-    final GlobalKey<_PhotoRefreshHarnessState> harnessKey =
-        GlobalKey<_PhotoRefreshHarnessState>();
+  testWidgets(
+    'a sent photo keeps its rendered image when the parent refreshes it',
+    (WidgetTester tester) async {
+      final GlobalKey<_PhotoRefreshHarnessState> harnessKey =
+          GlobalKey<_PhotoRefreshHarnessState>();
 
-    await tester.pumpWidget(
-      MaterialApp(home: _PhotoRefreshHarness(key: harnessKey)),
-    );
-    await tester.pump();
+      await tester.pumpWidget(
+        MaterialApp(home: _PhotoRefreshHarness(key: harnessKey)),
+      );
+      await tester.pump();
 
-    const ValueKey<String> previewKey = ValueKey<String>(
-      'photo-message-refreshed-photo-0',
-    );
-    expect(find.byKey(previewKey), findsOneWidget);
+      const ValueKey<String> previewKey = ValueKey<String>(
+        'photo-message-refreshed-photo-0',
+      );
+      expect(find.byKey(previewKey), findsOneWidget);
 
-    harnessKey.currentState!.replaceWithServerMessage();
-    await tester.pump();
+      harnessKey.currentState!.completeWithLocalPreview();
+      await tester.pump();
 
-    expect(find.byKey(previewKey), findsOneWidget);
-  });
+      expect(find.byKey(previewKey), findsOneWidget);
+
+      harnessKey.currentState!.replaceWithServerMessage();
+      await tester.pump();
+
+      expect(find.byKey(previewKey), findsOneWidget);
+    },
+  );
 
   testWidgets('incoming photo messages render as incoming media bubbles', (
     WidgetTester tester,

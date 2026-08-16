@@ -7643,11 +7643,15 @@ final class _MessageListState extends State<_MessageList>
         List<ChatPhotoAttachment>.generate(nextPhotos.length, (int index) {
           final ChatPhotoAttachment previousPhoto = previousPhotos[index];
           final ChatPhotoAttachment nextPhoto = nextPhotos[index];
+          final bool completesPendingUpload =
+              previous.photoUploadPending &&
+              previousPhoto.mediaAssetId == null &&
+              nextPhoto.mediaAssetId != null;
 
-          if (nextPhoto.previewBytes != null ||
-              previousPhoto.previewBytes == null ||
+          if (previousPhoto.previewBytes == null ||
               nextPhoto.mediaAssetId == null ||
-              nextPhoto.mediaAssetId != previousPhoto.mediaAssetId) {
+              (!completesPendingUpload &&
+                  nextPhoto.mediaAssetId != previousPhoto.mediaAssetId)) {
             return nextPhoto;
           }
 

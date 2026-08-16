@@ -1135,6 +1135,7 @@ async def translate_and_publish_message(message_id: UUID) -> None:
 async def complete_photo_uploads_and_create_message(
     message_data: MessageCreate,
     background_tasks: BackgroundTasks,
+    response: Response,
     current_user: CurrentUserDependency,
     session: SessionDependency,
 ) -> MessageRead:
@@ -1149,6 +1150,7 @@ async def complete_photo_uploads_and_create_message(
     media_asset_ids = require_media_asset_ids(message_data.metadata)
     request_started_at = perf_counter()
     completion_started_at = perf_counter()
+    server_timings: list[str] = []
 
     for index, media_asset_id in enumerate(media_asset_ids, start=1):
         asset_started_at = perf_counter()
@@ -1157,18 +1159,22 @@ async def complete_photo_uploads_and_create_message(
             current_user,
             session,
         )
+        asset_elapsed_ms = (perf_counter() - asset_started_at) * 1000
+        server_timings.append(f"asset-{index};dur={asset_elapsed_ms:.1f}")
         logger.info(
             "photo_send_timing stage=asset_complete elapsed_ms=%.1f "
             "photo_count=%d photo_index=%d",
-            (perf_counter() - asset_started_at) * 1000,
+            asset_elapsed_ms,
             len(media_asset_ids),
             index,
         )
 
+    completions_elapsed_ms = (perf_counter() - completion_started_at) * 1000
+    server_timings.append(f"asset-completions;dur={completions_elapsed_ms:.1f}")
     logger.info(
         "photo_send_timing stage=asset_completions elapsed_ms=%.1f "
         "photo_count=%d",
-        (perf_counter() - completion_started_at) * 1000,
+        completions_elapsed_ms,
         len(media_asset_ids),
     )
 
@@ -1179,14 +1185,19 @@ async def complete_photo_uploads_and_create_message(
         current_user,
         session,
     )
+    message_elapsed_ms = (perf_counter() - message_started_at) * 1000
+    server_timings.append(f"message-create;dur={message_elapsed_ms:.1f}")
     logger.info(
         "photo_send_timing stage=message_create elapsed_ms=%.1f photo_count=%d",
-        (perf_counter() - message_started_at) * 1000,
+        message_elapsed_ms,
         len(media_asset_ids),
     )
+    server_elapsed_ms = (perf_counter() - request_started_at) * 1000
+    server_timings.append(f"total;dur={server_elapsed_ms:.1f}")
+    response.headers["Server-Timing"] = ", ".join(server_timings)
     logger.info(
         "photo_send_timing stage=server_total elapsed_ms=%.1f photo_count=%d",
-        (perf_counter() - request_started_at) * 1000,
+        server_elapsed_ms,
         len(media_asset_ids),
     )
     return message

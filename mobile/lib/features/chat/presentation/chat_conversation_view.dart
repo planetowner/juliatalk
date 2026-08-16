@@ -23,6 +23,7 @@ import '../../../design_system/app_radius.dart';
 import '../../../design_system/app_typography.dart';
 import '../../../design_system/components/app_profile_image.dart';
 import '../data/chat_photo_library.dart';
+import '../data/photo_send_diagnostics.dart';
 import '../domain/chat_link.dart';
 import '../domain/chat_message_action.dart';
 import '../domain/chat_message.dart';
@@ -92,7 +93,7 @@ void _logPhotoPreparationTiming(
     if (bytes != null) 'bytes=$bytes',
     if (loadedCount != null) 'loaded_count=$loadedCount',
   ];
-  debugPrint(fields.join(' '));
+  recordPhotoSendDiagnostic(fields.join(' '));
 }
 
 typedef _ReplyQuoteTapCallback =
@@ -1101,6 +1102,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }) async {
     final Stopwatch totalStopwatch = Stopwatch()..start();
     final Stopwatch preparationStopwatch = Stopwatch()..start();
+    recordPhotoSendDiagnostic(
+      '[photo-send] stage=trial_start photo_count=${result.assets.length}',
+    );
     final List<ChatPhotoAttachment?> loadedAttachments =
         await Future.wait<ChatPhotoAttachment?>(
           List<Future<ChatPhotoAttachment?>>.generate(result.assets.length, (
@@ -1271,6 +1275,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         photoCount: result.assets.length,
         loadedCount: attachments.length,
       );
+      unawaited(copyPhotoSendDiagnosticsToClipboard());
     } catch (_) {
       if (!mounted) {
         return;

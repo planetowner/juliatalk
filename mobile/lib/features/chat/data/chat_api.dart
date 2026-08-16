@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../../auth/domain/app_user.dart';
@@ -11,6 +10,7 @@ import '../domain/chat_message.dart';
 import 'chat_api_exception.dart';
 import 'chat_realtime_event_state.dart';
 import 'device_link_preview_fetcher.dart';
+import 'photo_send_diagnostics.dart';
 
 void _logPhotoSendTiming(
   String stage,
@@ -29,7 +29,7 @@ void _logPhotoSendTiming(
     if (originalBytes != null) 'original_bytes=$originalBytes',
     if (previewBytes != null) 'preview_bytes=$previewBytes',
   ];
-  debugPrint(fields.join(' '));
+  recordPhotoSendDiagnostic(fields.join(' '));
 }
 
 final class ChatConversationPage {
@@ -553,6 +553,12 @@ final class ChatApi {
       messageType: 'photo',
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{'media_asset_ids': mediaAssetIds},
+      onServerTiming: (String value) {
+        recordPhotoSendDiagnostic(
+          '[photo-send] stage=server_breakdown photo_count=${photos.length} '
+          'timing=$value',
+        );
+      },
     );
     messageStopwatch.stop();
     _logPhotoSendTiming(
@@ -1111,6 +1117,7 @@ final class ChatApi {
     String content = '',
     Map<String, Object?>? metadata,
     String? replyToMessageId,
+    void Function(String value)? onServerTiming,
   }) async {
     // 서버가 메시지 순서에 쓰는 시각을 기기에서 UTC로 고정해 전달해요.
     final Map<String, Object?> body = <String, Object?>{
@@ -1127,6 +1134,11 @@ final class ChatApi {
       headers: _jsonHeaders,
       body: jsonEncode(body),
     );
+    final String? serverTiming = response.headers['server-timing'];
+
+    if (serverTiming != null && serverTiming.isNotEmpty) {
+      onServerTiming?.call(serverTiming);
+    }
 
     if (response.statusCode != 201) {
       throw ChatApiException(

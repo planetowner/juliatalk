@@ -57,6 +57,7 @@ class MediaAssetVariantTests(unittest.TestCase):
         current_user = SimpleNamespace(id=uuid4())
         session = SimpleNamespace()
         background_tasks = SimpleNamespace()
+        response = messages.Response()
         message_data = MessageCreate(
             recipient_id=uuid4(),
             message_type="photo",
@@ -82,12 +83,17 @@ class MediaAssetVariantTests(unittest.TestCase):
                 messages.complete_photo_uploads_and_create_message(
                     message_data,
                     background_tasks,
+                    response,
                     current_user,
                     session,
                 )
             )
 
         self.assertIs(result, expected_message)
+        self.assertIn("asset-1;dur=", response.headers["server-timing"])
+        self.assertIn("asset-2;dur=", response.headers["server-timing"])
+        self.assertIn("message-create;dur=", response.headers["server-timing"])
+        self.assertIn("total;dur=", response.headers["server-timing"])
         self.assertEqual(
             [call.args[0] for call in complete_upload.await_args_list],
             [first_asset_id, second_asset_id],

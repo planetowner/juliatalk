@@ -611,7 +611,7 @@ void main() {
       tester.getSize(
         find.byKey(const ValueKey<String>('photo-upload-progress-circle')),
       ),
-      const Size.square(40),
+      const Size.square(32),
     );
     expect(progressIndicator.strokeWidth, 2.2);
     expect(progressIndicator.backgroundColor, Colors.transparent);

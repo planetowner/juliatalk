@@ -13651,35 +13651,12 @@ final class _VideoEncodingIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox.square(
-            dimension: 32,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: Color(0x58000000),
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: SizedBox.square(
-                  dimension: 15,
-                  child: CustomPaint(painter: _PhotoUploadIconPainter()),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            'Encoding…',
-            style: AppTypography.typography7.copyWith(
-              color: AppColors.white,
-              fontWeight: AppTypography.semibold,
-            ),
-          ),
-        ],
+    return const _MediaStatusIndicator(
+      icon: SizedBox.square(
+        dimension: 15,
+        child: CustomPaint(painter: _PhotoUploadIconPainter()),
       ),
+      label: 'Encoding…',
     );
   }
 }
@@ -13691,32 +13668,69 @@ final class _VideoPlayIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return _MediaStatusIndicator(
+      icon: const Icon(
+        Icons.play_arrow_rounded,
+        size: 26,
+        color: AppColors.white,
+      ),
+      label: _formatChatVideoDuration(duration),
+    );
+  }
+}
+
+final class _MediaStatusIndicator extends StatelessWidget {
+  const _MediaStatusIndicator({
+    required this.icon,
+    this.label,
+    this.progress,
+    this.circleKey,
+  });
+
+  final Widget icon;
+  final String? label;
+  final double? progress;
+  final Key? circleKey;
+
+  @override
+  Widget build(BuildContext context) {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const SizedBox.square(
-            dimension: 40,
+          SizedBox.square(
+            key: circleKey,
+            dimension: 32,
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: Color(0x58000000),
+                color: AppColors.black.withAlpha(88),
                 shape: BoxShape.circle,
               ),
-              child: Icon(
-                Icons.play_arrow_rounded,
-                size: 26,
-                color: AppColors.white,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  if (progress != null)
+                    CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 2.2,
+                      color: AppColors.white,
+                      backgroundColor: Colors.transparent,
+                    ),
+                  icon,
+                ],
               ),
             ),
           ),
-          const SizedBox(height: 3),
-          Text(
-            _formatChatVideoDuration(duration),
-            style: AppTypography.typography7.copyWith(
-              color: AppColors.white,
-              fontWeight: AppTypography.semibold,
+          if (label != null) ...[
+            const SizedBox(height: 3),
+            Text(
+              label!,
+              style: AppTypography.typography7.copyWith(
+                color: AppColors.white,
+                fontWeight: AppTypography.semibold,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -13979,63 +13993,19 @@ final class _PhotoUploadProgress extends StatelessWidget {
     final bool showByteProgress = total > 0 && uploaded < total;
     final bool showProgressRing = showByteProgress && uploaded > 0;
 
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox.square(
-            dimension: 40,
-            child: Center(
-              child: SizedBox.square(
-                key: const ValueKey<String>('photo-upload-progress-circle'),
-                dimension: showProgressRing ? 40 : 32,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: AppColors.black.withAlpha(88),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      if (showProgressRing)
-                        CircularProgressIndicator(
-                          value: uploaded / total,
-                          strokeWidth: 2.2,
-                          color: AppColors.white,
-                          backgroundColor: Colors.transparent,
-                        ),
-                      if (showProgressRing)
-                        const Icon(
-                          Icons.close_rounded,
-                          size: 18,
-                          color: AppColors.white,
-                        )
-                      else
-                        const SizedBox.square(
-                          key: ValueKey<String>('photo-upload-image-icon'),
-                          dimension: 15,
-                          child: CustomPaint(
-                            painter: _PhotoUploadIconPainter(),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
+    return _MediaStatusIndicator(
+      circleKey: const ValueKey<String>('photo-upload-progress-circle'),
+      progress: showProgressRing ? uploaded / total : null,
+      icon: showProgressRing
+          ? const Icon(Icons.close_rounded, size: 18, color: AppColors.white)
+          : const SizedBox.square(
+              key: ValueKey<String>('photo-upload-image-icon'),
+              dimension: 15,
+              child: CustomPaint(painter: _PhotoUploadIconPainter()),
             ),
-          ),
-          if (showByteProgress) ...[
-            const SizedBox(height: 3),
-            Text(
-              _formatPhotoUploadProgress(uploaded, total),
-              style: AppTypography.typography7.copyWith(
-                color: AppColors.white,
-                fontWeight: AppTypography.semibold,
-              ),
-            ),
-          ],
-        ],
-      ),
+      label: showByteProgress
+          ? _formatPhotoUploadProgress(uploaded, total)
+          : null,
     );
   }
 }

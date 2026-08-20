@@ -14824,15 +14824,26 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
     milliseconds: 190,
   );
 
-  static const Color _chromeBarColor = AppColors.black;
+  static const Color _chromeBarColor = Color(0xFF202020);
 
   static const Color _filmstripOverlayColor = Color(0x94000000);
 
   static const Color _thumbnailBorderColor = AppColors.blue500;
 
-  static const double _topBarContentHeight = 72;
+  static const double _backButtonDimension = 44;
 
-  static const double _actionBarContentHeight = 62;
+  static const double _backButtonHorizontalMargin = 16;
+
+  static const double _chromeVerticalSpacing = 23;
+
+  static const double _downloadButtonDimension = 48;
+
+  static const double _actionBarContentHeight =
+      _chromeVerticalSpacing * 2 + _downloadButtonDimension;
+
+  static double _topBarHeight(double topPadding) {
+    return topPadding + _backButtonDimension + _chromeVerticalSpacing;
+  }
 
   late final PageController _pageController;
 
@@ -15043,17 +15054,19 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final EdgeInsets padding = MediaQuery.paddingOf(context);
+    final double topBarHeight = _topBarHeight(padding.top);
     final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.light
         .copyWith(
           statusBarColor: Colors.transparent,
-          systemNavigationBarColor: AppColors.black,
+          systemNavigationBarColor: _chromeBarColor,
           systemNavigationBarIconBrightness: Brightness.light,
         );
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
       child: Scaffold(
-        backgroundColor: AppColors.black,
+        backgroundColor: _chromeBarColor,
         body: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _toggleControls,
@@ -15063,21 +15076,29 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              PageView.builder(
-                key: const ValueKey<String>('photo-viewer-page-view'),
-                controller: _pageController,
-                itemCount: widget.attachments.length,
-                onPageChanged: _handlePageChanged,
-                itemBuilder: (BuildContext context, int index) {
-                  return _PhotoViewerPage(
-                    attachment: widget.attachments[index],
-                    onCreateMediaAssetAccessUrl:
-                        widget.onCreateMediaAssetAccessUrl,
-                  );
-                },
+              Positioned(
+                left: 0,
+                top: topBarHeight,
+                right: 0,
+                bottom: 0,
+                child: PageView.builder(
+                  key: const ValueKey<String>('photo-viewer-page-view'),
+                  controller: _pageController,
+                  itemCount: widget.attachments.length,
+                  onPageChanged: _handlePageChanged,
+                  itemBuilder: (BuildContext context, int index) {
+                    return _PhotoViewerPage(
+                      attachment: widget.attachments[index],
+                      onCreateMediaAssetAccessUrl:
+                          widget.onCreateMediaAssetAccessUrl,
+                    );
+                  },
+                ),
               ),
               _PhotoViewerTopBar(
                 visible: _controlsVisible,
+                height: topBarHeight,
+                topPadding: padding.top,
                 senderName: widget.senderName,
                 sentAt: widget.sentAt,
                 onBackPressed: _close,
@@ -15143,20 +15164,22 @@ final class _PhotoViewerPage extends StatelessWidget {
 final class _PhotoViewerTopBar extends StatelessWidget {
   const _PhotoViewerTopBar({
     required this.visible,
+    required this.height,
+    required this.topPadding,
     required this.senderName,
     required this.sentAt,
     required this.onBackPressed,
   });
 
   final bool visible;
+  final double height;
+  final double topPadding;
   final String senderName;
   final DateTime sentAt;
   final VoidCallback onBackPressed;
 
   @override
   Widget build(BuildContext context) {
-    final EdgeInsets padding = MediaQuery.paddingOf(context);
-
     return Positioned(
       left: 0,
       top: 0,
@@ -15172,52 +15195,65 @@ final class _PhotoViewerTopBar extends StatelessWidget {
             duration: _PhotoViewerScreenState._controlsAnimationDuration,
             opacity: visible ? 1 : 0,
             child: Container(
-              height:
-                  padding.top + _PhotoViewerScreenState._topBarContentHeight,
-              padding: EdgeInsets.only(top: padding.top),
+              height: height,
               color: _PhotoViewerScreenState._chromeBarColor,
-              child: Row(
+              child: Stack(
                 children: [
-                  SizedBox(
-                    width: 54,
-                    height: 54,
-                    child: IconButton(
+                  Positioned(
+                    left: _PhotoViewerScreenState._backButtonHorizontalMargin,
+                    top: topPadding,
+                    child: _PhotoViewerChromeButton(
                       key: const ValueKey<String>('photo-viewer-back'),
+                      dimension: _PhotoViewerScreenState._backButtonDimension,
                       onPressed: onBackPressed,
-                      icon: const Icon(
-                        Icons.chevron_left_rounded,
-                        color: AppColors.white,
-                        size: 34,
+                      icon: const _PhotoViewerBackIcon(),
+                    ),
+                  ),
+                  Positioned(
+                    left:
+                        _PhotoViewerScreenState._backButtonHorizontalMargin +
+                        _PhotoViewerScreenState._backButtonDimension,
+                    top: topPadding,
+                    right:
+                        _PhotoViewerScreenState._backButtonHorizontalMargin +
+                        _PhotoViewerScreenState._backButtonDimension,
+                    height: _PhotoViewerScreenState._backButtonDimension,
+                    child: Center(
+                      child: Column(
+                        key: const ValueKey<String>('photo-viewer-info'),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            key: const ValueKey<String>(
+                              'photo-viewer-sender-name',
+                            ),
+                            senderName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.typography6.copyWith(
+                              color: const Color(0xFFF2F2F2),
+                              fontWeight: AppTypography.bold,
+                              height: 18 / 15,
+                            ),
+                          ),
+                          Text(
+                            key: const ValueKey<String>(
+                              'photo-viewer-timestamp',
+                            ),
+                            _formatPhotoViewerTimestamp(sentAt),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: AppTypography.typography7.copyWith(
+                              color: const Color(0xFFF2F2F2),
+                              fontWeight: AppTypography.regular,
+                              height: 16 / 13,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          senderName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTypography.subTypography10.copyWith(
-                            color: AppColors.white,
-                            fontWeight: AppTypography.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 0),
-                        Text(
-                          _formatPhotoViewerTimestamp(sentAt),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTypography.subTypography11.copyWith(
-                            color: AppColors.grey200,
-                            fontWeight: AppTypography.regular,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 54, height: 54),
                 ],
               ),
             ),
@@ -15253,8 +15289,6 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final EdgeInsets padding = MediaQuery.paddingOf(context);
-
     return Positioned(
       left: 0,
       right: 0,
@@ -15288,20 +15322,15 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
                     ),
                   ),
                 Container(
-                  height:
-                      _PhotoViewerScreenState._actionBarContentHeight +
-                      padding.bottom,
-                  padding: EdgeInsets.only(bottom: padding.bottom),
+                  height: _PhotoViewerScreenState._actionBarContentHeight,
                   color: _PhotoViewerScreenState._chromeBarColor,
                   child: Center(
-                    child: IconButton(
+                    child: _PhotoViewerChromeButton(
                       key: const ValueKey<String>('photo-viewer-download'),
+                      dimension:
+                          _PhotoViewerScreenState._downloadButtonDimension,
                       onPressed: onDownloadPressed,
-                      icon: const Icon(
-                        Icons.file_download_outlined,
-                        color: AppColors.white,
-                        size: 31,
-                      ),
+                      icon: const _PhotoViewerDownloadIcon(),
                     ),
                   ),
                 ),
@@ -15311,6 +15340,174 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+final class _PhotoViewerChromeButton extends StatelessWidget {
+  const _PhotoViewerChromeButton({
+    required this.dimension,
+    required this.onPressed,
+    required this.icon,
+    super.key,
+  });
+
+  final double dimension;
+  final VoidCallback onPressed;
+  final Widget icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: dimension,
+      height: dimension,
+      decoration: BoxDecoration(
+        color: const Color(0xFF272727),
+        shape: BoxShape.circle,
+        border: Border.all(color: const Color(0xFF4E4E4E), width: 0.67),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const CircleBorder(),
+          child: Center(child: icon),
+        ),
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerBackIcon extends StatelessWidget {
+  const _PhotoViewerBackIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return const _PhotoViewerChevronIcon(
+      size: Size.square(24),
+      start: Offset(16, 3),
+      vertex: Offset(6, 12),
+      end: Offset(16, 21),
+      color: Color(0xFFE8E8E8),
+      strokeWidth: 2,
+    );
+  }
+}
+
+final class _PhotoViewerChevronIcon extends StatelessWidget {
+  const _PhotoViewerChevronIcon({
+    required this.size,
+    required this.start,
+    required this.vertex,
+    required this.end,
+    required this.color,
+    required this.strokeWidth,
+  });
+
+  final Size size;
+  final Offset start;
+  final Offset vertex;
+  final Offset end;
+  final Color color;
+  final double strokeWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.fromSize(
+      size: size,
+      child: CustomPaint(
+        painter: _PhotoViewerChevronIconPainter(
+          start: start,
+          vertex: vertex,
+          end: end,
+          color: color,
+          strokeWidth: strokeWidth,
+        ),
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerChevronIconPainter extends CustomPainter {
+  const _PhotoViewerChevronIconPainter({
+    required this.start,
+    required this.vertex,
+    required this.end,
+    required this.color,
+    required this.strokeWidth,
+  });
+
+  final Offset start;
+  final Offset vertex;
+  final Offset end;
+  final Color color;
+  final double strokeWidth;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final Path path = Path()
+      ..moveTo(start.dx, start.dy)
+      ..lineTo(vertex.dx, vertex.dy)
+      ..lineTo(end.dx, end.dy);
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PhotoViewerChevronIconPainter oldDelegate) {
+    return start != oldDelegate.start ||
+        vertex != oldDelegate.vertex ||
+        end != oldDelegate.end ||
+        color != oldDelegate.color ||
+        strokeWidth != oldDelegate.strokeWidth;
+  }
+}
+
+final class _PhotoViewerDownloadIcon extends StatelessWidget {
+  const _PhotoViewerDownloadIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox.square(
+      dimension: 24,
+      child: CustomPaint(painter: _PhotoViewerDownloadIconPainter()),
+    );
+  }
+}
+
+final class _PhotoViewerDownloadIconPainter extends CustomPainter {
+  const _PhotoViewerDownloadIconPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = AppColors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    canvas.drawLine(const Offset(12, 2), const Offset(12, 14), paint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(6, 9)
+        ..lineTo(12, 15)
+        ..lineTo(18, 9),
+      paint,
+    );
+    canvas.drawLine(const Offset(3, 20.5), const Offset(21, 20.5), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PhotoViewerDownloadIconPainter oldDelegate) {
+    return false;
   }
 }
 

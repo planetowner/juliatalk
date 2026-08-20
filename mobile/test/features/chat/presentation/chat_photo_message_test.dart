@@ -14,8 +14,18 @@ final Uint8List _testPng = base64Decode(
   'FwcdLl4wmwAAAAtJREFUCNdjYAACAAAFAAHiJgWbAAAAAElFTkSuQmCC',
 );
 
-Widget _buildPhotoMessageScreen(ChatMessage message) {
+Widget _buildPhotoMessageScreen(ChatMessage message, {double? topPadding}) {
   return MaterialApp(
+    builder: topPadding == null
+        ? null
+        : (BuildContext context, Widget? child) {
+            return MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(padding: EdgeInsets.only(top: topPadding)),
+              child: child!,
+            );
+          },
     home: ChatConversationView(initialMessages: <ChatMessage>[message]),
   );
 }
@@ -654,7 +664,10 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(
-      _buildPhotoMessageScreen(_photoMessage(senderId: '1', recipientId: '2')),
+      _buildPhotoMessageScreen(
+        _photoMessage(senderId: '1', recipientId: '2'),
+        topPadding: 59,
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -673,10 +686,93 @@ void main() {
       find.byKey(const ValueKey<String>('photo-viewer-download')),
       findsOneWidget,
     );
+    final Finder backButton = find.byKey(
+      const ValueKey<String>('photo-viewer-back'),
+    );
+    final Finder downloadButton = find.byKey(
+      const ValueKey<String>('photo-viewer-download'),
+    );
+    final Finder topBar = find.byKey(
+      const ValueKey<String>('photo-viewer-top-bar'),
+    );
+    final Finder pageView = find.byKey(
+      const ValueKey<String>('photo-viewer-page-view'),
+    );
+    final Finder bottomOverlay = find.byKey(
+      const ValueKey<String>('photo-viewer-bottom-overlay'),
+    );
+    final Finder info = find.byKey(const ValueKey<String>('photo-viewer-info'));
+    final Finder senderName = find.byKey(
+      const ValueKey<String>('photo-viewer-sender-name'),
+    );
+    final Finder timestamp = find.byKey(
+      const ValueKey<String>('photo-viewer-timestamp'),
+    );
+    final Finder timestampChevron = find.byKey(
+      const ValueKey<String>('photo-viewer-timestamp-chevron'),
+    );
+    final Scaffold photoViewerScaffold = tester
+        .widgetList<Scaffold>(find.byType(Scaffold))
+        .last;
+    final Finder backButtonSurface = find.descendant(
+      of: backButton,
+      matching: find.byType(Container),
+    );
+    final BoxDecoration backButtonDecoration =
+        tester.widget<Container>(backButtonSurface).decoration!
+            as BoxDecoration;
+    final Border backButtonBorder = backButtonDecoration.border! as Border;
+    final Rect topBarRect = tester.getRect(topBar);
+    final Rect pageViewRect = tester.getRect(pageView);
+    final Rect bottomOverlayRect = tester.getRect(bottomOverlay);
+    final Rect photoViewerScaffoldRect = tester.getRect(
+      find.byWidget(photoViewerScaffold),
+    );
+    final Rect backButtonRect = tester.getRect(backButton);
+    final Rect downloadButtonRect = tester.getRect(downloadButton);
+    final Text senderNameText = tester.widget<Text>(senderName);
+    final Text timestampText = tester.widget<Text>(timestamp);
+
+    expect(photoViewerScaffold.backgroundColor, const Color(0xFF202020));
+    expect(tester.getSize(backButton), const Size.square(44));
+    expect(tester.getSize(downloadButton), const Size.square(48));
+    expect(backButtonDecoration.color, const Color(0xFF272727));
+    expect(backButtonDecoration.shape, BoxShape.circle);
+    expect(backButtonBorder.top.color, const Color(0xFF4E4E4E));
+    expect(backButtonBorder.top.width, 0.67);
+    expect(topBarRect.height, 59 + 44 + 23);
+    expect(backButtonRect.top - topBarRect.top, 59);
+    expect(topBarRect.bottom - backButtonRect.bottom, 23);
+    expect(pageViewRect.top, topBarRect.bottom);
+    expect(pageViewRect.bottom, photoViewerScaffoldRect.bottom);
+    expect(bottomOverlayRect.height, 23 + 48 + 23);
+    expect(bottomOverlayRect.bottom, photoViewerScaffoldRect.bottom);
+    expect(downloadButtonRect.top - bottomOverlayRect.top, 23);
+    expect(bottomOverlayRect.bottom - downloadButtonRect.bottom, 23);
+    expect(tester.getCenter(info).dy, tester.getCenter(backButton).dy);
+    expect(tester.getCenter(senderName).dx, topBarRect.center.dx);
+    expect(tester.getCenter(timestamp).dx, topBarRect.center.dx);
+    expect(senderNameText.style?.fontSize, 15);
+    expect(senderNameText.style?.fontWeight, FontWeight.w700);
+    expect(senderNameText.style?.height, 18 / 15);
+    expect(senderNameText.style?.color, const Color(0xFFF2F2F2));
+    expect(timestampText.style?.fontSize, 13);
+    expect(timestampText.style?.fontWeight, FontWeight.w400);
+    expect(timestampText.style?.height, 16 / 13);
+    expect(timestampText.style?.color, const Color(0xFFF2F2F2));
+    expect(timestampChevron, findsNothing);
     expect(find.text('Me'), findsOneWidget);
     expect(find.text('Jul 1, 2026 at 12:52 PM'), findsOneWidget);
     expect(
       find.byKey(const ValueKey<String>('photo-viewer-counter')),
+      findsNothing,
+    );
+
+    await tester.tap(backButton);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey<String>('photo-viewer-image-photo-preview-0')),
       findsNothing,
     );
   });

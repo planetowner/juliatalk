@@ -16947,7 +16947,7 @@ final class _AttachmentPanelActionData {
   final Color foregroundColor;
 }
 
-final class _ComposerBottomSurface extends StatelessWidget {
+final class _ComposerBottomSurface extends StatefulWidget {
   const _ComposerBottomSurface({
     required this.height,
     required this.showAttachmentPanel,
@@ -16993,31 +16993,49 @@ final class _ComposerBottomSurface extends StatelessWidget {
   final GestureDragEndCallback onPhotoPickerDragEnd;
 
   @override
+  State<_ComposerBottomSurface> createState() {
+    return _ComposerBottomSurfaceState();
+  }
+}
+
+final class _ComposerBottomSurfaceState extends State<_ComposerBottomSurface> {
+  bool _replacingVisiblePanel = false;
+
+  @override
+  void didUpdateWidget(covariant _ComposerBottomSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    _replacingVisiblePanel =
+        (oldWidget.showAttachmentPanel && widget.showPhotoPicker) ||
+        (oldWidget.showPhotoPicker && widget.showAttachmentPanel);
+  }
+
+  @override
   Widget build(BuildContext context) {
     late final Key surfaceKey;
     late final Widget surface;
 
-    if (showPhotoPicker) {
+    if (widget.showPhotoPicker) {
       surfaceKey = const ValueKey<String>('photo-picker-visible');
 
       surface = ChatPhotoPicker(
-        photoLibrary: photoLibrary,
-        expanded: photoPickerExpanded,
-        onClose: onClosePhotoPicker,
-        onSend: onSendPhotos,
-        onHandleDragStart: onPhotoPickerDragStart,
-        onHandleDragUpdate: onPhotoPickerDragUpdate,
-        onHandleDragEnd: onPhotoPickerDragEnd,
+        photoLibrary: widget.photoLibrary,
+        expanded: widget.photoPickerExpanded,
+        onClose: widget.onClosePhotoPicker,
+        onSend: widget.onSendPhotos,
+        onHandleDragStart: widget.onPhotoPickerDragStart,
+        onHandleDragUpdate: widget.onPhotoPickerDragUpdate,
+        onHandleDragEnd: widget.onPhotoPickerDragEnd,
       );
-    } else if (showAttachmentPanel) {
+    } else if (widget.showAttachmentPanel) {
       surfaceKey = const ValueKey<String>('attachment-panel-visible');
 
       surface = _ChatAttachmentPanel(
-        onPhotoPressed: onPhotoPressed,
-        onCameraPressed: onCameraPressed,
-        onCallPressed: onCallPressed,
-        onFilePressed: onFilePressed,
-        onVoiceMemoPressed: onVoiceMemoPressed,
+        onPhotoPressed: widget.onPhotoPressed,
+        onCameraPressed: widget.onCameraPressed,
+        onCallPressed: widget.onCallPressed,
+        onFilePressed: widget.onFilePressed,
+        onVoiceMemoPressed: widget.onVoiceMemoPressed,
       );
     } else {
       surfaceKey = const ValueKey<String>('attachment-panel-hidden');
@@ -17028,10 +17046,12 @@ final class _ComposerBottomSurface extends StatelessWidget {
     return AnimatedContainer(
       key: const ValueKey<String>('composer-bottom-surface'),
       width: double.infinity,
-      height: height,
-      duration: animateHeight ? _bottomSurfaceAnimationDuration : Duration.zero,
+      height: widget.height,
+      duration: widget.animateHeight && !_replacingVisiblePanel
+          ? _bottomSurfaceAnimationDuration
+          : Duration.zero,
       curve: Curves.easeOutCubic,
-      onEnd: onHeightAnimationEnd,
+      onEnd: widget.onHeightAnimationEnd,
       clipBehavior: Clip.hardEdge,
       decoration: const BoxDecoration(color: AppColors.white),
       child: AnimatedSwitcher(

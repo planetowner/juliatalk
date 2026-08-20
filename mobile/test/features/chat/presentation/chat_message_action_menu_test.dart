@@ -2179,6 +2179,50 @@ void main() {
     expect(editableText.focusNode.hasFocus, isFalse);
   });
 
+  testWidgets('photo picker keeps the message viewport boundary fixed', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pumpAndSettle();
+
+    final Finder messageListFinder = find.byKey(
+      const ValueKey<String>('message-list-tap-area'),
+    );
+    final double attachmentPanelBoundary = tester
+        .getRect(messageListFinder)
+        .bottom;
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('attachment-action-photo')),
+    );
+
+    for (final Duration elapsed in <Duration>[
+      Duration.zero,
+      const Duration(milliseconds: 16),
+      const Duration(milliseconds: 32),
+      const Duration(milliseconds: 64),
+      const Duration(milliseconds: 180),
+    ]) {
+      await tester.pump(elapsed);
+
+      expect(
+        tester.getRect(messageListFinder).bottom,
+        closeTo(attachmentPanelBoundary, 0.1),
+      );
+    }
+
+    expect(find.byKey(const ValueKey<String>('photo-picker')), findsOneWidget);
+  });
+
   testWidgets('attachment panel and keyboard mode preserve the draft', (
     WidgetTester tester,
   ) async {

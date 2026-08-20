@@ -105,6 +105,59 @@ class MediaAssetVariantTests(unittest.TestCase):
             session,
         )
 
+    def test_video_message_completes_upload_and_creates_message_together(
+        self,
+    ) -> None:
+        asset_id = uuid4()
+        current_user = SimpleNamespace(id=uuid4())
+        session = SimpleNamespace()
+        background_tasks = SimpleNamespace()
+        response = messages.Response()
+        message_data = MessageCreate(
+            recipient_id=uuid4(),
+            message_type="video",
+            metadata={"media_asset_ids": [str(asset_id)]},
+        )
+        expected_message = SimpleNamespace(id=uuid4())
+
+        with (
+            patch.object(
+                messages,
+                "complete_media_asset_upload",
+                new=AsyncMock(),
+            ) as complete_upload,
+            patch.object(
+                messages,
+                "create_message",
+                new=AsyncMock(return_value=expected_message),
+            ) as create_message,
+        ):
+            result = asyncio.run(
+                messages.complete_video_upload_and_create_message(
+                    message_data,
+                    background_tasks,
+                    response,
+                    current_user,
+                    session,
+                )
+            )
+
+        self.assertIs(result, expected_message)
+        self.assertIn("asset-completion;dur=", response.headers["server-timing"])
+        self.assertIn("message-create;dur=", response.headers["server-timing"])
+        self.assertIn("total;dur=", response.headers["server-timing"])
+        complete_upload.assert_awaited_once_with(
+            asset_id,
+            current_user,
+            session,
+        )
+        create_message.assert_awaited_once_with(
+            message_data,
+            background_tasks,
+            current_user,
+            session,
+        )
+
     def test_photo_upload_prepares_original_and_chat_thumbnail(self) -> None:
         storage = _FakeObjectStorage()
         session = _FakeSession()

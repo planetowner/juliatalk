@@ -1204,6 +1204,57 @@ async def complete_photo_uploads_and_create_message(
 
 
 @router.post(
+    "/video",
+    response_model=MessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def complete_video_upload_and_create_message(
+    message_data: MessageCreate,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    current_user: CurrentUserDependency,
+    session: SessionDependency,
+) -> MessageRead:
+    if message_data.message_type != "video":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="message_type must be video",
+        )
+
+    validate_message_metadata("video", message_data.metadata)
+    assert message_data.metadata is not None
+    media_asset_ids = require_media_asset_ids(message_data.metadata)
+    request_started_at = perf_counter()
+    completion_started_at = perf_counter()
+
+    for media_asset_id in media_asset_ids:
+        await complete_media_asset_upload(
+            media_asset_id,
+            current_user,
+            session,
+        )
+
+    completion_elapsed_ms = (perf_counter() - completion_started_at) * 1000
+    message_started_at = perf_counter()
+    message = await create_message(
+        message_data,
+        background_tasks,
+        current_user,
+        session,
+    )
+    message_elapsed_ms = (perf_counter() - message_started_at) * 1000
+    server_elapsed_ms = (perf_counter() - request_started_at) * 1000
+    response.headers["Server-Timing"] = ", ".join(
+        (
+            f"asset-completion;dur={completion_elapsed_ms:.1f}",
+            f"message-create;dur={message_elapsed_ms:.1f}",
+            f"total;dur={server_elapsed_ms:.1f}",
+        )
+    )
+    return message
+
+
+@router.post(
     "",
     response_model=MessageRead,
     status_code=status.HTTP_201_CREATED,

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -51,6 +52,7 @@ void main() {
     () async {
       final Uint8List originalBytes = Uint8List(65537);
       final Uint8List thumbnailBytes = Uint8List.fromList(<int>[4, 5]);
+      final DateTime createdAt = DateTime.utc(2026, 8, 16, 3, 59, 58);
       final List<Uri> requestedUrls = <Uri>[];
       final List<(String, int, int)> uploadProgress = <(String, int, int)>[];
       final Completer<void> thumbnailUploadStarted = Completer<void>();
@@ -104,6 +106,10 @@ void main() {
             'media_asset_ids': <String>['photo-1'],
           }),
         );
+        expect(
+          jsonDecode(request.body),
+          containsPair('created_at', createdAt.toIso8601String()),
+        );
 
         return http.Response(
           jsonEncode(<String, Object?>{
@@ -146,6 +152,7 @@ void main() {
 
       await chatApi.sendPhotoMessage(
         recipientId: 'other-user',
+        createdAt: createdAt,
         photos: <ChatPhotoAttachment>[
           ChatPhotoAttachment(
             assetId: 'local-photo',
@@ -191,6 +198,14 @@ void main() {
     () async {
       final Uint8List originalBytes = Uint8List.fromList(<int>[1, 2, 3, 4]);
       final Uint8List thumbnailBytes = Uint8List.fromList(<int>[5, 6]);
+      final DateTime createdAt = DateTime.utc(2026, 8, 17, 6, 29, 58);
+      final Directory temporaryDirectory = await Directory.systemTemp
+          .createTemp('juliatalk-video-upload-test-');
+      addTearDown(() => temporaryDirectory.delete(recursive: true));
+      final File encodedVideo = File(
+        '${temporaryDirectory.path}/encoded-video.mp4',
+      );
+      await encodedVideo.writeAsBytes(originalBytes);
       final List<Uri> requestedUrls = <Uri>[];
       final MockClient client = MockClient((http.Request request) async {
         requestedUrls.add(request.url);
@@ -223,19 +238,21 @@ void main() {
 
         if (request.url.host == 'storage.example.com') {
           expect(request.method, 'PUT');
+          if (request.url.path == '/video-original') {
+            expect(request.bodyBytes, originalBytes);
+          }
           return http.Response('', 200, request: request);
         }
 
-        if (request.url ==
-            Uri.parse(
-              'https://api.example.com/media-assets/video-1/complete',
-            )) {
-          expect(request.method, 'POST');
-          return http.Response('', 200, request: request);
-        }
-
-        expect(request.url, Uri.parse('https://api.example.com/messages'));
+        expect(
+          request.url,
+          Uri.parse('https://api.example.com/messages/video'),
+        );
         expect(request.method, 'POST');
+        expect(
+          jsonDecode(request.body),
+          containsPair('created_at', createdAt.toIso8601String()),
+        );
 
         return http.Response(
           jsonEncode(<String, Object?>{
@@ -276,6 +293,7 @@ void main() {
 
       final ChatMessage message = await chatApi.sendVideoMessage(
         recipientId: 'other-user',
+        createdAt: createdAt,
         video: ChatVideoAttachment(
           assetId: 'local-video',
           width: 1080,
@@ -285,8 +303,7 @@ void main() {
           fileName: 'video.mov',
           mimeType: 'video/quicktime',
           sizeBytes: originalBytes.length,
-          uploadBytes: originalBytes,
-          localPath: '/tmp/video.mov',
+          localPath: encodedVideo.path,
         ),
       );
 
@@ -300,11 +317,10 @@ void main() {
       });
       expect(
         requestedUrls[3],
-        Uri.parse('https://api.example.com/media-assets/video-1/complete'),
+        Uri.parse('https://api.example.com/messages/video'),
       );
-      expect(requestedUrls[4], Uri.parse('https://api.example.com/messages'));
       expect(message.videoAttachment?.previewBytes, thumbnailBytes);
-      expect(message.videoAttachment?.localPath, '/tmp/video.mov');
+      expect(message.videoAttachment?.localPath, encodedVideo.path);
       expect(message.videoAttachment?.duration, const Duration(seconds: 14));
     },
   );

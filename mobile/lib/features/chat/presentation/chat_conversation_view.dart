@@ -24,6 +24,7 @@ import '../../../design_system/app_radius.dart';
 import '../../../design_system/app_typography.dart';
 import '../../../design_system/components/app_profile_image.dart';
 import '../data/chat_photo_library.dart';
+import '../data/chat_video_transcoder.dart';
 import '../data/photo_send_diagnostics.dart';
 import '../domain/chat_link.dart';
 import '../domain/chat_message_action.dart';
@@ -101,6 +102,28 @@ void _logPhotoPreparationTiming(
   recordPhotoSendDiagnostic(fields.join(' '));
 }
 
+void _logVideoSendTiming(
+  String stage,
+  Stopwatch stopwatch, {
+  required int videoCount,
+  required int videoIndex,
+  int? originalBytes,
+  int? encodedBytes,
+  int? previewBytes,
+}) {
+  final List<String> fields = <String>[
+    '[video-send]',
+    'stage=$stage',
+    'elapsed_ms=${(stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1)}',
+    'video_count=$videoCount',
+    'video_index=$videoIndex',
+    if (originalBytes != null) 'original_bytes=$originalBytes',
+    if (encodedBytes != null) 'encoded_bytes=$encodedBytes',
+    if (previewBytes != null) 'preview_bytes=$previewBytes',
+  ];
+  recordPhotoSendDiagnostic(fields.join(' '));
+}
+
 typedef _ReplyQuoteTapCallback =
     Future<void> Function({
       required String replyMessageId,
@@ -125,6 +148,7 @@ typedef ChatPhotoMessageSender =
     Future<List<ChatMessage>> Function({
       required List<ChatPhotoAttachment> attachments,
       required bool collage,
+      required List<DateTime> createdAts,
       ChatReplyReference? replyTo,
       ChatPhotoUploadProgressCallback? onUploadProgress,
     });
@@ -132,6 +156,7 @@ typedef ChatPhotoMessageSender =
 typedef ChatVideoMessageSender =
     Future<ChatMessage> Function({
       required ChatVideoAttachment attachment,
+      required DateTime createdAt,
       ChatReplyReference? replyTo,
       ChatVideoUploadProgressCallback? onUploadProgress,
     });
@@ -380,6 +405,7 @@ final class ChatConversationView extends StatefulWidget {
     super.key,
     this.controller,
     this.photoLibrary,
+    this.videoTranscoder,
     this.initialMessages,
     this.showingLatestWindow = true,
     this.hasMoreMessages = false,
@@ -421,6 +447,7 @@ final class ChatConversationView extends StatefulWidget {
 
   final ChatConversationViewController? controller;
   final ChatPhotoLibrary? photoLibrary;
+  final ChatVideoTranscoder? videoTranscoder;
   final List<ChatMessage>? initialMessages;
   final bool showingLatestWindow;
   final bool hasMoreMessages;
@@ -489,6 +516,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _createCachedMediaAssetAccessUrl;
 
   late final ChatPhotoLibrary _photoLibrary;
+  late final ChatVideoTranscoder _videoTranscoder;
 
   final Set<String> _shownQuickPhotoAssetIds = <String>{};
 
@@ -562,6 +590,11 @@ final class _ChatConversationViewState extends State<ChatConversationView>
 
     widget.controller?._attach(this);
     _photoLibrary = widget.photoLibrary ?? PhotoManagerChatPhotoLibrary();
+    _videoTranscoder =
+        widget.videoTranscoder ??
+        (Platform.isIOS
+            ? const MethodChannelChatVideoTranscoder()
+            : const OriginalChatVideoTranscoder());
 
     WidgetsBinding.instance.addObserver(this);
     _messageFocusNode.addListener(_handleMessageFocusChanged);
@@ -1069,85 +1102,135 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   }
 
   Future<void> _sendSelectedPhotos(ChatPhotoSelectionResult result) async {
-    if (result.assets.length == 1 && result.assets.first.isVideo) {
-      await _sendSelectedVideo(result);
-      return;
-    }
-
     final _MessageListState? messageListState = _messageListKey.currentState;
+    final List<ChatPhotoAsset> photoAssets = result.assets
+        .where((ChatPhotoAsset asset) => !asset.isVideo)
+        .toList(growable: false);
+    final List<ChatPhotoAsset> videoAssets = result.assets
+        .where((ChatPhotoAsset asset) => asset.isVideo)
+        .toList(growable: false);
 
     if (messageListState == null || result.assets.isEmpty) {
       return;
     }
 
     final ChatReplyReference? replyTo = _currentReplyReference();
-    final List<ChatPhotoAttachment> pendingAttachments = result.assets
-        .map(
-          (ChatPhotoAsset asset) => ChatPhotoAttachment(
+    final ChatPhotoMessageSender? photoSender = widget.onSendPhotoMessages;
+    final ChatVideoMessageSender? videoSender = widget.onSendVideoMessage;
+    final ChatPhotoSelectionResult? photoResult = photoAssets.isEmpty
+        ? null
+        : ChatPhotoSelectionResult(
+            assets: photoAssets,
+            collage: result.collage,
+            previewBytesByAssetId: <String, Uint8List>{
+              for (final ChatPhotoAsset asset in photoAssets)
+                if (result.previewBytesByAssetId.containsKey(asset.id))
+                  asset.id: result.previewBytesByAssetId[asset.id]!,
+            },
+          );
+    final List<ChatMessage> pendingPhotoMessages = photoResult == null
+        ? const <ChatMessage>[]
+        : messageListState.addOutgoingPhotoMessages(
+            attachments: photoAssets
+                .map(
+                  (ChatPhotoAsset asset) => ChatPhotoAttachment(
+                    assetId: asset.id,
+                    previewBytes: result.previewBytesByAssetId[asset.id],
+                    width: asset.width,
+                    height: asset.height,
+                  ),
+                )
+                .toList(growable: false),
+            collage: result.collage,
+            replyTo: replyTo,
+            photoUploadPending: photoSender != null,
+          );
+    final List<ChatMessage> pendingVideoMessages = <ChatMessage>[];
+    DateTime nextVideoCreatedAt = pendingPhotoMessages.isEmpty
+        ? DateTime.now()
+        : pendingPhotoMessages.last.createdAt.add(
+            const Duration(microseconds: 1),
+          );
+
+    for (final ChatPhotoAsset asset in videoAssets) {
+      pendingVideoMessages.add(
+        messageListState.addOutgoingVideoMessage(
+          attachment: ChatVideoAttachment(
             assetId: asset.id,
-            previewBytes: result.previewBytesByAssetId[asset.id],
             width: asset.width,
             height: asset.height,
+            duration: asset.duration,
+            previewBytes: result.previewBytesByAssetId[asset.id],
           ),
-        )
-        .toList(growable: false);
-    final ChatPhotoMessageSender? sender = widget.onSendPhotoMessages;
-    final List<ChatMessage> pendingMessages = messageListState
-        .addOutgoingPhotoMessages(
-          attachments: pendingAttachments,
-          collage: result.collage,
           replyTo: replyTo,
-          photoUploadPending: sender != null,
-        );
+          videoEncodingPending: videoSender != null,
+          createdAt: nextVideoCreatedAt,
+        ),
+      );
+      nextVideoCreatedAt = nextVideoCreatedAt.add(
+        const Duration(microseconds: 1),
+      );
+    }
 
     _dismissComposerAfterAttachmentSend();
 
-    if (sender != null) {
+    if (photoSender != null || videoSender != null) {
       unawaited(
-        _completeSelectedPhotoSend(
-          result: result,
-          sender: sender,
-          pendingMessages: pendingMessages,
+        _completeSelectedMediaSend(
+          photoResult: photoResult,
+          photoSender: photoSender,
+          pendingPhotoMessages: pendingPhotoMessages,
+          videoAssets: videoAssets,
+          videoSender: videoSender,
+          pendingVideoMessages: pendingVideoMessages,
           replyTo: replyTo,
         ),
       );
     }
   }
 
-  Future<void> _sendSelectedVideo(ChatPhotoSelectionResult result) async {
-    final _MessageListState? messageListState = _messageListKey.currentState;
+  Future<void> _completeSelectedMediaSend({
+    required ChatPhotoSelectionResult? photoResult,
+    required ChatPhotoMessageSender? photoSender,
+    required List<ChatMessage> pendingPhotoMessages,
+    required List<ChatPhotoAsset> videoAssets,
+    required ChatVideoMessageSender? videoSender,
+    required List<ChatMessage> pendingVideoMessages,
+    required ChatReplyReference? replyTo,
+  }) async {
+    beginMediaSendDiagnostics();
 
-    if (messageListState == null || result.assets.length != 1) {
-      return;
-    }
-
-    final ChatPhotoAsset asset = result.assets.single;
-    final ChatReplyReference? replyTo = _currentReplyReference();
-    final ChatVideoMessageSender? sender = widget.onSendVideoMessage;
-    final ChatMessage pendingMessage = messageListState.addOutgoingVideoMessage(
-      attachment: ChatVideoAttachment(
-        assetId: asset.id,
-        width: asset.width,
-        height: asset.height,
-        duration: asset.duration,
-        previewBytes: result.previewBytesByAssetId[asset.id],
-      ),
-      replyTo: replyTo,
-      videoEncodingPending: sender != null,
-    );
-
-    _dismissComposerAfterAttachmentSend();
-
-    if (sender != null) {
-      unawaited(
-        _completeSelectedVideoSend(
-          asset: asset,
-          sender: sender,
-          pendingMessage: pendingMessage,
-          replyTo: replyTo,
-        ),
+    if (photoResult != null && photoSender != null) {
+      await _completeSelectedPhotoSend(
+        result: photoResult,
+        sender: photoSender,
+        pendingMessages: pendingPhotoMessages,
+        replyTo: replyTo,
       );
     }
+
+    if (videoSender != null && videoAssets.isNotEmpty) {
+      recordPhotoSendDiagnostic(
+        '[video-send] stage=trial_start video_count=${videoAssets.length}',
+      );
+
+      for (int index = 0; index < videoAssets.length; index++) {
+        if (!mounted) {
+          return;
+        }
+
+        await _completeSelectedVideoSend(
+          asset: videoAssets[index],
+          sender: videoSender,
+          pendingMessage: pendingVideoMessages[index],
+          replyTo: replyTo,
+          videoCount: videoAssets.length,
+          videoIndex: index + 1,
+        );
+      }
+    }
+
+    await copyPhotoSendDiagnosticsToClipboard();
   }
 
   Future<void> _completeSelectedVideoSend({
@@ -1155,14 +1238,58 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     required ChatVideoMessageSender sender,
     required ChatMessage pendingMessage,
     required ChatReplyReference? replyTo,
+    required int videoCount,
+    required int videoIndex,
   }) async {
+    final Stopwatch totalStopwatch = Stopwatch()..start();
+    final Stopwatch preparationStopwatch = Stopwatch()..start();
+
     try {
-      final Future<ChatPhotoFile?> originalFileFuture = _photoLibrary
-          .loadOriginalFile(assetId: asset.id);
-      final Future<Uint8List?> previewBytesFuture = _photoLibrary
-          .loadMessagePreview(assetId: asset.id);
+      Future<ChatPhotoFile?> loadOriginalFile() async {
+        final Stopwatch stopwatch = Stopwatch()..start();
+        final ChatPhotoFile? file = await _photoLibrary.loadOriginalFile(
+          assetId: asset.id,
+        );
+        stopwatch.stop();
+        _logVideoSendTiming(
+          'local_original',
+          stopwatch,
+          videoCount: videoCount,
+          videoIndex: videoIndex,
+          originalBytes: file?.sizeBytes,
+        );
+        return file;
+      }
+
+      Future<Uint8List?> loadPreviewBytes() async {
+        final Stopwatch stopwatch = Stopwatch()..start();
+        final Uint8List? bytes = await _photoLibrary.loadMessagePreview(
+          assetId: asset.id,
+        );
+        stopwatch.stop();
+        _logVideoSendTiming(
+          'local_preview',
+          stopwatch,
+          videoCount: videoCount,
+          videoIndex: videoIndex,
+          previewBytes: bytes?.length,
+        );
+        return bytes;
+      }
+
+      final Future<ChatPhotoFile?> originalFileFuture = loadOriginalFile();
+      final Future<Uint8List?> previewBytesFuture = loadPreviewBytes();
       final ChatPhotoFile? originalFile = await originalFileFuture;
       final Uint8List? previewBytes = await previewBytesFuture;
+      preparationStopwatch.stop();
+      _logVideoSendTiming(
+        'local_prepare_total',
+        preparationStopwatch,
+        videoCount: videoCount,
+        videoIndex: videoIndex,
+        originalBytes: originalFile?.sizeBytes,
+        previewBytes: previewBytes?.length,
+      );
 
       if (!mounted) {
         return;
@@ -1177,18 +1304,40 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         return;
       }
 
+      final Stopwatch encodingStopwatch = Stopwatch()..start();
+      final ChatVideoTranscodeResult encodedVideo = await _videoTranscoder
+          .transcode(
+            source: originalFile,
+            width: asset.width,
+            height: asset.height,
+            duration: asset.duration,
+          );
+      encodingStopwatch.stop();
+      _logVideoSendTiming(
+        'encode',
+        encodingStopwatch,
+        videoCount: videoCount,
+        videoIndex: videoIndex,
+        originalBytes: originalFile.sizeBytes,
+        encodedBytes: encodedVideo.sizeBytes,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
       final ChatVideoAttachment attachment = ChatVideoAttachment(
         assetId: asset.id,
-        width: asset.width,
-        height: asset.height,
-        duration: asset.duration,
+        width: encodedVideo.width,
+        height: encodedVideo.height,
+        duration: encodedVideo.duration,
         previewBytes:
             previewBytes ?? pendingMessage.videoAttachment?.previewBytes,
-        fileName: originalFile.fileName,
-        mimeType: originalFile.mimeType,
-        sizeBytes: originalFile.sizeBytes,
-        uploadBytes: originalFile.bytes,
-        localPath: originalFile.localPath,
+        fileName: encodedVideo.fileName,
+        mimeType: encodedVideo.mimeType,
+        sizeBytes: encodedVideo.sizeBytes,
+        uploadBytes: encodedVideo.uploadBytes,
+        localPath: encodedVideo.localPath,
       );
 
       _messageListKey.currentState?.prepareOutgoingVideoMessage(
@@ -1196,8 +1345,10 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         attachment: attachment,
       );
 
+      final Stopwatch apiStopwatch = Stopwatch()..start();
       final ChatMessage sentMessage = await sender(
         attachment: attachment,
+        createdAt: pendingMessage.createdAt,
         replyTo: replyTo,
         onUploadProgress:
             ({required int uploadedBytes, required int totalBytes}) {
@@ -1212,6 +1363,15 @@ final class _ChatConversationViewState extends State<ChatConversationView>
               );
             },
       );
+      apiStopwatch.stop();
+      _logVideoSendTiming(
+        'sender_total',
+        apiStopwatch,
+        videoCount: videoCount,
+        videoIndex: videoIndex,
+        originalBytes: encodedVideo.sizeBytes,
+        previewBytes: previewBytes?.length,
+      );
 
       if (!mounted) {
         return;
@@ -1220,6 +1380,15 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       _messageListKey.currentState?.completeOutgoingVideoMessage(
         pendingMessage: pendingMessage,
         sentMessage: sentMessage,
+      );
+      totalStopwatch.stop();
+      _logVideoSendTiming(
+        'ui_total',
+        totalStopwatch,
+        videoCount: videoCount,
+        videoIndex: videoIndex,
+        originalBytes: encodedVideo.sizeBytes,
+        previewBytes: previewBytes?.length,
       );
     } catch (_) {
       if (!mounted) {
@@ -1376,6 +1545,9 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       final List<ChatMessage> messages = await sender(
         attachments: attachments,
         collage: result.collage,
+        createdAts: pendingMessages
+            .map((ChatMessage message) => message.createdAt)
+            .toList(growable: false),
         replyTo: replyTo,
         onUploadProgress:
             ({
@@ -1415,7 +1587,6 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         photoCount: result.assets.length,
         loadedCount: attachments.length,
       );
-      unawaited(copyPhotoSendDiagnosticsToClipboard());
     } catch (_) {
       if (!mounted) {
         return;
@@ -1604,6 +1775,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
           attachments: <ChatPhotoAttachment>[attachment],
           collage: false,
           replyTo: _currentReplyReference(),
+          createdAts: <DateTime>[DateTime.now()],
         );
 
         if (!mounted) {
@@ -8033,15 +8205,16 @@ final class _MessageListState extends State<_MessageList>
     required ChatVideoAttachment attachment,
     ChatReplyReference? replyTo,
     bool videoEncodingPending = false,
+    DateTime? createdAt,
   }) {
     final List<String> previousMessageIds = _messageIdsSnapshot();
-    final DateTime createdAt = DateTime.now();
+    final DateTime resolvedCreatedAt = createdAt ?? DateTime.now();
     final ChatMessage message = ChatMessage(
       id: _nextLocalMessageId(),
       senderId: widget.currentUserId,
       recipientId: widget.otherParticipantId,
       content: '',
-      createdAt: createdAt,
+      createdAt: resolvedCreatedAt,
       replyTo: replyTo,
       videoAttachment: attachment,
       videoUploadPending: videoEncodingPending,
@@ -8050,7 +8223,7 @@ final class _MessageListState extends State<_MessageList>
 
     setState(() {
       _messages.add(message);
-      _messageClock = createdAt;
+      _messageClock = resolvedCreatedAt;
     });
     _reconcileScrollbarRangeAfterMessageChange(previousMessageIds);
 
@@ -8149,10 +8322,11 @@ final class _MessageListState extends State<_MessageList>
     final ChatVideoAttachment? sentVideo = sent.videoAttachment;
 
     if (pendingVideo == null || sentVideo == null) {
-      return sent;
+      return sent.copyWith(createdAt: pending.createdAt);
     }
 
     return sent.copyWith(
+      createdAt: pending.createdAt,
       videoAttachment: ChatVideoAttachment(
         assetId: pendingVideo.assetId,
         width: sentVideo.width > 0 ? sentVideo.width : pendingVideo.width,
@@ -8271,7 +8445,7 @@ final class _MessageListState extends State<_MessageList>
     final List<ChatPhotoAttachment> sentPhotos = sent.photoAttachments;
 
     if (pendingPhotos.length != sentPhotos.length || sentPhotos.isEmpty) {
-      return sent;
+      return sent.copyWith(createdAt: pending.createdAt);
     }
 
     final List<ChatPhotoAttachment> mergedPhotos =
@@ -8297,6 +8471,7 @@ final class _MessageListState extends State<_MessageList>
         }, growable: false);
 
     return sent.copyWith(
+      createdAt: pending.createdAt,
       photoAttachments: mergedPhotos,
       photoUploadPending: false,
     );

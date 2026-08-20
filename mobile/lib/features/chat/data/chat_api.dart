@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -30,6 +31,22 @@ void _logPhotoSendTiming(
     if (originalBytes != null) 'original_bytes=$originalBytes',
     if (previewBytes != null) 'preview_bytes=$previewBytes',
     if (uploadWorkers != null) 'upload_workers=$uploadWorkers',
+  ];
+  recordPhotoSendDiagnostic(fields.join(' '));
+}
+
+void _logVideoSendTiming(
+  String stage,
+  Stopwatch stopwatch, {
+  int? originalBytes,
+  int? previewBytes,
+}) {
+  final List<String> fields = <String>[
+    '[video-send]',
+    'stage=$stage',
+    'elapsed_ms=${(stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1)}',
+    if (originalBytes != null) 'original_bytes=$originalBytes',
+    if (previewBytes != null) 'preview_bytes=$previewBytes',
   ];
   recordPhotoSendDiagnostic(fields.join(' '));
 }
@@ -498,6 +515,7 @@ final class ChatApi {
   Future<ChatMessage> sendPhotoMessage({
     required String recipientId,
     required List<ChatPhotoAttachment> photos,
+    DateTime? createdAt,
     String? replyToMessageId,
     ChatPhotoUploadProgressCallback? onUploadProgress,
   }) async {
@@ -520,7 +538,6 @@ final class ChatApi {
               kind: 'photo',
               fileName: photo.fileName ?? '${photo.assetId}.jpg',
               mimeType: photo.mimeType ?? 'image/jpeg',
-              sizeBytes: photo.sizeBytes ?? photo.uploadBytes?.length ?? 0,
               bytes: photo.uploadBytes,
               thumbnailBytes: photo.previewBytes,
               width: photo.width,
@@ -571,6 +588,7 @@ final class ChatApi {
       endpointPath: '/messages/photo',
       recipientId: recipientId,
       messageType: 'photo',
+      createdAt: createdAt,
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{'media_asset_ids': mediaAssetIds},
       onServerTiming: (String value) {
@@ -599,21 +617,26 @@ final class ChatApi {
   Future<ChatMessage> sendVideoMessage({
     required String recipientId,
     required ChatVideoAttachment video,
+    DateTime? createdAt,
     String? replyToMessageId,
     ChatVideoUploadProgressCallback? onUploadProgress,
   }) async {
+    final Stopwatch totalStopwatch = Stopwatch()..start();
+    final Stopwatch assetUploadStopwatch = Stopwatch()..start();
     final String mediaAssetId =
         video.mediaAssetId ??
         await _uploadMediaAsset(
           kind: 'video',
           fileName: video.fileName ?? '${video.assetId}.mp4',
           mimeType: video.mimeType ?? 'video/mp4',
-          sizeBytes: video.sizeBytes ?? video.uploadBytes?.length ?? 0,
           bytes: video.uploadBytes,
+          filePath: video.uploadBytes == null ? video.localPath : null,
           thumbnailBytes: video.previewBytes,
           width: video.width,
           height: video.height,
           duration: video.duration,
+          completeUpload: false,
+          logVideoTiming: true,
           onUploadProgress: onUploadProgress == null
               ? null
               : (int uploadedBytes, int totalBytes) {
@@ -623,17 +646,42 @@ final class ChatApi {
                   );
                 },
         );
+    assetUploadStopwatch.stop();
+    _logVideoSendTiming(
+      'asset_uploads',
+      assetUploadStopwatch,
+      originalBytes: video.sizeBytes ?? video.uploadBytes?.length,
+      previewBytes: video.previewBytes?.length,
+    );
 
+    final Stopwatch messageStopwatch = Stopwatch()..start();
     final ChatMessage message = await _createMessage(
+      endpointPath: '/messages/video',
       recipientId: recipientId,
       messageType: 'video',
+      createdAt: createdAt,
       replyToMessageId: replyToMessageId,
       metadata: <String, Object?>{
         'media_asset_ids': <String>[mediaAssetId],
       },
+      onServerTiming: (String timing) {
+        recordPhotoSendDiagnostic(
+          '[video-send] stage=server_breakdown timing=$timing',
+        );
+      },
     );
+    messageStopwatch.stop();
+    _logVideoSendTiming('message_create', messageStopwatch);
 
-    return _withLocalVideoPreview(message, video);
+    final ChatMessage resolvedMessage = _withLocalVideoPreview(message, video);
+    totalStopwatch.stop();
+    _logVideoSendTiming(
+      'api_total',
+      totalStopwatch,
+      originalBytes: video.sizeBytes ?? video.uploadBytes?.length,
+      previewBytes: video.previewBytes?.length,
+    );
+    return resolvedMessage;
   }
 
   Future<ChatMessage> sendFileMessage({
@@ -647,7 +695,6 @@ final class ChatApi {
           kind: 'file',
           fileName: file.name,
           mimeType: file.mimeType ?? 'application/octet-stream',
-          sizeBytes: file.sizeBytes,
           bytes: file.uploadBytes,
         );
 
@@ -679,7 +726,6 @@ final class ChatApi {
         kind: 'voice_memo',
         fileName: voiceMemo.fileName ?? 'voice-memo.m4a',
         mimeType: voiceMemo.mimeType ?? 'audio/mp4',
-        sizeBytes: voiceMemo.sizeBytes ?? audioBytes?.length ?? 0,
         bytes: audioBytes,
         duration: voiceMemo.duration,
         metadata: waveformSamples.isEmpty
@@ -705,8 +751,8 @@ final class ChatApi {
     required String kind,
     required String fileName,
     required String mimeType,
-    required int sizeBytes,
     required Uint8List? bytes,
+    String? filePath,
     Uint8List? thumbnailBytes,
     int? width,
     int? height,
@@ -715,9 +761,23 @@ final class ChatApi {
     bool completeUpload = true,
     int? photoIndex,
     int? photoCount,
+    bool logVideoTiming = false,
     void Function(int uploadedBytes, int totalBytes)? onUploadProgress,
   }) async {
-    if (bytes == null || bytes.isEmpty) {
+    final Uint8List? uploadBytes = bytes != null && bytes.isNotEmpty
+        ? bytes
+        : null;
+    final File? uploadFile = uploadBytes == null && filePath != null
+        ? File(filePath)
+        : null;
+    final bool hasUploadFile = uploadFile != null && await uploadFile.exists();
+
+    if (uploadBytes == null && !hasUploadFile) {
+      throw const ChatApiException('The selected media file is empty.');
+    }
+    final int uploadSize = uploadBytes?.length ?? await uploadFile!.length();
+
+    if (uploadSize <= 0) {
       throw const ChatApiException('The selected media file is empty.');
     }
 
@@ -730,7 +790,7 @@ final class ChatApi {
         'kind': kind,
         'file_name': fileName,
         'mime_type': mimeType,
-        'size_bytes': sizeBytes > 0 ? sizeBytes : bytes.length,
+        'size_bytes': uploadSize,
         'width': ?width,
         'height': ?height,
         if (duration != null) 'duration_ms': duration.inMilliseconds,
@@ -745,7 +805,14 @@ final class ChatApi {
         preparationStopwatch,
         photoCount: photoCount,
         photoIndex: photoIndex,
-        originalBytes: bytes.length,
+        originalBytes: uploadSize,
+        previewBytes: thumbnailBytes?.length ?? 0,
+      );
+    } else if (logVideoTiming) {
+      _logVideoSendTiming(
+        'upload_prepare',
+        preparationStopwatch,
+        originalBytes: uploadSize,
         previewBytes: thumbnailBytes?.length ?? 0,
       );
     }
@@ -777,6 +844,12 @@ final class ChatApi {
       decodedBody['upload_url'],
       'upload_url',
     );
+    final Uri uploadUri = Uri.parse(uploadUrl);
+    if (logVideoTiming) {
+      recordPhotoSendDiagnostic(
+        '[video-send] stage=upload_target host=${uploadUri.host}',
+      );
+    }
     final Object? uploadHeadersJson = decodedBody['upload_headers'];
     final Map<String, String> uploadHeaders =
         uploadHeadersJson is Map<String, dynamic>
@@ -805,11 +878,14 @@ final class ChatApi {
 
     Future<http.Response> uploadOriginal() async {
       final Stopwatch stopwatch = Stopwatch()..start();
-      final http.Response response = await _putMediaBytes(
-        url: Uri.parse(uploadUrl),
+      final http.Response response = await _putMediaPayload(
+        url: uploadUri,
         headers: uploadHeaders,
-        bytes: bytes,
+        bytes: uploadBytes,
+        file: uploadFile,
+        sizeBytes: uploadSize,
         onUploadProgress: onUploadProgress,
+        diagnosticStage: logVideoTiming ? 'original_upload' : null,
       );
       stopwatch.stop();
 
@@ -819,7 +895,13 @@ final class ChatApi {
           stopwatch,
           photoCount: photoCount,
           photoIndex: photoIndex,
-          originalBytes: bytes.length,
+          originalBytes: uploadSize,
+        );
+      } else if (logVideoTiming) {
+        _logVideoSendTiming(
+          'original_upload',
+          stopwatch,
+          originalBytes: uploadSize,
         );
       }
 
@@ -841,6 +923,12 @@ final class ChatApi {
           stopwatch,
           photoCount: photoCount,
           photoIndex: photoIndex,
+          previewBytes: thumbnailBytes.length,
+        );
+      } else if (logVideoTiming) {
+        _logVideoSendTiming(
+          'preview_upload',
+          stopwatch,
           previewBytes: thumbnailBytes.length,
         );
       }
@@ -877,6 +965,7 @@ final class ChatApi {
     }
 
     if (completeUpload) {
+      final Stopwatch completionStopwatch = Stopwatch()..start();
       final http.Response completeResponse = await _client.post(
         _baseUri.resolve('/media-assets/$mediaAssetId/complete'),
         headers: _headers,
@@ -892,44 +981,87 @@ final class ChatApi {
           ),
         );
       }
+
+      completionStopwatch.stop();
+      if (logVideoTiming) {
+        _logVideoSendTiming('upload_complete', completionStopwatch);
+      }
     }
 
     return mediaAssetId;
   }
 
-  Future<http.Response> _putMediaBytes({
+  Future<http.Response> _putMediaPayload({
     required Uri url,
     required Map<String, String> headers,
-    required Uint8List bytes,
+    required Uint8List? bytes,
+    required File? file,
+    required int sizeBytes,
     void Function(int uploadedBytes, int totalBytes)? onUploadProgress,
+    String? diagnosticStage,
   }) async {
     final http.StreamedRequest request = http.StreamedRequest('PUT', url)
       ..headers.addAll(headers)
-      ..contentLength = bytes.length;
+      ..contentLength = sizeBytes;
     final Future<http.StreamedResponse> responseFuture = _client.send(request);
     int uploadedBytes = 0;
 
     const int chunkSize = 64 * 1024;
-    final Stream<List<int>> uploadStream =
-        Stream<List<int>>.fromIterable(<Uint8List>[
-          for (int offset = 0; offset < bytes.length; offset += chunkSize)
-            Uint8List.sublistView(
-              bytes,
-              offset,
-              offset + chunkSize < bytes.length
-                  ? offset + chunkSize
-                  : bytes.length,
-            ),
-        ]).map((List<int> chunk) {
-          uploadedBytes += chunk.length;
-          onUploadProgress?.call(uploadedBytes, bytes.length);
-          return chunk;
-        });
+    final Stream<List<int>> sourceStream = bytes != null
+        ? Stream<List<int>>.fromIterable(<Uint8List>[
+            for (int offset = 0; offset < bytes.length; offset += chunkSize)
+              Uint8List.sublistView(
+                bytes,
+                offset,
+                offset + chunkSize < bytes.length
+                    ? offset + chunkSize
+                    : bytes.length,
+              ),
+          ])
+        : file!.openRead();
+    final Stream<List<int>> uploadStream = sourceStream.map((List<int> chunk) {
+      uploadedBytes += chunk.length;
+      onUploadProgress?.call(uploadedBytes, sizeBytes);
+      return chunk;
+    });
 
+    final Stopwatch requestBodyStopwatch = Stopwatch()..start();
     await request.sink.addStream(uploadStream);
     await request.sink.close();
+    requestBodyStopwatch.stop();
+    if (diagnosticStage != null) {
+      _logVideoSendTiming(
+        '${diagnosticStage}_body',
+        requestBodyStopwatch,
+        originalBytes: sizeBytes,
+      );
+    }
 
-    return http.Response.fromStream(await responseFuture);
+    final Stopwatch responseHeadersStopwatch = Stopwatch()..start();
+    final http.StreamedResponse streamedResponse = await responseFuture;
+    responseHeadersStopwatch.stop();
+    if (diagnosticStage != null) {
+      _logVideoSendTiming(
+        '${diagnosticStage}_response_headers',
+        responseHeadersStopwatch,
+        originalBytes: sizeBytes,
+      );
+    }
+
+    final Stopwatch responseBodyStopwatch = Stopwatch()..start();
+    final http.Response response = await http.Response.fromStream(
+      streamedResponse,
+    );
+    responseBodyStopwatch.stop();
+    if (diagnosticStage != null) {
+      _logVideoSendTiming(
+        '${diagnosticStage}_response_body',
+        responseBodyStopwatch,
+        originalBytes: sizeBytes,
+      );
+    }
+
+    return response;
   }
 
   Future<Uri> createMediaAssetAccessUrl({required String mediaAssetId}) async {
@@ -1202,6 +1334,7 @@ final class ChatApi {
     String endpointPath = '/messages',
     required String recipientId,
     required String messageType,
+    DateTime? createdAt,
     String content = '',
     Map<String, Object?>? metadata,
     String? replyToMessageId,
@@ -1212,7 +1345,7 @@ final class ChatApi {
       'recipient_id': recipientId,
       'content': content,
       'message_type': messageType,
-      'created_at': DateTime.now().toUtc().toIso8601String(),
+      'created_at': (createdAt ?? DateTime.now()).toUtc().toIso8601String(),
       'metadata': ?metadata,
       'reply_to_message_id': ?replyToMessageId,
     };

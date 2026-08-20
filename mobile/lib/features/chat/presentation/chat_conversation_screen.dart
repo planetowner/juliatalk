@@ -1845,6 +1845,7 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
   Future<List<ChatMessage>> _sendPhotoMessages({
     required List<ChatPhotoAttachment> attachments,
     required bool collage,
+    required List<DateTime> createdAts,
     ChatReplyReference? replyTo,
     ChatPhotoUploadProgressCallback? onUploadProgress,
   }) async {
@@ -1855,16 +1856,19 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
         await widget.chatApi.sendPhotoMessage(
           recipientId: widget.otherUser.id,
           photos: attachments,
+          createdAt: createdAts.first,
           replyToMessageId: replyTo?.messageId,
           onUploadProgress: onUploadProgress,
         ),
       ];
     } else {
       messages = await Future.wait(
-        attachments.map((ChatPhotoAttachment attachment) {
+        List<Future<ChatMessage>>.generate(attachments.length, (int index) {
+          final ChatPhotoAttachment attachment = attachments[index];
           return widget.chatApi.sendPhotoMessage(
             recipientId: widget.otherUser.id,
             photos: <ChatPhotoAttachment>[attachment],
+            createdAt: createdAts[index],
             replyToMessageId: replyTo?.messageId,
             onUploadProgress: onUploadProgress,
           );
@@ -1881,12 +1885,14 @@ final class _ChatConversationScreenState extends State<ChatConversationScreen> {
 
   Future<ChatMessage> _sendVideoMessage({
     required ChatVideoAttachment attachment,
+    required DateTime createdAt,
     ChatReplyReference? replyTo,
     ChatVideoUploadProgressCallback? onUploadProgress,
   }) async {
     final ChatMessage message = await widget.chatApi.sendVideoMessage(
       recipientId: widget.otherUser.id,
       video: attachment,
+      createdAt: createdAt,
       replyToMessageId: replyTo?.messageId,
       onUploadProgress: onUploadProgress,
     );

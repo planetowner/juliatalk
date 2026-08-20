@@ -17,6 +17,7 @@
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		A10000000000000000000001 /* NotificationBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* NotificationBridge.swift */; };
+		B10000000000000000000001 /* VideoTranscodeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* VideoTranscodeBridge.swift */; };
 		A10000000000000000000002 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* NotificationService.swift */; };
 		A10000000000000000000003 /* JuliaTalkNotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* JuliaTalkNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -81,6 +82,7 @@
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		A10000000000000000000010 /* NotificationBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationBridge.swift; sourceTree = "<group>"; };
+		B10000000000000000000010 /* VideoTranscodeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTranscodeBridge.swift; sourceTree = "<group>"; };
 		A10000000000000000000011 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		A10000000000000000000012 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -160,6 +162,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				A10000000000000000000010 /* NotificationBridge.swift */,
+				B10000000000000000000010 /* VideoTranscodeBridge.swift */,
 				A10000000000000000000011 /* Runner.entitlements */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -363,6 +366,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				A10000000000000000000001 /* NotificationBridge.swift in Sources */,
+				B10000000000000000000001 /* VideoTranscodeBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

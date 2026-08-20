@@ -695,21 +695,6 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
       return;
     }
 
-    final bool selectingDifferentMediaType = _selectedAssets.any(
-      (ChatPhotoAsset selectedAsset) => selectedAsset.isVideo != asset.isVideo,
-    );
-
-    if (selectingDifferentMediaType ||
-        (asset.isVideo && _selectedAssets.isNotEmpty)) {
-      setState(() {
-        _selectedAssets
-          ..clear()
-          ..add(asset);
-        _collagePhotos = !asset.isVideo;
-      });
-      return;
-    }
-
     if (_selectedAssets.length >= _maximumSelectionCount) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
@@ -1024,8 +1009,7 @@ final class _ChatPhotoPickerState extends State<ChatPhotoPicker>
             _buildHeader(),
             const Divider(height: 1, thickness: 1, color: AppColors.grey100),
             Expanded(child: _buildBody()),
-            if (_accessState != ChatPhotoAccessState.denied &&
-                !_selectedAssets.any((ChatPhotoAsset asset) => asset.isVideo))
+            if (_accessState != ChatPhotoAccessState.denied)
               _buildCollageControl(),
           ],
         ),

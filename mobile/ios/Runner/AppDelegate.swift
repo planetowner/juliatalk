@@ -17,5 +17,10 @@ import UIKit
     ) {
       NotificationBridge.register(with: registrar)
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "JuliaTalkVideoTranscodeBridge"
+    ) {
+      VideoTranscodeBridge.register(with: registrar)
+    }
   }
 }

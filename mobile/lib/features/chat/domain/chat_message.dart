@@ -284,6 +284,7 @@ final class ChatMessage {
   }
 
   ChatMessage copyWith({
+    DateTime? createdAt,
     String? content,
     DateTime? readAt,
     DateTime? editedAt,
@@ -323,7 +324,7 @@ final class ChatMessage {
       senderId: senderId,
       recipientId: recipientId,
       content: content ?? this.content,
-      createdAt: createdAt,
+      createdAt: createdAt ?? this.createdAt,
       readAt: clearReadAt ? null : readAt ?? this.readAt,
       editedAt: clearEditedAt ? null : editedAt ?? this.editedAt,
       translationStatus: translationStatus ?? this.translationStatus,

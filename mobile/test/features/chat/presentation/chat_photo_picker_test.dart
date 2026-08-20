@@ -305,20 +305,26 @@ void main() {
     expect(result!.collage, isTrue);
   });
 
-  testWidgets('video tiles show duration and send one video at a time', (
+  testWidgets('photos and videos share one multi-selection order', (
     WidgetTester tester,
   ) async {
     final _FakePhotoLibrary library = _FakePhotoLibrary();
-    library.assetsByAlbum['all']!.insert(
-      0,
-      const ChatPhotoAsset(
+    library.assetsByAlbum['all']!.insertAll(0, const <ChatPhotoAsset>[
+      ChatPhotoAsset(
         id: 'video-0',
         width: 1080,
         height: 1920,
         type: ChatPhotoAssetType.video,
         duration: Duration(seconds: 14),
       ),
-    );
+      ChatPhotoAsset(
+        id: 'video-1',
+        width: 1920,
+        height: 1080,
+        type: ChatPhotoAssetType.video,
+        duration: Duration(minutes: 1, seconds: 3),
+      ),
+    ]);
     ChatPhotoSelectionResult? result;
 
     await tester.pumpWidget(
@@ -332,20 +338,41 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('0:14'), findsOneWidget);
+    expect(find.text('1:03'), findsOneWidget);
 
-    await _tapPhotoAsset(tester, 'asset-0');
+    await _tapPhotoAsset(tester, 'video-1');
     await _tapPhotoAsset(tester, 'video-0');
+    await _tapPhotoAsset(tester, 'asset-1');
+    await _tapPhotoAsset(tester, 'asset-0');
 
-    expect(find.text('1 Send'), findsOneWidget);
-    expect(find.text('Collage Photos'), findsNothing);
+    expect(find.text('4 Send'), findsOneWidget);
+    expect(find.text('Collage Photos'), findsOneWidget);
+
+    for (final (String assetId, String number) in <(String, String)>[
+      ('video-1', '1'),
+      ('video-0', '2'),
+      ('asset-1', '3'),
+      ('asset-0', '4'),
+    ]) {
+      expect(
+        find.descendant(
+          of: find.byKey(ValueKey<String>('photo-selection-badge-$assetId')),
+          matching: find.text(number),
+        ),
+        findsOneWidget,
+      );
+    }
 
     await tester.tap(find.byKey(const ValueKey<String>('photo-picker-send')));
     await tester.pumpAndSettle();
 
-    expect(result?.assets, hasLength(1));
-    expect(result?.assets.single.id, 'video-0');
-    expect(result?.assets.single.isVideo, isTrue);
-    expect(result?.collage, isFalse);
+    expect(result?.assets.map((ChatPhotoAsset asset) => asset.id), <String>[
+      'video-1',
+      'video-0',
+      'asset-1',
+      'asset-0',
+    ]);
+    expect(result?.collage, isTrue);
   });
 
   testWidgets(

@@ -82,6 +82,30 @@ Rect _photoRect(WidgetTester tester, int index) {
   return tester.getRect(_photoFinder(index));
 }
 
+const MethodChannel _pathProviderChannel = MethodChannel(
+  'plugins.flutter.io/path_provider',
+);
+
+Directory _setUpPhotoCacheDirectory(String prefix) {
+  final Directory cacheDirectory = Directory.systemTemp.createTempSync(prefix);
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_pathProviderChannel, (MethodCall call) async {
+        if (call.method == 'getApplicationCacheDirectory') {
+          return cacheDirectory.path;
+        }
+
+        return null;
+      });
+  addTearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_pathProviderChannel, null);
+    if (cacheDirectory.existsSync()) {
+      cacheDirectory.deleteSync(recursive: true);
+    }
+  });
+  return cacheDirectory;
+}
+
 final class _IncomingPhotoHarness extends StatefulWidget {
   const _IncomingPhotoHarness({super.key});
 
@@ -132,7 +156,12 @@ final class _IncomingPhotoHarnessState extends State<_IncomingPhotoHarness> {
 }
 
 final class _PhotoRefreshHarness extends StatefulWidget {
-  const _PhotoRefreshHarness({super.key});
+  const _PhotoRefreshHarness({
+    this.completedMediaAssetId = 'refreshed-photo-media',
+    super.key,
+  });
+
+  final String completedMediaAssetId;
 
   @override
   State<_PhotoRefreshHarness> createState() => _PhotoRefreshHarnessState();
@@ -170,7 +199,7 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
         photoAttachments: <ChatPhotoAttachment>[
           ChatPhotoAttachment(
             assetId: 'refreshed-photo',
-            mediaAssetId: 'refreshed-photo-media',
+            mediaAssetId: widget.completedMediaAssetId,
             previewBytes: completedPreviewBytes,
             width: 1179,
             height: 2556,
@@ -191,7 +220,7 @@ final class _PhotoRefreshHarnessState extends State<_PhotoRefreshHarness> {
         photoAttachments: <ChatPhotoAttachment>[
           ChatPhotoAttachment(
             assetId: 'server-photo',
-            mediaAssetId: 'refreshed-photo-media',
+            mediaAssetId: widget.completedMediaAssetId,
             previewBytes: serverPreviewBytes,
             width: 1179,
             height: 2556,
@@ -375,27 +404,9 @@ void main() {
   testWidgets('cached remote photos are prepared without a reveal fade', (
     WidgetTester tester,
   ) async {
-    final Directory cacheDirectory = Directory.systemTemp.createTempSync(
+    final Directory cacheDirectory = _setUpPhotoCacheDirectory(
       'juliatalk-photo-cache-test-',
     );
-    const MethodChannel pathProviderChannel = MethodChannel(
-      'plugins.flutter.io/path_provider',
-    );
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(pathProviderChannel, (MethodCall call) async {
-          if (call.method == 'getApplicationCacheDirectory') {
-            return cacheDirectory.path;
-          }
-
-          return null;
-        });
-    addTearDown(() {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(pathProviderChannel, null);
-      if (cacheDirectory.existsSync()) {
-        cacheDirectory.deleteSync(recursive: true);
-      }
-    });
 
     const String mediaAssetId = 'cached-route-photo';
     final Directory photoDirectory = Directory(
@@ -458,6 +469,204 @@ void main() {
     );
   });
 
+  testWidgets('visible photo messages start original prefetch before a tap', (
+    WidgetTester tester,
+  ) async {
+    _setUpPhotoCacheDirectory('juliatalk-photo-original-prefetch-test-');
+
+    final Completer<Uri> originalAccessUrl = Completer<Uri>();
+    int originalAccessUrlRequests = 0;
+    final ChatMessage message = ChatMessage(
+      id: 'original-prefetch-message',
+      senderId: '2',
+      recipientId: '1',
+      content: '',
+      createdAt: DateTime(2026, 7, 1, 12, 52),
+      photoAttachments: <ChatPhotoAttachment>[
+        ChatPhotoAttachment(
+          assetId: 'original-prefetch-photo',
+          mediaAssetId: 'original-prefetch-media',
+          previewBytes: _testPng,
+          width: 1200,
+          height: 900,
+        ),
+      ],
+    );
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: <ChatMessage>[message],
+            onCreateMediaAssetAccessUrl: ({required String mediaAssetId}) {
+              originalAccessUrlRequests++;
+              return originalAccessUrl.future;
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    });
+
+    expect(originalAccessUrlRequests, 1);
+    expect(
+      find.byKey(
+        const ValueKey<String>('photo-viewer-image-original-prefetch-photo'),
+      ),
+      findsNothing,
+    );
+  });
+
+  testWidgets('photo viewer reuses a prefetched original file', (
+    WidgetTester tester,
+  ) async {
+    final Directory cacheDirectory = _setUpPhotoCacheDirectory(
+      'juliatalk-photo-original-cache-test-',
+    );
+
+    const String mediaAssetId = 'prefetched-original-media';
+    final Directory originalDirectory = Directory(
+      '${cacheDirectory.path}/chat-photo-originals',
+    );
+    originalDirectory.createSync(recursive: true);
+    final File originalFile = File(
+      '${originalDirectory.path}/$mediaAssetId.image',
+    )..writeAsBytesSync(_testPng);
+    int originalAccessUrlRequests = 0;
+    final ChatMessage message = ChatMessage(
+      id: 'prefetched-original-message',
+      senderId: '2',
+      recipientId: '1',
+      content: '',
+      createdAt: DateTime(2026, 7, 1, 12, 52),
+      photoAttachments: <ChatPhotoAttachment>[
+        ChatPhotoAttachment(
+          assetId: 'prefetched-original-photo',
+          mediaAssetId: mediaAssetId,
+          previewBytes: _testPng,
+          width: 1200,
+          height: 900,
+        ),
+      ],
+    );
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: <ChatMessage>[message],
+            onCreateMediaAssetAccessUrl:
+                ({required String mediaAssetId}) async {
+                  originalAccessUrlRequests++;
+                  throw StateError('The prefetched original must be reused.');
+                },
+          ),
+        ),
+      );
+      await tester.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await tester.pumpAndSettle();
+    });
+
+    await tester.tap(
+      find.byKey(
+        const ValueKey<String>('photo-message-prefetched-original-photo-0'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final Image originalImage = tester.widget<Image>(
+      find.byKey(
+        const ValueKey<String>(
+          'photo-viewer-original-prefetched-original-photo',
+        ),
+      ),
+    );
+    final ResizeImage resizedImage = originalImage.image as ResizeImage;
+    final FileImage fileImage = resizedImage.imageProvider as FileImage;
+
+    expect(fileImage.file.path, originalFile.path);
+    expect(originalAccessUrlRequests, 0);
+  });
+
+  testWidgets('photo viewer keeps the cached thumbnail while original loads', (
+    WidgetTester tester,
+  ) async {
+    final Directory cacheDirectory = _setUpPhotoCacheDirectory(
+      'juliatalk-photo-viewer-thumbnail-test-',
+    );
+
+    const String mediaAssetId = 'viewer-thumbnail-media';
+    final Directory thumbnailDirectory = Directory(
+      '${cacheDirectory.path}/chat-photo-thumbnails',
+    );
+    thumbnailDirectory.createSync(recursive: true);
+    final File thumbnailFile = File(
+      '${thumbnailDirectory.path}/$mediaAssetId.jpg',
+    )..writeAsBytesSync(_testPng);
+    final Completer<Uri> originalAccessUrl = Completer<Uri>();
+    final ChatMessage message = ChatMessage(
+      id: 'viewer-thumbnail-message',
+      senderId: '2',
+      recipientId: '1',
+      content: '',
+      createdAt: DateTime(2026, 7, 1, 12, 52),
+      photoAttachments: const <ChatPhotoAttachment>[
+        ChatPhotoAttachment(
+          assetId: 'viewer-thumbnail-photo',
+          mediaAssetId: mediaAssetId,
+          width: 1200,
+          height: 900,
+        ),
+      ],
+    );
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatConversationView(
+            initialMessages: <ChatMessage>[message],
+            onCreateMediaAssetAccessUrl: ({required String mediaAssetId}) {
+              return originalAccessUrl.future;
+            },
+            onCreatePhotoThumbnailAccessUrl:
+                ({required String mediaAssetId}) async {
+                  throw StateError('The cached thumbnail must be reused.');
+                },
+          ),
+        ),
+      );
+      await tester.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await tester.pumpAndSettle();
+    });
+
+    await tester.tap(
+      find.byKey(
+        const ValueKey<String>('photo-message-remote-$mediaAssetId-0'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final Finder viewer = find.byKey(
+      const ValueKey<String>('photo-viewer-image-viewer-thumbnail-photo'),
+    );
+    final Image thumbnailImage = tester.widget<Image>(
+      find.descendant(of: viewer, matching: find.byType(Image)),
+    );
+    final ResizeImage resizedImage = thumbnailImage.image as ResizeImage;
+    final FileImage fileImage = resizedImage.imageProvider as FileImage;
+
+    expect(fileImage.file.path, thumbnailFile.path);
+    expect(
+      find.byKey(
+        const ValueKey<String>('photo-viewer-original-viewer-thumbnail-photo'),
+      ),
+      findsNothing,
+    );
+  });
+
   testWidgets('a sent photo keeps its element while upgrading its preview', (
     WidgetTester tester,
   ) async {
@@ -516,6 +725,47 @@ void main() {
       ),
       isTrue,
     );
+  });
+
+  testWidgets('a completed sent photo persists its local preview', (
+    WidgetTester tester,
+  ) async {
+    const String mediaAssetId = 'persisted-sent-photo-media';
+    final Directory cacheDirectory = _setUpPhotoCacheDirectory(
+      'juliatalk-sent-photo-preview-cache-test-',
+    );
+    final GlobalKey<_PhotoRefreshHarnessState> harnessKey =
+        GlobalKey<_PhotoRefreshHarnessState>();
+    final File cachedPreview = File(
+      '${cacheDirectory.path}/chat-photo-thumbnails/'
+      '$mediaAssetId.jpg',
+    );
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: _PhotoRefreshHarness(
+            key: harnessKey,
+            completedMediaAssetId: mediaAssetId,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      harnessKey.currentState!.completeWithLocalPreview();
+      await tester.pump();
+
+      for (
+        int attempt = 0;
+        attempt < 20 && !cachedPreview.existsSync();
+        attempt++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    });
+
+    expect(cachedPreview.existsSync(), isTrue);
+    expect(cachedPreview.readAsBytesSync(), _testPng);
   });
 
   testWidgets('incoming photo messages render as incoming media bubbles', (

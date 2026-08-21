@@ -1695,6 +1695,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
             senderName: senderName,
             sentAt: message.createdAt,
             onCreateMediaAssetAccessUrl: _cachedMediaAssetAccessUrlCreator,
+            onCreateThumbnailAccessUrl: _cachedPhotoThumbnailAccessUrlCreator,
           );
         },
       ),
@@ -12339,6 +12340,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerLeft,
         onCreateMediaAssetAccessUrl: onCreatePhotoThumbnailAccessUrl,
+        onCreateOriginalAccessUrl: onCreateMediaAssetAccessUrl,
         onPhotoTap: (int photoIndex) {
           onPhotoMessageTap(message, photoIndex);
         },
@@ -13351,6 +13353,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         isHighlighted: isHighlighted,
         pulseAlignment: Alignment.centerRight,
         onCreateMediaAssetAccessUrl: onCreatePhotoThumbnailAccessUrl,
+        onCreateOriginalAccessUrl: onCreateMediaAssetAccessUrl,
         onPhotoTap: (int photoIndex) {
           onPhotoMessageTap(message, photoIndex);
         },
@@ -13935,6 +13938,7 @@ final class _PhotoMessage extends StatefulWidget {
     required this.measurementKey,
     required this.pulseAlignment,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreateOriginalAccessUrl,
     required this.onPhotoTap,
   });
 
@@ -13947,6 +13951,7 @@ final class _PhotoMessage extends StatefulWidget {
   final Key measurementKey;
   final Alignment pulseAlignment;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreateOriginalAccessUrl;
   final ValueChanged<int> onPhotoTap;
 
   @override
@@ -14018,6 +14023,8 @@ final class _PhotoMessageState extends State<_PhotoMessage>
         }
       });
     }
+
+    _scheduleOriginalPrefetch();
   }
 
   @override
@@ -14026,6 +14033,69 @@ final class _PhotoMessageState extends State<_PhotoMessage>
 
     if (widget.isHighlighted && !oldWidget.isHighlighted) {
       _pulseController.forward(from: 0);
+    }
+
+    if (!identical(oldWidget.attachments, widget.attachments) ||
+        oldWidget.onCreateOriginalAccessUrl !=
+            widget.onCreateOriginalAccessUrl) {
+      _scheduleOriginalPrefetch();
+    }
+  }
+
+  void _scheduleOriginalPrefetch() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_prefetchOriginals());
+      }
+    });
+  }
+
+  Future<void> _prefetchOriginals() async {
+    for (final ChatPhotoAttachment attachment in widget.attachments.take(10)) {
+      if (!mounted) {
+        return;
+      }
+
+      final String? mediaAssetId = attachment.mediaAssetId;
+      if (mediaAssetId == null) {
+        continue;
+      }
+
+      final Uint8List? originalBytes = attachment.uploadBytes;
+      final File? originalFile;
+
+      if (originalBytes != null && originalBytes.isNotEmpty) {
+        originalFile = await _ChatPhotoDiskCache.store(
+          mediaAssetId: mediaAssetId,
+          bytes: originalBytes,
+          variant: _ChatPhotoCacheVariant.original,
+        );
+      } else {
+        final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+            widget.onCreateOriginalAccessUrl;
+        if (createAccessUrl == null) {
+          continue;
+        }
+
+        originalFile = await _ChatPhotoDiskCache.load(
+          mediaAssetId: mediaAssetId,
+          createAccessUrl: createAccessUrl,
+          variant: _ChatPhotoCacheVariant.original,
+        );
+      }
+
+      if (originalFile == null || !mounted) {
+        continue;
+      }
+
+      try {
+        await precacheImage(
+          _photoViewerFileImageProvider(originalFile, context),
+          context,
+        );
+      } catch (_) {
+        continue;
+      }
     }
   }
 
@@ -14467,7 +14537,6 @@ final class _PhotoMessageImage extends StatefulWidget {
     required this.attachment,
     required this.itemIndex,
     required this.onCreateMediaAssetAccessUrl,
-    this.imageKey,
     this.width,
     this.height,
     this.fit = BoxFit.cover,
@@ -14478,7 +14547,6 @@ final class _PhotoMessageImage extends StatefulWidget {
   final ChatPhotoAttachment attachment;
   final int itemIndex;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
-  final String? imageKey;
   final double? width;
   final double? height;
   final BoxFit fit;
@@ -14569,7 +14637,22 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   void _syncAccessUrlFuture() {
     _preparedCacheFilePath = null;
 
-    if (widget.attachment.previewBytes != null) {
+    final Uint8List? previewBytes = widget.attachment.previewBytes;
+
+    if (previewBytes != null) {
+      final String? mediaAssetId = widget.attachment.mediaAssetId;
+
+      if (widget.persistToDisk &&
+          mediaAssetId != null &&
+          previewBytes.isNotEmpty) {
+        unawaited(
+          _ChatPhotoDiskCache.store(
+            mediaAssetId: mediaAssetId,
+            bytes: previewBytes,
+          ).then<void>((_) {}),
+        );
+      }
+
       _accessUrlFuture = null;
       _resolvedAccessUrl = null;
       _cacheFileFuture = null;
@@ -14643,7 +14726,7 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
     if (previewBytes != null) {
       return Image.memory(
         previewBytes,
-        key: ValueKey<String>(widget.imageKey ?? _defaultImageKey),
+        key: ValueKey<String>(_defaultImageKey),
         width: widget.width,
         height: widget.height,
         fit: widget.fit,
@@ -14706,7 +14789,7 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   Widget _buildNetworkImage(Uri accessUrl) {
     return Image.network(
       accessUrl.toString(),
-      key: ValueKey<String>(widget.imageKey ?? _defaultRemoteImageKey),
+      key: ValueKey<String>(_defaultRemoteImageKey),
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
@@ -14752,7 +14835,7 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
             _buildPlaceholder(),
             Image(
               image: imageProvider,
-              key: ValueKey<String>(widget.imageKey ?? _defaultRemoteImageKey),
+              key: ValueKey<String>(_defaultRemoteImageKey),
               width: widget.width,
               height: widget.height,
               fit: widget.fit,
@@ -14828,6 +14911,8 @@ final class _ResolvedPhotoAccessUrl {
   final DateTime resolvedAt;
 }
 
+enum _ChatPhotoCacheVariant { thumbnail, original }
+
 final class _ChatPhotoDiskCache {
   static final Map<String, File> _resolvedFiles = <String, File>{};
   static final Map<String, Future<File?>> _pendingCacheLookups =
@@ -14835,26 +14920,70 @@ final class _ChatPhotoDiskCache {
   static final Map<String, Future<File?>> _pendingLoads =
       <String, Future<File?>>{};
 
-  static File? resolvedFile(String mediaAssetId) {
-    return _resolvedFiles[mediaAssetId];
+  static String _cacheKey(String mediaAssetId, _ChatPhotoCacheVariant variant) {
+    return '${variant.name}:$mediaAssetId';
   }
 
-  static Future<File?> findCached(String mediaAssetId) {
-    final File? resolved = _resolvedFiles[mediaAssetId];
+  static String _directoryName(_ChatPhotoCacheVariant variant) {
+    return switch (variant) {
+      _ChatPhotoCacheVariant.thumbnail => 'chat-photo-thumbnails',
+      _ChatPhotoCacheVariant.original => 'chat-photo-originals',
+    };
+  }
+
+  static String _fileName(String mediaAssetId, _ChatPhotoCacheVariant variant) {
+    return switch (variant) {
+      _ChatPhotoCacheVariant.thumbnail => '$mediaAssetId.jpg',
+      _ChatPhotoCacheVariant.original => '$mediaAssetId.image',
+    };
+  }
+
+  static File? resolvedFile(
+    String mediaAssetId, {
+    _ChatPhotoCacheVariant variant = _ChatPhotoCacheVariant.thumbnail,
+  }) {
+    final String cacheKey = _cacheKey(mediaAssetId, variant);
+    final File? file = _resolvedFiles[cacheKey];
+
+    if (file == null) {
+      return null;
+    }
+
+    try {
+      if (file.existsSync() && file.lengthSync() > 0) {
+        return file;
+      }
+    } catch (_) {
+      _resolvedFiles.remove(cacheKey);
+      return null;
+    }
+
+    _resolvedFiles.remove(cacheKey);
+    return null;
+  }
+
+  static Future<File?> findCached(
+    String mediaAssetId, {
+    _ChatPhotoCacheVariant variant = _ChatPhotoCacheVariant.thumbnail,
+  }) {
+    final String cacheKey = _cacheKey(mediaAssetId, variant);
+    final File? resolved = resolvedFile(mediaAssetId, variant: variant);
     if (resolved != null) {
       return Future<File?>.value(resolved);
     }
 
-    return _pendingCacheLookups.putIfAbsent(mediaAssetId, () async {
+    return _pendingCacheLookups.putIfAbsent(cacheKey, () async {
       try {
         final Directory cacheDirectory = await getApplicationCacheDirectory();
+        final String directoryName = _directoryName(variant);
         final File file = File(
-          '${cacheDirectory.path}/chat-photo-thumbnails/$mediaAssetId.jpg',
+          '${cacheDirectory.path}/$directoryName/'
+          '${_fileName(mediaAssetId, variant)}',
         );
 
         final bool exists = await file.exists();
         if (exists && await file.length() > 0) {
-          _resolvedFiles[mediaAssetId] = file;
+          _resolvedFiles[cacheKey] = file;
           return file;
         }
 
@@ -14862,7 +14991,7 @@ final class _ChatPhotoDiskCache {
       } catch (_) {
         return null;
       } finally {
-        _pendingCacheLookups.remove(mediaAssetId);
+        _pendingCacheLookups.remove(cacheKey);
       }
     });
   }
@@ -14870,25 +14999,33 @@ final class _ChatPhotoDiskCache {
   static Future<File?> load({
     required String mediaAssetId,
     required ChatMediaAssetAccessUrlCreator createAccessUrl,
+    _ChatPhotoCacheVariant variant = _ChatPhotoCacheVariant.thumbnail,
   }) {
-    final File? resolved = _resolvedFiles[mediaAssetId];
+    final String cacheKey = _cacheKey(mediaAssetId, variant);
+    final File? resolved = resolvedFile(mediaAssetId, variant: variant);
 
     if (resolved != null) {
       return Future<File?>.value(resolved);
     }
 
-    return _pendingLoads.putIfAbsent(mediaAssetId, () async {
+    return _pendingLoads.putIfAbsent(cacheKey, () async {
       try {
-        final File? cachedFile = await findCached(mediaAssetId);
+        final File? cachedFile = await findCached(
+          mediaAssetId,
+          variant: variant,
+        );
         if (cachedFile != null) {
           return cachedFile;
         }
 
         final Directory cacheDirectory = await getApplicationCacheDirectory();
+        final String directoryName = _directoryName(variant);
         final Directory photoDirectory = Directory(
-          '${cacheDirectory.path}/chat-photo-thumbnails',
+          '${cacheDirectory.path}/$directoryName',
         );
-        final File file = File('${photoDirectory.path}/$mediaAssetId.jpg');
+        final File file = File(
+          '${photoDirectory.path}/${_fileName(mediaAssetId, variant)}',
+        );
 
         final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
         final http.Response response = await http.get(accessUrl);
@@ -14901,18 +15038,68 @@ final class _ChatPhotoDiskCache {
 
         await photoDirectory.create(recursive: true);
         await file.writeAsBytes(response.bodyBytes, flush: true);
-        _resolvedFiles[mediaAssetId] = file;
+        _resolvedFiles[cacheKey] = file;
         return file;
       } catch (_) {
         return null;
       } finally {
-        _pendingLoads.remove(mediaAssetId);
+        _pendingLoads.remove(cacheKey);
       }
     });
   }
 
-  static Future<void> remove(String mediaAssetId) async {
-    final File? file = _resolvedFiles.remove(mediaAssetId);
+  static Future<File?> store({
+    required String mediaAssetId,
+    required Uint8List bytes,
+    _ChatPhotoCacheVariant variant = _ChatPhotoCacheVariant.thumbnail,
+  }) {
+    final String cacheKey = _cacheKey(mediaAssetId, variant);
+    final File? resolved = resolvedFile(mediaAssetId, variant: variant);
+
+    if (resolved != null) {
+      return Future<File?>.value(resolved);
+    }
+
+    if (bytes.isEmpty) {
+      return Future<File?>.value();
+    }
+
+    return _pendingLoads.putIfAbsent(cacheKey, () async {
+      try {
+        final File? cachedFile = await findCached(
+          mediaAssetId,
+          variant: variant,
+        );
+        if (cachedFile != null) {
+          return cachedFile;
+        }
+
+        final Directory cacheDirectory = await getApplicationCacheDirectory();
+        final Directory photoDirectory = Directory(
+          '${cacheDirectory.path}/${_directoryName(variant)}',
+        );
+        final File file = File(
+          '${photoDirectory.path}/${_fileName(mediaAssetId, variant)}',
+        );
+
+        await photoDirectory.create(recursive: true);
+        await file.writeAsBytes(bytes, flush: true);
+        _resolvedFiles[cacheKey] = file;
+        return file;
+      } catch (_) {
+        return null;
+      } finally {
+        _pendingLoads.remove(cacheKey);
+      }
+    });
+  }
+
+  static Future<void> remove(
+    String mediaAssetId, {
+    _ChatPhotoCacheVariant variant = _ChatPhotoCacheVariant.thumbnail,
+  }) async {
+    final String cacheKey = _cacheKey(mediaAssetId, variant);
+    final File? file = _resolvedFiles.remove(cacheKey);
 
     if (file != null) {
       try {
@@ -14947,6 +15134,7 @@ final class _PhotoViewerScreen extends StatefulWidget {
     required this.senderName,
     required this.sentAt,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreateThumbnailAccessUrl,
   });
 
   final List<ChatPhotoAttachment> attachments;
@@ -14954,6 +15142,7 @@ final class _PhotoViewerScreen extends StatefulWidget {
   final String senderName;
   final DateTime sentAt;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreateThumbnailAccessUrl;
 
   @override
   State<_PhotoViewerScreen> createState() {
@@ -15063,10 +15252,10 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
 
   Future<void> _warmPhoto(ChatPhotoAttachment attachment) async {
     final ImageProvider imageProvider;
-    final Uint8List? previewBytes = attachment.previewBytes;
+    final Uint8List? originalBytes = attachment.uploadBytes;
 
-    if (previewBytes != null) {
-      return;
+    if (originalBytes != null && originalBytes.isNotEmpty) {
+      imageProvider = MemoryImage(originalBytes);
     } else {
       final String? mediaAssetId = attachment.mediaAssetId;
       final ChatMediaAssetAccessUrlCreator? createAccessUrl =
@@ -15077,9 +15266,16 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
       }
 
       try {
-        final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
-        _PhotoMessageImageState.rememberAccessUrl(mediaAssetId, accessUrl);
-        imageProvider = NetworkImage(accessUrl.toString());
+        final File? originalFile = await _ChatPhotoDiskCache.load(
+          mediaAssetId: mediaAssetId,
+          createAccessUrl: createAccessUrl,
+          variant: _ChatPhotoCacheVariant.original,
+        );
+        if (originalFile == null || !mounted) {
+          return;
+        }
+
+        imageProvider = _photoViewerFileImageProvider(originalFile, context);
       } catch (_) {
         // 미리 불러오기가 실패해도 현재 갤러리는 그대로 사용할 수 있어요.
         return;
@@ -15222,6 +15418,8 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                     attachment: widget.attachments[index],
                     onCreateMediaAssetAccessUrl:
                         widget.onCreateMediaAssetAccessUrl,
+                    onCreateThumbnailAccessUrl:
+                        widget.onCreateThumbnailAccessUrl,
                   );
                 },
               ),
@@ -15238,7 +15436,7 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                 attachments: widget.attachments,
                 currentIndex: _currentIndex,
                 thumbnailKeys: _thumbnailKeys,
-                onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
+                onCreateMediaAssetAccessUrl: widget.onCreateThumbnailAccessUrl,
                 onThumbnailPressed: (int index) {
                   _pageController.animateToPage(
                     index,
@@ -15258,25 +15456,193 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
   }
 }
 
-final class _PhotoViewerPage extends StatelessWidget {
-  const _PhotoViewerPage({
+ImageProvider<Object> _photoViewerFileImageProvider(
+  File file,
+  BuildContext context,
+) {
+  final double pixelRatio = MediaQuery.devicePixelRatioOf(context);
+  final double logicalWidth = MediaQuery.sizeOf(context).width;
+  final int cacheWidth = (logicalWidth * pixelRatio).ceil().clamp(1, 1280);
+
+  return ResizeImage.resizeIfNeeded(cacheWidth, null, FileImage(file));
+}
+
+final class _PhotoViewerImage extends StatefulWidget {
+  const _PhotoViewerImage({
     required this.attachment,
     required this.onCreateMediaAssetAccessUrl,
+    required this.onCreateThumbnailAccessUrl,
+    required this.width,
+    required this.height,
+    required this.fit,
+    required this.filterQuality,
   });
 
   final ChatPhotoAttachment attachment;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreateThumbnailAccessUrl;
+  final double width;
+  final double height;
+  final BoxFit fit;
+  final FilterQuality filterQuality;
+
+  @override
+  State<_PhotoViewerImage> createState() => _PhotoViewerImageState();
+}
+
+final class _PhotoViewerImageState extends State<_PhotoViewerImage> {
+  Uint8List? _originalBytes;
+  File? _originalFile;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncOriginalImage();
+  }
+
+  @override
+  void didUpdateWidget(_PhotoViewerImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.attachment != widget.attachment ||
+        oldWidget.onCreateMediaAssetAccessUrl !=
+            widget.onCreateMediaAssetAccessUrl) {
+      _syncOriginalImage();
+    }
+  }
+
+  void _syncOriginalImage() {
+    final Uint8List? uploadBytes = widget.attachment.uploadBytes;
+    if (uploadBytes != null && uploadBytes.isNotEmpty) {
+      _originalBytes = uploadBytes;
+      _originalFile = null;
+      return;
+    }
+
+    _originalBytes = null;
+    final String? mediaAssetId = widget.attachment.mediaAssetId;
+    if (mediaAssetId == null) {
+      _originalFile = null;
+      return;
+    }
+
+    final File? resolvedFile = _ChatPhotoDiskCache.resolvedFile(
+      mediaAssetId,
+      variant: _ChatPhotoCacheVariant.original,
+    );
+    _originalFile = resolvedFile;
+
+    if (resolvedFile != null) {
+      return;
+    }
+
+    final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+        widget.onCreateMediaAssetAccessUrl;
+    if (createAccessUrl == null) {
+      return;
+    }
+
+    unawaited(
+      _ChatPhotoDiskCache.load(
+        mediaAssetId: mediaAssetId,
+        createAccessUrl: createAccessUrl,
+        variant: _ChatPhotoCacheVariant.original,
+      ).then((File? file) {
+        if (!mounted ||
+            file == null ||
+            widget.attachment.mediaAssetId != mediaAssetId) {
+          return;
+        }
+
+        setState(() {
+          _originalFile = file;
+        });
+      }),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget preview = _PhotoMessageImage(
+      attachment: widget.attachment,
+      itemIndex: 0,
+      onCreateMediaAssetAccessUrl: widget.onCreateThumbnailAccessUrl,
+      width: widget.width,
+      height: widget.height,
+      fit: widget.fit,
+      filterQuality: widget.filterQuality,
+      persistToDisk: true,
+    );
+    final ImageProvider<Object>? originalProvider = switch ((
+      _originalBytes,
+      _originalFile,
+    )) {
+      (final Uint8List bytes, _) => MemoryImage(bytes),
+      (_, final File file) => _photoViewerFileImageProvider(file, context),
+      _ => null,
+    };
+
+    return SizedBox(
+      key: ValueKey<String>('photo-viewer-image-${widget.attachment.assetId}'),
+      width: widget.width,
+      height: widget.height,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          preview,
+          if (originalProvider != null)
+            Image(
+              key: ValueKey<String>(
+                'photo-viewer-original-${widget.attachment.assetId}',
+              ),
+              image: originalProvider,
+              width: widget.width,
+              height: widget.height,
+              fit: widget.fit,
+              filterQuality: widget.filterQuality,
+              gaplessPlayback: true,
+              frameBuilder:
+                  (
+                    BuildContext context,
+                    Widget child,
+                    int? frame,
+                    bool wasSynchronouslyLoaded,
+                  ) {
+                    return AnimatedOpacity(
+                      duration: _photoLoadRevealDuration,
+                      curve: Curves.easeOut,
+                      opacity: wasSynchronouslyLoaded || frame != null ? 1 : 0,
+                      child: child,
+                    );
+                  },
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _PhotoViewerPage extends StatelessWidget {
+  const _PhotoViewerPage({
+    required this.attachment,
+    required this.onCreateMediaAssetAccessUrl,
+    required this.onCreateThumbnailAccessUrl,
+  });
+
+  final ChatPhotoAttachment attachment;
+  final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
+  final ChatMediaAssetAccessUrlCreator? onCreateThumbnailAccessUrl;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         return Center(
-          child: _PhotoMessageImage(
+          child: _PhotoViewerImage(
             attachment: attachment,
-            itemIndex: 0,
             onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
-            imageKey: 'photo-viewer-image-${attachment.assetId}',
+            onCreateThumbnailAccessUrl: onCreateThumbnailAccessUrl,
             width: constraints.maxWidth,
             height: constraints.maxHeight,
             fit: _photoViewerFit(

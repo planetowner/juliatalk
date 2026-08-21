@@ -14,7 +14,13 @@ final Uint8List _testPng = base64Decode(
   'FwcdLl4wmwAAAAtJREFUCNdjYAACAAAFAAHiJgWbAAAAAElFTkSuQmCC',
 );
 
-Widget _buildPhotoMessageScreen(ChatMessage message, {double? topPadding}) {
+Widget _buildPhotoMessageScreen(
+  ChatMessage message, {
+  double? topPadding,
+  String otherParticipantName = 'Lia',
+  int unreadOtherConversationCount = 0,
+  VoidCallback? onBack,
+}) {
   return MaterialApp(
     builder: topPadding == null
         ? null
@@ -26,7 +32,12 @@ Widget _buildPhotoMessageScreen(ChatMessage message, {double? topPadding}) {
               child: child!,
             );
           },
-    home: ChatConversationView(initialMessages: <ChatMessage>[message]),
+    home: ChatConversationView(
+      initialMessages: <ChatMessage>[message],
+      otherParticipantName: otherParticipantName,
+      unreadOtherConversationCount: unreadOtherConversationCount,
+      onBack: onBack,
+    ),
   );
 }
 
@@ -658,6 +669,99 @@ void main() {
       ),
       findsNothing,
     );
+  });
+
+  testWidgets('chat top bar matches the photo viewer back-button position', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(393, 852));
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(
+      _buildPhotoMessageScreen(
+        _photoMessage(senderId: '1', recipientId: '2'),
+        topPadding: 59,
+        otherParticipantName: 'june',
+        unreadOtherConversationCount: 67,
+        onBack: () {},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final Finder chatTopBar = find.byKey(
+      const ValueKey<String>('chat-top-bar'),
+    );
+    final Finder chatBackButton = find.byKey(
+      const ValueKey<String>('chat-back-button'),
+    );
+    final Finder chatBackGroup = find.byKey(
+      const ValueKey<String>('chat-back-group'),
+    );
+    final Finder chatActionsGroup = find.byKey(
+      const ValueKey<String>('chat-actions-group'),
+    );
+    final Finder searchButton = find.byKey(
+      const ValueKey<String>('chat-search-button'),
+    );
+    final Finder callButton = find.byKey(
+      const ValueKey<String>('chat-call-button'),
+    );
+    final Finder participantName = find.byKey(
+      const ValueKey<String>('chat-participant-name'),
+    );
+    final Rect chatBackButtonRect = tester.getRect(chatBackButton);
+    final Rect chatBackGroupRect = tester.getRect(chatBackGroup);
+    final Rect chatActionsGroupRect = tester.getRect(chatActionsGroup);
+    final Container backGroupSurface = tester.widget<Container>(
+      find.descendant(of: chatBackGroup, matching: find.byType(Container)),
+    );
+    final BoxDecoration backGroupDecoration =
+        backGroupSurface.decoration! as BoxDecoration;
+    final Border backGroupBorder = backGroupDecoration.border! as Border;
+    final BorderRadius backGroupRadius =
+        backGroupDecoration.borderRadius! as BorderRadius;
+    final Text participantNameText = tester.widget<Text>(participantName);
+    final Icon searchIcon = tester.widget<Icon>(
+      find.byKey(const ValueKey<String>('chat-search-icon')),
+    );
+    final Icon callIcon = tester.widget<Icon>(
+      find.byKey(const ValueKey<String>('chat-call-icon')),
+    );
+
+    expect(tester.getSize(chatTopBar), const Size(393, 115));
+    expect(chatBackButtonRect, const Rect.fromLTWH(16, 59, 44, 44));
+    expect(chatBackGroupRect.left, 16);
+    expect(chatBackGroupRect.top, 59);
+    expect(chatBackGroupRect.width, closeTo(72, 2));
+    expect(chatBackGroupRect.height, 44);
+    expect(chatActionsGroupRect, const Rect.fromLTWH(289, 59, 88, 44));
+    expect(tester.getCenter(searchButton), const Offset(313, 81));
+    expect(tester.getCenter(callButton), const Offset(353, 81));
+    expect(tester.getCenter(participantName), const Offset(196.5, 81));
+    expect(backGroupDecoration.color, Colors.white);
+    expect(backGroupDecoration.shape, BoxShape.rectangle);
+    expect(backGroupRadius.topLeft.x, 22);
+    expect(backGroupBorder.top.color, const Color(0xFFE5E8EB));
+    expect(backGroupBorder.top.width, 0.67);
+    expect(participantNameText.style?.fontSize, 18);
+    expect(participantNameText.style?.fontWeight, FontWeight.w700);
+    expect(participantNameText.style?.color, const Color(0xFF191919));
+    expect(searchIcon.size, 25);
+    expect(searchIcon.color, const Color(0xFF1B3243));
+    expect(callIcon.size, 25);
+    expect(callIcon.color, const Color(0xFF1B3243));
+    expect(find.text('67'), findsOneWidget);
+
+    await tester.tap(_photoFinder(0));
+    await tester.pumpAndSettle();
+
+    final Rect photoViewerBackButtonRect = tester.getRect(
+      find.byKey(const ValueKey<String>('photo-viewer-back')),
+    );
+
+    expect(photoViewerBackButtonRect, chatBackButtonRect);
   });
 
   testWidgets('tapping a photo opens the full-screen photo viewer', (

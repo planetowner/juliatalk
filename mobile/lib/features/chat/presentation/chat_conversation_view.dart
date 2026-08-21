@@ -47,6 +47,14 @@ const double _replyMessageMaximumWidthRatio = 0.70;
 
 const double _messageToComposerGap = 12;
 
+const double _composerRaisedBottomPadding = 10;
+
+const double _topBarButtonDimension = 44;
+
+const double _topBarHorizontalMargin = 16;
+
+const double _topBarTrailingSpacing = 23;
+
 const double _attachmentPanelFallbackHeight = 302;
 
 const Duration _quickPhotoEligibilityDuration = Duration(seconds: 15);
@@ -753,7 +761,12 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     if (composerRenderObject is RenderBox &&
         composerRenderObject.attached &&
         composerRenderObject.hasSize) {
-      _quickPhotoComposerHeight = composerRenderObject.size.height;
+      final double additionalPanelPadding = keyboardHeight > 0.5
+          ? 0
+          : _composerRaisedBottomPadding;
+
+      _quickPhotoComposerHeight =
+          composerRenderObject.size.height + additionalPanelPadding;
     }
 
     _stopKeyboardTransition();
@@ -3437,6 +3450,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                                   otherParticipantName:
                                       widget.otherParticipantName,
                                   attachmentPanelOpen: _attachmentPanelOpen,
+                                  preserveRaisedBottomPadding:
+                                      _heldBottomSurfaceHeight != null,
                                   onCancelReply: _cancelReply,
                                   onCancelEdit: _cancelEdit,
                                   onSend: _textMessageSending
@@ -3905,6 +3920,16 @@ final class _ChatTopBar extends StatelessWidget {
 
   static const double height = 56;
 
+  static const double _actionsWidth = 88;
+
+  static const Color _buttonColor = AppColors.white;
+
+  static const Color _buttonBorderColor = AppColors.grey200;
+
+  static const Color _iconColor = Color(0xFF1B3243);
+
+  static const Color _participantNameColor = Color(0xFF191919);
+
   final String participantName;
   final int unreadOtherConversationCount;
   final VoidCallback? onBackPressed;
@@ -3914,6 +3939,12 @@ final class _ChatTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final double topPadding = MediaQuery.paddingOf(context).top;
+    final String? unreadCount = unreadOtherConversationCount > 0
+        ? _formatUnreadCount(unreadOtherConversationCount)
+        : null;
+    final double backGroupWidth = unreadCount == null
+        ? _topBarButtonDimension
+        : 52 + unreadCount.length * 10;
 
     return _TranslucentTopBarSurface(
       key: const ValueKey<String>('chat-top-bar'),
@@ -3923,96 +3954,128 @@ final class _ChatTopBar extends StatelessWidget {
         child: SizedBox(
           height: height,
           child: Stack(
-            alignment: Alignment.center,
             children: [
               Positioned(
                 left: 112,
+                top: 0,
                 right: 112,
+                height: _topBarButtonDimension,
                 child: IgnorePointer(
-                  child: Text(
-                    participantName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: AppTypography.typography4.copyWith(
-                      color: AppColors.grey900,
-                      fontWeight: AppTypography.bold,
+                  child: Center(
+                    child: Text(
+                      key: const ValueKey<String>('chat-participant-name'),
+                      participantName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: AppTypography.subTypography9.copyWith(
+                        color: _participantNameColor,
+                        fontWeight: AppTypography.bold,
+                      ),
                     ),
                   ),
                 ),
               ),
               if (onBackPressed != null)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 6),
-                    child: Tooltip(
-                      message: 'Back',
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
+                Positioned(
+                  left: _topBarHorizontalMargin,
+                  top: 0,
+                  child: Tooltip(
+                    message: 'Back',
+                    child: _TopBarButtonSurface(
+                      key: const ValueKey<String>('chat-back-group'),
+                      height: _topBarButtonDimension,
+                      width: backGroupWidth,
+                      color: _buttonColor,
+                      borderColor: _buttonBorderColor,
+                      child: InkWell(
                         onTap: onBackPressed,
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(minWidth: 48),
-                          child: SizedBox(
-                            height: 48,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(
-                                  Icons.chevron_left_rounded,
-                                  size: 36,
-                                  color: AppColors.grey700,
-                                ),
-                                if (unreadOtherConversationCount > 0) ...[
-                                  const SizedBox(width: 1),
-                                  Text(
-                                    _formatUnreadCount(
-                                      unreadOtherConversationCount,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.fade,
-                                    softWrap: false,
-                                    style: AppTypography.typography5.copyWith(
-                                      color: AppColors.grey700,
-                                      fontWeight: AppTypography.medium,
+                        borderRadius: BorderRadius.circular(
+                          _topBarButtonDimension / 2,
+                        ),
+                        child: SizedBox(
+                          width: backGroupWidth,
+                          height: _topBarButtonDimension,
+                          child: Stack(
+                            children: [
+                              if (unreadCount != null)
+                                Positioned(
+                                  left: 37,
+                                  top: 0,
+                                  right: 15,
+                                  bottom: 0,
+                                  child: Center(
+                                    child: FittedBox(
+                                      fit: BoxFit.scaleDown,
+                                      child: Text(
+                                        unreadCount,
+                                        maxLines: 1,
+                                        softWrap: false,
+                                        style: AppTypography.typography5
+                                            .copyWith(
+                                              color: _iconColor,
+                                              fontWeight: AppTypography.medium,
+                                            ),
+                                      ),
                                     ),
                                   ),
-                                  const SizedBox(width: 12),
-                                ],
-                              ],
-                            ),
+                                ),
+                              const Positioned(
+                                left: 0,
+                                top: 0,
+                                child: SizedBox(
+                                  key: ValueKey<String>('chat-back-button'),
+                                  width: _topBarButtonDimension,
+                                  height: _topBarButtonDimension,
+                                  child: Center(
+                                    child: _TopBarBackIcon(color: _iconColor),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        tooltip: 'Search',
-                        onPressed: onSearchPressed,
-                        icon: const Icon(
-                          Icons.search_rounded,
-                          size: 28,
-                          color: AppColors.grey700,
+              Positioned(
+                top: 0,
+                right: _topBarHorizontalMargin,
+                child: _TopBarButtonSurface(
+                  key: const ValueKey<String>('chat-actions-group'),
+                  width: _actionsWidth,
+                  height: _topBarButtonDimension,
+                  color: _buttonColor,
+                  borderColor: _buttonBorderColor,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Row(
+                      children: [
+                        _ChatTopBarActionButton(
+                          key: const ValueKey<String>('chat-search-button'),
+                          tooltip: 'Search',
+                          onPressed: onSearchPressed,
+                          icon: const Icon(
+                            CupertinoIcons.search,
+                            key: ValueKey<String>('chat-search-icon'),
+                            size: 25,
+                            color: _iconColor,
+                          ),
                         ),
-                      ),
-                      IconButton(
-                        tooltip: 'Call',
-                        onPressed: onCallPressed,
-                        icon: const Icon(
-                          Icons.call_outlined,
-                          size: 26,
-                          color: AppColors.grey700,
+                        _ChatTopBarActionButton(
+                          key: const ValueKey<String>('chat-call-button'),
+                          tooltip: 'Call',
+                          onPressed: onCallPressed,
+                          icon: const Icon(
+                            CupertinoIcons.phone,
+                            key: ValueKey<String>('chat-call-icon'),
+                            size: 25,
+                            color: _iconColor,
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -4029,6 +4092,85 @@ final class _ChatTopBar extends StatelessWidget {
     }
 
     return count.toString();
+  }
+}
+
+final class _ChatTopBarActionButton extends StatelessWidget {
+  const _ChatTopBarActionButton({
+    required this.tooltip,
+    required this.onPressed,
+    required this.icon,
+    super.key,
+  });
+
+  final String tooltip;
+  final VoidCallback onPressed;
+  final Widget icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(_topBarButtonDimension / 2),
+        child: SizedBox(
+          width: 40,
+          height: _topBarButtonDimension,
+          child: Center(child: icon),
+        ),
+      ),
+    );
+  }
+}
+
+final class _TopBarButtonSurface extends StatelessWidget {
+  const _TopBarButtonSurface({
+    required this.height,
+    required this.color,
+    required this.borderColor,
+    required this.child,
+    this.width,
+    this.shape = BoxShape.rectangle,
+    super.key,
+  });
+
+  final double? width;
+  final double height;
+  final Color color;
+  final Color borderColor;
+  final Widget child;
+  final BoxShape shape;
+
+  @override
+  Widget build(BuildContext context) {
+    final BorderRadius borderRadius = BorderRadius.circular(height / 2);
+
+    return SizedBox(
+      width: width,
+      height: height,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                color: color,
+                shape: shape,
+                borderRadius: shape == BoxShape.circle ? null : borderRadius,
+                border: Border.all(color: borderColor, width: 0.67),
+              ),
+            ),
+          ),
+          Material(
+            color: Colors.transparent,
+            shape: shape == BoxShape.circle ? const CircleBorder() : null,
+            borderRadius: shape == BoxShape.circle ? null : borderRadius,
+            clipBehavior: Clip.antiAlias,
+            child: child,
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -14830,19 +14972,13 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
 
   static const Color _thumbnailBorderColor = AppColors.blue500;
 
-  static const double _backButtonDimension = 44;
-
-  static const double _backButtonHorizontalMargin = 16;
-
-  static const double _chromeVerticalSpacing = 23;
-
   static const double _downloadButtonDimension = 48;
 
   static const double _actionBarContentHeight =
-      _chromeVerticalSpacing * 2 + _downloadButtonDimension;
+      _topBarTrailingSpacing * 2 + _downloadButtonDimension;
 
   static double _topBarHeight(double topPadding) {
-    return topPadding + _backButtonDimension + _chromeVerticalSpacing;
+    return topPadding + _topBarButtonDimension + _topBarTrailingSpacing;
   }
 
   late final PageController _pageController;
@@ -15194,24 +15330,20 @@ final class _PhotoViewerTopBar extends StatelessWidget {
               child: Stack(
                 children: [
                   Positioned(
-                    left: _PhotoViewerScreenState._backButtonHorizontalMargin,
+                    left: _topBarHorizontalMargin,
                     top: topPadding,
                     child: _PhotoViewerChromeButton(
                       key: const ValueKey<String>('photo-viewer-back'),
-                      dimension: _PhotoViewerScreenState._backButtonDimension,
+                      dimension: _topBarButtonDimension,
                       onPressed: onBackPressed,
-                      icon: const _PhotoViewerBackIcon(),
+                      icon: const _TopBarBackIcon(color: Color(0xFFE8E8E8)),
                     ),
                   ),
                   Positioned(
-                    left:
-                        _PhotoViewerScreenState._backButtonHorizontalMargin +
-                        _PhotoViewerScreenState._backButtonDimension,
+                    left: _topBarHorizontalMargin + _topBarButtonDimension,
                     top: topPadding,
-                    right:
-                        _PhotoViewerScreenState._backButtonHorizontalMargin +
-                        _PhotoViewerScreenState._backButtonDimension,
-                    height: _PhotoViewerScreenState._backButtonDimension,
+                    right: _topBarHorizontalMargin + _topBarButtonDimension,
+                    height: _topBarButtonDimension,
                     child: Center(
                       child: Column(
                         key: const ValueKey<String>('photo-viewer-info'),
@@ -15351,46 +15483,41 @@ final class _PhotoViewerChromeButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return _TopBarButtonSurface(
       width: dimension,
       height: dimension,
-      decoration: BoxDecoration(
-        color: const Color(0xFF272727),
-        shape: BoxShape.circle,
-        border: Border.all(color: const Color(0xFF4E4E4E), width: 0.67),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onPressed,
-          customBorder: const CircleBorder(),
-          child: Center(child: icon),
-        ),
+      color: const Color(0xFF272727),
+      borderColor: const Color(0xFF4E4E4E),
+      shape: BoxShape.circle,
+      child: InkWell(
+        onTap: onPressed,
+        customBorder: const CircleBorder(),
+        child: Center(child: icon),
       ),
     );
   }
 }
 
-final class _PhotoViewerBackIcon extends StatelessWidget {
-  const _PhotoViewerBackIcon();
+final class _TopBarBackIcon extends StatelessWidget {
+  const _TopBarBackIcon({required this.color});
+
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
-    return const _PhotoViewerChevronIcon(
-      size: Size.square(24),
-      start: Offset(16, 3),
-      vertex: Offset(6, 12),
-      end: Offset(16, 21),
-      color: Color(0xFFE8E8E8),
+    return _TopBarChevronIcon(
+      size: const Size.square(24),
+      start: const Offset(16, 3),
+      vertex: const Offset(6, 12),
+      end: const Offset(16, 21),
+      color: color,
       strokeWidth: 2,
     );
   }
 }
 
-final class _PhotoViewerChevronIcon extends StatelessWidget {
-  const _PhotoViewerChevronIcon({
+final class _TopBarChevronIcon extends StatelessWidget {
+  const _TopBarChevronIcon({
     required this.size,
     required this.start,
     required this.vertex,
@@ -15411,7 +15538,7 @@ final class _PhotoViewerChevronIcon extends StatelessWidget {
     return SizedBox.fromSize(
       size: size,
       child: CustomPaint(
-        painter: _PhotoViewerChevronIconPainter(
+        painter: _TopBarChevronIconPainter(
           start: start,
           vertex: vertex,
           end: end,
@@ -15423,8 +15550,8 @@ final class _PhotoViewerChevronIcon extends StatelessWidget {
   }
 }
 
-final class _PhotoViewerChevronIconPainter extends CustomPainter {
-  const _PhotoViewerChevronIconPainter({
+final class _TopBarChevronIconPainter extends CustomPainter {
+  const _TopBarChevronIconPainter({
     required this.start,
     required this.vertex,
     required this.end,
@@ -15455,7 +15582,7 @@ final class _PhotoViewerChevronIconPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _PhotoViewerChevronIconPainter oldDelegate) {
+  bool shouldRepaint(covariant _TopBarChevronIconPainter oldDelegate) {
     return start != oldDelegate.start ||
         vertex != oldDelegate.vertex ||
         end != oldDelegate.end ||
@@ -17409,6 +17536,7 @@ final class _MessageComposer extends StatelessWidget {
     required this.currentUserId,
     required this.otherParticipantName,
     required this.attachmentPanelOpen,
+    required this.preserveRaisedBottomPadding,
     required this.onCancelReply,
     required this.onCancelEdit,
     required this.onSend,
@@ -17429,6 +17557,7 @@ final class _MessageComposer extends StatelessWidget {
   final String currentUserId;
   final String otherParticipantName;
   final bool attachmentPanelOpen;
+  final bool preserveRaisedBottomPadding;
 
   final VoidCallback onCancelReply;
   final VoidCallback onCancelEdit;
@@ -17439,6 +17568,16 @@ final class _MessageComposer extends StatelessWidget {
   final VoidCallback onInputTap;
   final VoidCallback onVoiceMemoPressed;
 
+  static const double _defaultComposerHeight = 48;
+
+  static const double _defaultComposerRadius = 24;
+
+  static const double _defaultActionDimension = 32;
+
+  static const Color _defaultIconColor = Color(0xFF191919);
+
+  static const Color _defaultHintColor = Color(0xFF92989E);
+
   @override
   Widget build(BuildContext context) {
     final ChatMessage? editTarget = editingMessage;
@@ -17446,6 +17585,16 @@ final class _MessageComposer extends StatelessWidget {
 
     final bool isEditing = editTarget != null;
     final bool isReplying = !isEditing && replyTarget != null;
+    final MediaQueryData mediaQuery = MediaQuery.of(context);
+    final double keyboardHeight = mediaQuery.viewInsets.bottom;
+    final double systemBottomPadding = mediaQuery.viewPadding.bottom;
+    final double keyboardBottomPadding = (keyboardHeight - systemBottomPadding)
+        .clamp(0, _composerRaisedBottomPadding)
+        .toDouble();
+    final double bottomPadding =
+        attachmentPanelOpen || preserveRaisedBottomPadding
+        ? _composerRaisedBottomPadding
+        : keyboardBottomPadding;
 
     final String? replyTitle = replyTarget == null
         ? null
@@ -17454,7 +17603,7 @@ final class _MessageComposer extends StatelessWidget {
 
     return TextFieldTapRegion(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+        padding: EdgeInsets.fromLTRB(10, 0, 10, bottomPadding),
         child: ValueListenableBuilder<TextEditingValue>(
           valueListenable: controller,
           builder:
@@ -17495,17 +17644,27 @@ final class _MessageComposer extends StatelessWidget {
   Widget _buildDefaultComposer({required bool canSend}) {
     return ClipRRect(
       key: const ValueKey<String>('message-composer-default'),
-      borderRadius: const BorderRadius.all(Radius.circular(28)),
-      child: ColoredBox(
-        color: AppColors.grey50,
+      borderRadius: const BorderRadius.all(
+        Radius.circular(_defaultComposerRadius),
+      ),
+      child: DecoratedBox(
+        key: const ValueKey<String>('message-composer-surface'),
+        decoration: BoxDecoration(
+          color: AppColors.grey50,
+          borderRadius: const BorderRadius.all(
+            Radius.circular(_defaultComposerRadius),
+          ),
+          border: Border.all(color: AppColors.white),
+        ),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 50),
+          constraints: const BoxConstraints(minHeight: _defaultComposerHeight),
           child: Padding(
-            padding: const EdgeInsets.all(4),
+            padding: const EdgeInsets.all(8),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 _ComposerLastLineAction(
+                  offsetY: 0,
                   child: _ComposerCircleButton(
                     buttonKey: const ValueKey<String>('message-attachment'),
                     tooltip: attachmentPanelOpen
@@ -17513,17 +17672,27 @@ final class _MessageComposer extends StatelessWidget {
                         : 'Attachments',
                     icon: attachmentPanelOpen
                         ? Icons.close_rounded
-                        : Icons.add_rounded,
-                    iconSize: attachmentPanelOpen ? 27 : 29,
+                        : CupertinoIcons.add,
+                    iconSize: 20,
+                    dimension: _defaultActionDimension,
                     backgroundColor: AppColors.white,
-                    foregroundColor: AppColors.grey700,
+                    foregroundColor: _defaultIconColor,
                     onPressed: onToggleAttachmentPanel,
                   ),
                 ),
                 const SizedBox(width: 4),
-                Expanded(child: _buildTextField(hintText: 'Enter a message')),
+                Expanded(
+                  child: _buildTextField(
+                    hintText: 'Enter a message',
+                    textStyle: AppTypography.typography6,
+                    textColor: _defaultIconColor,
+                    hintColor: _defaultHintColor,
+                    verticalContentPadding: 4.5,
+                  ),
+                ),
                 const SizedBox(width: 4),
                 _ComposerLastLineAction(
+                  offsetY: 0,
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 140),
                     switchInCurve: Curves.easeOut,
@@ -17543,7 +17712,8 @@ final class _MessageComposer extends StatelessWidget {
                             buttonKey: const ValueKey<String>('message-send'),
                             tooltip: 'Send',
                             icon: Icons.arrow_upward_rounded,
-                            iconSize: 23,
+                            iconSize: 19,
+                            dimension: _defaultActionDimension,
                             backgroundColor: AppColors.blue500,
                             foregroundColor: AppColors.white,
                             onPressed: onSend,
@@ -17552,9 +17722,10 @@ final class _MessageComposer extends StatelessWidget {
                             buttonKey: const ValueKey<String>('message-voice'),
                             tooltip: 'Voice message',
                             icon: Icons.graphic_eq_rounded,
-                            iconSize: 25,
+                            iconSize: 18,
+                            dimension: _defaultActionDimension,
                             backgroundColor: AppColors.white,
-                            foregroundColor: AppColors.grey700,
+                            foregroundColor: _defaultIconColor,
                             onPressed: onVoiceMemoPressed,
                           ),
                   ),
@@ -17841,6 +18012,10 @@ final class _MessageComposer extends StatelessWidget {
   Widget _buildTextField({
     required String hintText,
     double horizontalContentPadding = 4,
+    double verticalContentPadding = 12,
+    TextStyle textStyle = AppTypography.subTypography10,
+    Color textColor = AppColors.grey900,
+    Color hintColor = AppColors.grey500,
   }) {
     return KeyedSubtree(
       key: inputHostKey,
@@ -17855,14 +18030,14 @@ final class _MessageComposer extends StatelessWidget {
         keyboardType: TextInputType.multiline,
         textInputAction: TextInputAction.newline,
         cursorColor: AppColors.blue500,
-        style: AppTypography.subTypography10.copyWith(
-          color: AppColors.grey900,
+        style: textStyle.copyWith(
+          color: textColor,
           fontWeight: AppTypography.regular,
         ),
         decoration: InputDecoration(
           hintText: hintText,
-          hintStyle: AppTypography.subTypography10.copyWith(
-            color: AppColors.grey500,
+          hintStyle: textStyle.copyWith(
+            color: hintColor,
             fontWeight: AppTypography.regular,
           ),
           filled: false,
@@ -17870,7 +18045,7 @@ final class _MessageComposer extends StatelessWidget {
           isDense: true,
           contentPadding: EdgeInsets.symmetric(
             horizontal: horizontalContentPadding,
-            vertical: 12,
+            vertical: verticalContentPadding,
           ),
           border: InputBorder.none,
           enabledBorder: InputBorder.none,
@@ -17896,13 +18071,14 @@ final class _ReplyActionSlot extends StatelessWidget {
 }
 
 final class _ComposerLastLineAction extends StatelessWidget {
-  const _ComposerLastLineAction({required this.child});
+  const _ComposerLastLineAction({required this.child, this.offsetY = -2});
 
   final Widget child;
+  final double offsetY;
 
   @override
   Widget build(BuildContext context) {
-    return Transform.translate(offset: const Offset(0, -2), child: child);
+    return Transform.translate(offset: Offset(0, offsetY), child: child);
   }
 }
 
@@ -17915,6 +18091,7 @@ final class _ComposerCircleButton extends StatelessWidget {
     required this.backgroundColor,
     required this.foregroundColor,
     required this.onPressed,
+    this.dimension = 42,
   });
 
   final Key buttonKey;
@@ -17924,6 +18101,7 @@ final class _ComposerCircleButton extends StatelessWidget {
   final Color backgroundColor;
   final Color foregroundColor;
   final VoidCallback? onPressed;
+  final double dimension;
 
   @override
   Widget build(BuildContext context) {
@@ -17931,7 +18109,7 @@ final class _ComposerCircleButton extends StatelessWidget {
       message: tooltip,
       child: SizedBox.square(
         key: buttonKey,
-        dimension: 42,
+        dimension: dimension,
         child: Material(
           color: backgroundColor,
           shape: const CircleBorder(),

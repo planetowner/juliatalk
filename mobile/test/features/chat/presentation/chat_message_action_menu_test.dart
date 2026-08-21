@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:juliatalk/design_system/app_colors.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
 import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
 
@@ -579,7 +582,7 @@ void main() {
     expect(bubbleRect.right - dividerRect.right, closeTo(11, 0.01));
   });
 
-  testWidgets('default composer shows attachment and voice without emoji', (
+  testWidgets('default composer matches the measured compact layout', (
     WidgetTester tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(420, 900));
@@ -591,21 +594,145 @@ void main() {
     await tester.pumpWidget(const JuliaTalkPreviewApp());
     await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey<String>('message-composer-default')),
-      findsOneWidget,
+    final Finder composerFinder = find.byKey(
+      const ValueKey<String>('message-composer-default'),
+    );
+    final Finder attachmentFinder = find.byKey(
+      const ValueKey<String>('message-attachment'),
+    );
+    final Finder voiceFinder = find.byKey(
+      const ValueKey<String>('message-voice'),
     );
 
+    expect(composerFinder, findsOneWidget);
+    expect(attachmentFinder, findsOneWidget);
+    expect(voiceFinder, findsOneWidget);
+
+    final Rect composerRect = tester.getRect(composerFinder);
+    final Rect attachmentRect = tester.getRect(attachmentFinder);
+    final Rect voiceRect = tester.getRect(voiceFinder);
+
+    expect(composerRect.width, closeTo(400, 0.01));
+    expect(composerRect.height, closeTo(48, 0.01));
+    expect(composerRect.left, closeTo(10, 0.01));
+    expect(420 - composerRect.right, closeTo(10, 0.01));
+
+    expect(attachmentRect.size, const Size.square(32));
+    expect(attachmentRect.left - composerRect.left, closeTo(8, 0.01));
+    expect(attachmentRect.top - composerRect.top, closeTo(8, 0.01));
+
+    expect(voiceRect.size, const Size.square(32));
+    expect(composerRect.right - voiceRect.right, closeTo(8, 0.01));
+    expect(voiceRect.top - composerRect.top, closeTo(8, 0.01));
+
+    final ClipRRect composer = tester.widget<ClipRRect>(composerFinder);
+    expect(composer.borderRadius, const BorderRadius.all(Radius.circular(24)));
+
+    final DecoratedBox surface = tester.widget<DecoratedBox>(
+      find.byKey(const ValueKey<String>('message-composer-surface')),
+    );
+    final BoxDecoration surfaceDecoration = surface.decoration as BoxDecoration;
+    final Border surfaceBorder = surfaceDecoration.border! as Border;
+
+    expect(surfaceDecoration.color, AppColors.grey50);
+    expect(surfaceBorder.top.color, Colors.white);
+    expect(surfaceBorder.top.width, 1);
+    expect(surfaceDecoration.boxShadow, isNull);
     expect(
-      find.byKey(const ValueKey<String>('message-attachment')),
-      findsOneWidget,
+      find.byKey(const ValueKey<String>('message-composer-shadow')),
+      findsNothing,
     );
 
-    expect(find.byKey(const ValueKey<String>('message-voice')), findsOneWidget);
+    final Icon attachmentIcon = tester.widget<Icon>(
+      find.descendant(of: attachmentFinder, matching: find.byType(Icon)),
+    );
+    final Icon voiceIcon = tester.widget<Icon>(
+      find.descendant(of: voiceFinder, matching: find.byType(Icon)),
+    );
+
+    expect(attachmentIcon.icon, CupertinoIcons.add);
+    expect(attachmentIcon.size, 20);
+    expect(attachmentIcon.color, const Color(0xFF191919));
+
+    expect(voiceIcon.icon, Icons.graphic_eq_rounded);
+    expect(voiceIcon.size, 18);
+    expect(voiceIcon.color, const Color(0xFF191919));
+
+    final TextField textField = tester.widget<TextField>(
+      find.byKey(const ValueKey<String>('message-input')),
+    );
+    final EdgeInsets contentPadding =
+        textField.decoration!.contentPadding! as EdgeInsets;
+
+    expect(textField.style?.fontSize, 15);
+    expect(textField.style?.color, const Color(0xFF191919));
+    expect(textField.decoration?.hintStyle?.fontSize, 15);
+    expect(textField.decoration?.hintStyle?.color, const Color(0xFF92989E));
+    expect(contentPadding.horizontal, 8);
+    expect(contentPadding.vertical, 9);
 
     expect(find.byKey(const ValueKey<String>('message-send')), findsNothing);
 
     expect(find.byIcon(Icons.emoji_emotions_outlined), findsNothing);
+  });
+
+  testWidgets('default composer follows keyboard into the safe area smoothly', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+    final double devicePixelRatio = tester.view.devicePixelRatio;
+    tester.view.viewPadding = FakeViewPadding(bottom: 34 * devicePixelRatio);
+
+    addTearDown(() async {
+      tester.view.viewInsets = const FakeViewPadding();
+      tester.view.viewPadding = const FakeViewPadding();
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    final Finder composerFinder = find.byKey(
+      const ValueKey<String>('message-composer-default'),
+    );
+    final Finder bottomSurfaceFinder = find.byKey(
+      const ValueKey<String>('composer-bottom-surface'),
+    );
+
+    expect(900 - tester.getRect(composerFinder).bottom, closeTo(34, 0.01));
+    expect(
+      tester.getRect(bottomSurfaceFinder).top -
+          tester.getRect(composerFinder).bottom,
+      closeTo(0, 0.01),
+    );
+
+    for (final double keyboardHeight in const <double>[
+      300,
+      50,
+      44,
+      40,
+      34,
+      30,
+      24,
+      10,
+      0,
+    ]) {
+      tester.view.viewInsets = FakeViewPadding(
+        bottom: keyboardHeight * devicePixelRatio,
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+
+      final double expectedBottomDistance =
+          math.max(34, keyboardHeight) + (keyboardHeight - 34).clamp(0, 10);
+
+      expect(
+        900 - tester.getRect(composerFinder).bottom,
+        closeTo(expectedBottomDistance, 0.01),
+        reason:
+            'The composer must not wait above its resting position while '
+            'the final keyboard inset disappears.',
+      );
+    }
   });
 
   testWidgets('typing replaces the voice button with the send button', (
@@ -795,7 +922,7 @@ void main() {
       find.byKey(const ValueKey<String>('message-composer-default')),
     );
 
-    expect(composer.borderRadius, const BorderRadius.all(Radius.circular(28)));
+    expect(composer.borderRadius, const BorderRadius.all(Radius.circular(24)));
   });
 
   testWidgets('reply send aligns with the final input line and cancel center', (
@@ -2227,8 +2354,12 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(420, 900));
+    final double devicePixelRatio = tester.view.devicePixelRatio;
+    tester.view.viewPadding = FakeViewPadding(bottom: 34 * devicePixelRatio);
 
     addTearDown(() async {
+      tester.view.viewInsets = const FakeViewPadding();
+      tester.view.viewPadding = const FakeViewPadding();
       await tester.binding.setSurfaceSize(null);
     });
 
@@ -2261,9 +2392,30 @@ void main() {
 
     expect(editableText.controller.text, '작성 중인 메시지');
 
+    final Finder composerFinder = find.byKey(
+      const ValueKey<String>('message-composer-default'),
+    );
+    final double composerTopWithPanel = tester.getRect(composerFinder).top;
+
     // 첨부 패널 상태의 같은 버튼은 × 역할을 해요.
     await tester.tap(find.byKey(const ValueKey<String>('message-attachment')));
+    await tester.pump();
+
+    expect(
+      tester.getRect(composerFinder).top,
+      closeTo(composerTopWithPanel, 0.01),
+      reason:
+          'The composer must keep its raised padding while the keyboard inset '
+          'has not arrived yet.',
+    );
+
+    tester.view.viewInsets = FakeViewPadding(bottom: 302 * devicePixelRatio);
     await tester.pumpAndSettle();
+
+    expect(
+      tester.getRect(composerFinder).top,
+      closeTo(composerTopWithPanel, 0.01),
+    );
 
     expect(
       find.byKey(const ValueKey<String>('attachment-panel')),

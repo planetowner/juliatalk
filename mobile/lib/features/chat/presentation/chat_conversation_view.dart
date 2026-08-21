@@ -15076,24 +15076,18 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              Positioned(
-                left: 0,
-                top: topBarHeight,
-                right: 0,
-                bottom: 0,
-                child: PageView.builder(
-                  key: const ValueKey<String>('photo-viewer-page-view'),
-                  controller: _pageController,
-                  itemCount: widget.attachments.length,
-                  onPageChanged: _handlePageChanged,
-                  itemBuilder: (BuildContext context, int index) {
-                    return _PhotoViewerPage(
-                      attachment: widget.attachments[index],
-                      onCreateMediaAssetAccessUrl:
-                          widget.onCreateMediaAssetAccessUrl,
-                    );
-                  },
-                ),
+              PageView.builder(
+                key: const ValueKey<String>('photo-viewer-page-view'),
+                controller: _pageController,
+                itemCount: widget.attachments.length,
+                onPageChanged: _handlePageChanged,
+                itemBuilder: (BuildContext context, int index) {
+                  return _PhotoViewerPage(
+                    attachment: widget.attachments[index],
+                    onCreateMediaAssetAccessUrl:
+                        widget.onCreateMediaAssetAccessUrl,
+                  );
+                },
               ),
               _PhotoViewerTopBar(
                 visible: _controlsVisible,

@@ -743,8 +743,9 @@ void main() {
     expect(topBarRect.height, 59 + 44 + 23);
     expect(backButtonRect.top - topBarRect.top, 59);
     expect(topBarRect.bottom - backButtonRect.bottom, 23);
-    expect(pageViewRect.top, topBarRect.bottom);
+    expect(pageViewRect.top, photoViewerScaffoldRect.top);
     expect(pageViewRect.bottom, photoViewerScaffoldRect.bottom);
+    expect(pageViewRect.center, photoViewerScaffoldRect.center);
     expect(bottomOverlayRect.height, 23 + 48 + 23);
     expect(bottomOverlayRect.bottom, photoViewerScaffoldRect.bottom);
     expect(downloadButtonRect.top - bottomOverlayRect.top, 23);

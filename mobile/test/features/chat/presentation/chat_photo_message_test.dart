@@ -17,6 +17,7 @@ final Uint8List _testPng = base64Decode(
 Widget _buildPhotoMessageScreen(
   ChatMessage message, {
   double? topPadding,
+  String currentUserName = 'Me',
   String otherParticipantName = 'Lia',
   int unreadOtherConversationCount = 0,
   VoidCallback? onBack,
@@ -34,6 +35,7 @@ Widget _buildPhotoMessageScreen(
           },
     home: ChatConversationView(
       initialMessages: <ChatMessage>[message],
+      currentUserName: currentUserName,
       otherParticipantName: otherParticipantName,
       unreadOtherConversationCount: unreadOtherConversationCount,
       onBack: onBack,
@@ -879,6 +881,54 @@ void main() {
     expect(
       find.byKey(const ValueKey<String>('photo-viewer-image-photo-preview-0')),
       findsNothing,
+    );
+  });
+
+  testWidgets('photo viewer shows the sender name for the current viewer', (
+    WidgetTester tester,
+  ) async {
+    Future<void> expectSenderName({
+      required String senderId,
+      required String recipientId,
+      required String currentUserName,
+      required String otherParticipantName,
+      required String expectedSenderName,
+    }) async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(
+        _buildPhotoMessageScreen(
+          _photoMessage(senderId: senderId, recipientId: recipientId),
+          currentUserName: currentUserName,
+          otherParticipantName: otherParticipantName,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(_photoFinder(0));
+      await tester.pumpAndSettle();
+
+      final Text senderName = tester.widget<Text>(
+        find.byKey(const ValueKey<String>('photo-viewer-sender-name')),
+      );
+
+      expect(senderName.data, expectedSenderName);
+    }
+
+    await expectSenderName(
+      senderId: '1',
+      recipientId: '2',
+      currentUserName: 'June',
+      otherParticipantName: '오빠💙',
+      expectedSenderName: 'June',
+    );
+    await expectSenderName(
+      senderId: '2',
+      recipientId: '1',
+      currentUserName: 'Lia',
+      otherParticipantName: '애기🤍',
+      expectedSenderName: '애기🤍',
     );
   });
 

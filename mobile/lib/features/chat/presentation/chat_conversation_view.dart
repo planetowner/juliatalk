@@ -55,6 +55,25 @@ const double _topBarHorizontalMargin = 16;
 
 const double _topBarTrailingSpacing = 23;
 
+const Duration _mediaViewerControlsAnimationDuration = Duration(
+  milliseconds: 200,
+);
+
+Curve _mediaViewerControlsSlideCurve(bool visible) {
+  return visible ? Curves.easeOutCubic : Curves.linear;
+}
+
+const Color _mediaViewerChromeBarColor = Color(0xFF202020);
+
+const double _mediaViewerDownloadButtonDimension = 48;
+
+const double _mediaViewerActionBarContentHeight =
+    _topBarTrailingSpacing * 2 + _mediaViewerDownloadButtonDimension;
+
+double _mediaViewerTopBarHeight(double topPadding) {
+  return topPadding + _topBarButtonDimension + _topBarTrailingSpacing;
+}
+
 const double _attachmentPanelFallbackHeight = 302;
 
 const Duration _quickPhotoEligibilityDuration = Duration(seconds: 15);
@@ -145,6 +164,9 @@ typedef _EditSelectedCallback = void Function(ChatMessage message);
 
 typedef _PhotoMessageTapCallback =
     void Function(ChatMessage message, int photoIndex);
+
+typedef _VideoMessageTapCallback =
+    void Function(ChatMessage message, File videoFile);
 
 typedef ChatTextMessageSender =
     Future<ChatMessage> Function({
@@ -1695,6 +1717,34 @@ final class _ChatConversationViewState extends State<ChatConversationView>
             senderName: senderName,
             sentAt: message.createdAt,
             onCreateMediaAssetAccessUrl: _cachedMediaAssetAccessUrlCreator,
+            onCreateThumbnailAccessUrl: _cachedPhotoThumbnailAccessUrlCreator,
+          );
+        },
+      ),
+    );
+  }
+
+  void _openVideoViewer(ChatMessage message, File videoFile) {
+    final ChatVideoAttachment? attachment = message.videoAttachment;
+
+    if (attachment == null) {
+      return;
+    }
+
+    _dismissComposerSurface();
+
+    final String senderName = message.senderId == widget.currentUserId
+        ? widget.currentUserName
+        : widget.otherParticipantName;
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) {
+          return _VideoViewerScreen(
+            attachment: attachment,
+            videoFile: videoFile,
+            senderName: senderName,
+            sentAt: message.createdAt,
             onCreateThumbnailAccessUrl: _cachedPhotoThumbnailAccessUrlCreator,
           );
         },
@@ -3404,6 +3454,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                       onRetryTranslation: widget.onRetryTranslation,
                       onDeleteMessage: widget.onDeleteMessage,
                       onPhotoMessageTap: _openPhotoViewer,
+                      onVideoMessageTap: _openVideoViewer,
                       onCreateMediaAssetAccessUrl:
                           _cachedMediaAssetAccessUrlCreator,
                       onCreatePhotoThumbnailAccessUrl:
@@ -7062,6 +7113,7 @@ final class _MessageList extends StatefulWidget {
     required this.onRetryTranslation,
     required this.onDeleteMessage,
     required this.onPhotoMessageTap,
+    required this.onVideoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreatePhotoThumbnailAccessUrl,
     required this.translationDelay,
@@ -7101,6 +7153,7 @@ final class _MessageList extends StatefulWidget {
   final ChatMessageTranslationRetrier? onRetryTranslation;
   final ChatMessageDeleter? onDeleteMessage;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final _VideoMessageTapCallback onVideoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final Duration translationDelay;
@@ -10905,6 +10958,7 @@ final class _MessageListState extends State<_MessageList>
         onIncomingMessageTap: _handleIncomingMessageTap,
         onFileMessageTap: _handleFileMessageTap,
         onPhotoMessageTap: widget.onPhotoMessageTap,
+        onVideoMessageTap: widget.onVideoMessageTap,
         onCreateMediaAssetAccessUrl: widget.onCreateMediaAssetAccessUrl,
         onCreatePhotoThumbnailAccessUrl: widget.onCreatePhotoThumbnailAccessUrl,
         incomingPhotoRevealStartedAt: _incomingPhotoRevealStartedAt,
@@ -11998,6 +12052,7 @@ final class _MessageGroup extends StatelessWidget {
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onVideoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreatePhotoThumbnailAccessUrl,
     required this.incomingPhotoRevealStartedAt,
@@ -12022,6 +12077,7 @@ final class _MessageGroup extends StatelessWidget {
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final _VideoMessageTapCallback onVideoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final Map<String, DateTime> incomingPhotoRevealStartedAt;
@@ -12043,6 +12099,7 @@ final class _MessageGroup extends StatelessWidget {
         searchQuery: searchQuery,
         onFileMessageTap: onFileMessageTap,
         onPhotoMessageTap: onPhotoMessageTap,
+        onVideoMessageTap: onVideoMessageTap,
         onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
         onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
         onMessageLongPress: onMessageLongPress,
@@ -12065,6 +12122,7 @@ final class _MessageGroup extends StatelessWidget {
       onIncomingMessageTap: onIncomingMessageTap,
       onFileMessageTap: onFileMessageTap,
       onPhotoMessageTap: onPhotoMessageTap,
+      onVideoMessageTap: onVideoMessageTap,
       onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
       onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
       incomingPhotoRevealStartedAt: incomingPhotoRevealStartedAt,
@@ -12091,6 +12149,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
     required this.onIncomingMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onVideoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreatePhotoThumbnailAccessUrl,
     required this.incomingPhotoRevealStartedAt,
@@ -12113,6 +12172,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
   final ValueChanged<String> onIncomingMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final _VideoMessageTapCallback onVideoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final Map<String, DateTime> incomingPhotoRevealStartedAt;
@@ -12160,6 +12220,7 @@ final class _IncomingMessageGroup extends StatelessWidget {
                   },
                   onFileMessageTap: onFileMessageTap,
                   onPhotoMessageTap: onPhotoMessageTap,
+                  onVideoMessageTap: onVideoMessageTap,
                   onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
                   onCreatePhotoThumbnailAccessUrl:
                       onCreatePhotoThumbnailAccessUrl,
@@ -12265,6 +12326,7 @@ final class _IncomingMessageRow extends StatelessWidget {
     required this.onMessageTap,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onVideoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreatePhotoThumbnailAccessUrl,
     required this.incomingPhotoRevealStartedAt,
@@ -12288,6 +12350,7 @@ final class _IncomingMessageRow extends StatelessWidget {
   final VoidCallback onMessageTap;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final _VideoMessageTapCallback onVideoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final DateTime? incomingPhotoRevealStartedAt;
@@ -12328,6 +12391,7 @@ final class _IncomingMessageRow extends StatelessWidget {
         measurementKey: ValueKey<String>('incoming-bubble-${message.id}'),
         onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
         onCreateThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
+        onVideoTap: onVideoMessageTap,
       );
     } else if (isPhotoMessage) {
       content = _PhotoMessage(
@@ -13222,6 +13286,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
     required this.searchQuery,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onVideoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreatePhotoThumbnailAccessUrl,
     required this.onMessageLongPress,
@@ -13238,6 +13303,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final _VideoMessageTapCallback onVideoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final _MessageLongPressCallback onMessageLongPress;
@@ -13260,6 +13326,7 @@ final class _OutgoingMessageGroup extends StatelessWidget {
             searchQuery: searchQuery,
             onFileMessageTap: onFileMessageTap,
             onPhotoMessageTap: onPhotoMessageTap,
+            onVideoMessageTap: onVideoMessageTap,
             onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
             onCreatePhotoThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
             onMessageLongPress: onMessageLongPress,
@@ -13300,6 +13367,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
     required this.searchQuery,
     required this.onFileMessageTap,
     required this.onPhotoMessageTap,
+    required this.onVideoMessageTap,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreatePhotoThumbnailAccessUrl,
     required this.onMessageLongPress,
@@ -13316,6 +13384,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
   final String searchQuery;
   final ValueChanged<ChatMessage> onFileMessageTap;
   final _PhotoMessageTapCallback onPhotoMessageTap;
+  final _VideoMessageTapCallback onVideoMessageTap;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreatePhotoThumbnailAccessUrl;
   final _MessageLongPressCallback onMessageLongPress;
@@ -13340,6 +13409,7 @@ final class _OutgoingMessageRow extends StatelessWidget {
         measurementKey: ValueKey<String>('outgoing-bubble-$presentationId'),
         onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
         onCreateThumbnailAccessUrl: onCreatePhotoThumbnailAccessUrl,
+        onVideoTap: onVideoMessageTap,
       );
     } else if (message.isPhotoMessage) {
       final String presentationId = _messagePresentationId(message);
@@ -13470,6 +13540,7 @@ final class _VideoMessage extends StatefulWidget {
     required this.measurementKey,
     required this.onCreateMediaAssetAccessUrl,
     required this.onCreateThumbnailAccessUrl,
+    required this.onVideoTap,
     super.key,
   });
 
@@ -13478,18 +13549,17 @@ final class _VideoMessage extends StatefulWidget {
   final Key measurementKey;
   final ChatMediaAssetAccessUrlCreator? onCreateMediaAssetAccessUrl;
   final ChatMediaAssetAccessUrlCreator? onCreateThumbnailAccessUrl;
+  final _VideoMessageTapCallback onVideoTap;
 
   @override
   State<_VideoMessage> createState() => _VideoMessageState();
 }
 
 final class _VideoMessageState extends State<_VideoMessage> {
-  VideoPlayerController? _videoController;
   Future<void>? _downloadFuture;
   File? _localFile;
   String? _activeMediaAssetId;
   bool _downloadInProgress = false;
-  bool _showVideoFrame = false;
   int _downloadedBytes = 0;
   int _downloadTotalBytes = 0;
 
@@ -13514,12 +13584,6 @@ final class _VideoMessageState extends State<_VideoMessage> {
             !widget.message.videoUploadPending)) {
       _syncVideoSource();
     }
-  }
-
-  @override
-  void dispose() {
-    _videoController?.dispose();
-    super.dispose();
   }
 
   void _syncVideoSource() {
@@ -13656,7 +13720,7 @@ final class _VideoMessageState extends State<_VideoMessage> {
     }
   }
 
-  Future<void> _togglePlayback() async {
+  void _openVideo() {
     final File? localFile = _localFile;
 
     if (localFile == null) {
@@ -13664,57 +13728,7 @@ final class _VideoMessageState extends State<_VideoMessage> {
       return;
     }
 
-    VideoPlayerController? controller = _videoController;
-
-    if (controller == null) {
-      controller = VideoPlayerController.file(localFile);
-      _videoController = controller;
-      await controller.initialize();
-      controller.addListener(_handlePlaybackChanged);
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    if (controller.value.isPlaying) {
-      await controller.pause();
-      setState(() {
-        _showVideoFrame = false;
-      });
-      return;
-    }
-
-    if (controller.value.position >= controller.value.duration) {
-      await controller.seekTo(Duration.zero);
-    }
-    await controller.play();
-
-    if (mounted) {
-      setState(() {
-        _showVideoFrame = true;
-      });
-    }
-  }
-
-  void _handlePlaybackChanged() {
-    final VideoPlayerController? controller = _videoController;
-
-    if (!mounted || controller == null || !controller.value.isInitialized) {
-      return;
-    }
-
-    final Duration duration = controller.value.duration;
-    final Duration position = controller.value.position;
-
-    if (_showVideoFrame &&
-        !controller.value.isPlaying &&
-        duration > Duration.zero &&
-        position >= duration - const Duration(milliseconds: 50)) {
-      setState(() {
-        _showVideoFrame = false;
-      });
-    }
+    widget.onVideoTap(widget.message, localFile);
   }
 
   @override
@@ -13723,9 +13737,6 @@ final class _VideoMessageState extends State<_VideoMessage> {
     final Size videoSize = _videoBubbleSize(context, attachment);
     final bool isUploading = widget.message.videoUploadPending;
     final bool isTransferring = isUploading || _downloadInProgress;
-    final VideoPlayerController? controller = _videoController;
-    final bool showVideo =
-        _showVideoFrame && controller != null && controller.value.isInitialized;
     final int uploadedBytes = isUploading
         ? widget.message.videoUploadedBytes ?? 0
         : _downloadedBytes;
@@ -13745,7 +13756,7 @@ final class _VideoMessageState extends State<_VideoMessage> {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: isTransferring ? null : _togglePlayback,
+      onTap: isTransferring ? null : _openVideo,
       child: ClipRRect(
         key: widget.measurementKey,
         borderRadius: const BorderRadius.all(Radius.circular(14)),
@@ -13763,25 +13774,15 @@ final class _VideoMessageState extends State<_VideoMessage> {
                 onCreateMediaAssetAccessUrl: widget.onCreateThumbnailAccessUrl,
                 persistToDisk: true,
               ),
-              if (showVideo)
-                FittedBox(
-                  fit: BoxFit.cover,
-                  clipBehavior: Clip.hardEdge,
-                  child: SizedBox(
-                    width: controller.value.size.width,
-                    height: controller.value.size.height,
-                    child: VideoPlayer(controller),
-                  ),
-                ),
-              if (!showVideo) ColoredBox(color: AppColors.black.withAlpha(96)),
-              if (!showVideo && widget.message.videoEncodingPending)
+              ColoredBox(color: AppColors.black.withAlpha(96)),
+              if (widget.message.videoEncodingPending)
                 const _VideoEncodingIndicator()
-              else if (!showVideo && isTransferring)
+              else if (isTransferring)
                 _PhotoUploadProgress(
                   uploadedBytes: uploadedBytes,
                   totalBytes: totalBytes,
                 )
-              else if (!showVideo)
+              else
                 _VideoPlayIndicator(duration: attachment.duration),
             ],
           ),
@@ -15151,24 +15152,9 @@ final class _PhotoViewerScreen extends StatefulWidget {
 }
 
 final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
-  static const Duration _controlsAnimationDuration = Duration(
-    milliseconds: 190,
-  );
-
-  static const Color _chromeBarColor = Color(0xFF202020);
-
   static const Color _filmstripOverlayColor = Color(0x94000000);
 
   static const Color _thumbnailBorderColor = AppColors.blue500;
-
-  static const double _downloadButtonDimension = 48;
-
-  static const double _actionBarContentHeight =
-      _topBarTrailingSpacing * 2 + _downloadButtonDimension;
-
-  static double _topBarHeight(double topPadding) {
-    return topPadding + _topBarButtonDimension + _topBarTrailingSpacing;
-  }
 
   late final PageController _pageController;
 
@@ -15387,18 +15373,18 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
   @override
   Widget build(BuildContext context) {
     final EdgeInsets padding = MediaQuery.paddingOf(context);
-    final double topBarHeight = _topBarHeight(padding.top);
+    final double topBarHeight = _mediaViewerTopBarHeight(padding.top);
     final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.light
         .copyWith(
           statusBarColor: Colors.transparent,
-          systemNavigationBarColor: _chromeBarColor,
+          systemNavigationBarColor: _mediaViewerChromeBarColor,
           systemNavigationBarIconBrightness: Brightness.light,
         );
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
       child: Scaffold(
-        backgroundColor: _chromeBarColor,
+        backgroundColor: _mediaViewerChromeBarColor,
         body: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _toggleControls,
@@ -15423,7 +15409,7 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                   );
                 },
               ),
-              _PhotoViewerTopBar(
+              _MediaViewerTopBar(
                 visible: _controlsVisible,
                 height: topBarHeight,
                 topPadding: padding.top,
@@ -15453,6 +15439,867 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
         ),
       ),
     );
+  }
+}
+
+final class _VideoViewerScreen extends StatefulWidget {
+  const _VideoViewerScreen({
+    required this.attachment,
+    required this.videoFile,
+    required this.senderName,
+    required this.sentAt,
+    required this.onCreateThumbnailAccessUrl,
+  });
+
+  final ChatVideoAttachment attachment;
+  final File videoFile;
+  final String senderName;
+  final DateTime sentAt;
+  final ChatMediaAssetAccessUrlCreator? onCreateThumbnailAccessUrl;
+
+  @override
+  State<_VideoViewerScreen> createState() => _VideoViewerScreenState();
+}
+
+final class _VideoViewerScreenState extends State<_VideoViewerScreen> {
+  static const Duration _controlsVisibleDuration = Duration(milliseconds: 1830);
+
+  VideoPlayerController? _controller;
+  Timer? _controlsTimer;
+  Duration? _scrubPosition;
+  bool _controllerReady = false;
+  bool _controlsVisible = true;
+  bool _completionResetInProgress = false;
+  bool _scrubbing = false;
+  double _verticalDragDistance = 0;
+
+  ChatPhotoAttachment get _thumbnailAttachment {
+    final ChatVideoAttachment attachment = widget.attachment;
+
+    return ChatPhotoAttachment(
+      assetId: attachment.assetId,
+      width: attachment.width,
+      height: attachment.height,
+      mediaAssetId: attachment.mediaAssetId,
+      previewBytes: attachment.previewBytes,
+      fileName: attachment.fileName,
+      mimeType: 'image/jpeg',
+      sizeBytes: attachment.sizeBytes,
+    );
+  }
+
+  Duration get _duration {
+    final VideoPlayerController? controller = _controller;
+
+    if (controller != null && controller.value.isInitialized) {
+      return controller.value.duration;
+    }
+
+    return widget.attachment.duration;
+  }
+
+  Duration get _position {
+    final Duration? scrubPosition = _scrubPosition;
+
+    if (scrubPosition != null) {
+      return scrubPosition;
+    }
+
+    final VideoPlayerController? controller = _controller;
+
+    if (controller != null && controller.value.isInitialized) {
+      return controller.value.position;
+    }
+
+    return Duration.zero;
+  }
+
+  bool get _isPlaying {
+    final VideoPlayerController? controller = _controller;
+
+    return controller != null &&
+        controller.value.isInitialized &&
+        controller.value.isPlaying;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_initializeAndPlay());
+  }
+
+  @override
+  void dispose() {
+    _controlsTimer?.cancel();
+    final VideoPlayerController? controller = _controller;
+    _controller = null;
+    controller?.removeListener(_handlePlaybackChanged);
+    unawaited(controller?.dispose());
+    super.dispose();
+  }
+
+  Future<void> _initializeAndPlay() async {
+    final VideoPlayerController controller = VideoPlayerController.file(
+      widget.videoFile,
+    );
+    _controller = controller;
+
+    try {
+      await controller.initialize();
+
+      if (!mounted || _controller != controller) {
+        return;
+      }
+
+      controller.addListener(_handlePlaybackChanged);
+      await controller.play();
+
+      if (!mounted || _controller != controller) {
+        return;
+      }
+
+      setState(() {
+        _controllerReady = true;
+      });
+      _scheduleControlsHide();
+    } catch (_) {
+      if (!mounted || _controller != controller) {
+        return;
+      }
+
+      setState(() {
+        _controllerReady = false;
+      });
+    }
+  }
+
+  void _handlePlaybackChanged() {
+    final VideoPlayerController? controller = _controller;
+
+    if (!mounted || controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    if (controller.value.isCompleted && !_completionResetInProgress) {
+      unawaited(_resetAfterCompletion());
+      return;
+    }
+
+    setState(() {});
+  }
+
+  Future<void> _resetAfterCompletion() async {
+    final VideoPlayerController? controller = _controller;
+
+    if (controller == null || _completionResetInProgress) {
+      return;
+    }
+
+    _completionResetInProgress = true;
+    _controlsTimer?.cancel();
+
+    await controller.pause();
+    await controller.seekTo(Duration.zero);
+
+    if (mounted && _controller == controller) {
+      setState(() {
+        _controlsVisible = true;
+        _scrubPosition = null;
+        _scrubbing = false;
+      });
+    }
+
+    _completionResetInProgress = false;
+  }
+
+  void _scheduleControlsHide() {
+    _controlsTimer?.cancel();
+
+    if (!_isPlaying || _scrubbing) {
+      return;
+    }
+
+    _controlsTimer = Timer(_controlsVisibleDuration, () {
+      if (!mounted || !_isPlaying || _scrubbing) {
+        return;
+      }
+
+      setState(() {
+        _controlsVisible = false;
+      });
+    });
+  }
+
+  void _handleViewerTap() {
+    _controlsTimer?.cancel();
+
+    setState(() {
+      _controlsVisible = !_controlsVisible;
+    });
+
+    if (_controlsVisible) {
+      _scheduleControlsHide();
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    final VideoPlayerController? controller = _controller;
+
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    _controlsTimer?.cancel();
+
+    if (controller.value.isPlaying) {
+      await controller.pause();
+
+      if (mounted && _controller == controller) {
+        setState(() {
+          _controlsVisible = true;
+        });
+      }
+      return;
+    }
+
+    if (controller.value.isCompleted ||
+        controller.value.position >= controller.value.duration) {
+      await controller.seekTo(Duration.zero);
+    }
+
+    await controller.play();
+
+    if (mounted && _controller == controller) {
+      setState(() {
+        _controlsVisible = true;
+      });
+      _scheduleControlsHide();
+    }
+  }
+
+  Duration _positionForFraction(double fraction) {
+    final int durationMicroseconds = _duration.inMicroseconds;
+
+    if (durationMicroseconds <= 0) {
+      return Duration.zero;
+    }
+
+    return Duration(microseconds: (durationMicroseconds * fraction).round());
+  }
+
+  void _handleSeekStart(double fraction) {
+    _controlsTimer?.cancel();
+    _updateScrubPosition(fraction);
+  }
+
+  void _handleSeekUpdate(double fraction) {
+    _updateScrubPosition(fraction);
+  }
+
+  void _updateScrubPosition(double fraction) {
+    final VideoPlayerController? controller = _controller;
+    final Duration position = _positionForFraction(fraction);
+
+    setState(() {
+      _scrubbing = true;
+      _scrubPosition = position;
+    });
+
+    if (controller != null && controller.value.isInitialized) {
+      unawaited(controller.seekTo(position));
+    }
+  }
+
+  Future<void> _handleSeekEnd(double fraction) async {
+    final VideoPlayerController? controller = _controller;
+    final Duration position = _positionForFraction(fraction);
+
+    if (controller != null && controller.value.isInitialized) {
+      await controller.seekTo(position);
+    }
+
+    if (!mounted || _controller != controller) {
+      return;
+    }
+
+    setState(() {
+      _scrubbing = false;
+      _scrubPosition = null;
+    });
+    _scheduleControlsHide();
+  }
+
+  void _close() {
+    Navigator.of(context).maybePop();
+  }
+
+  void _handleVerticalDragStart(DragStartDetails details) {
+    _verticalDragDistance = 0;
+  }
+
+  void _handleVerticalDragUpdate(DragUpdateDetails details) {
+    _verticalDragDistance += details.delta.dy;
+  }
+
+  void _handleVerticalDragEnd(DragEndDetails details) {
+    final double velocity = details.primaryVelocity ?? 0;
+
+    if (_verticalDragDistance.abs() > 82 || velocity.abs() > 650) {
+      _close();
+    }
+
+    _verticalDragDistance = 0;
+  }
+
+  Future<void> _downloadVideo() async {
+    final int timestamp = DateTime.now().millisecondsSinceEpoch;
+    final String extension = _videoFileExtension(widget.attachment.fileName);
+
+    try {
+      await PhotoManager.editor.saveVideo(
+        widget.videoFile,
+        title: 'juliatalk-$timestamp.$extension',
+        creationDate: DateTime.now(),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('Video saved.')));
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Video could not be saved.')),
+        );
+    }
+  }
+
+  Widget _buildVideo(BuildContext context) {
+    final Size viewport = MediaQuery.sizeOf(context);
+    final Widget thumbnail = _PhotoMessageImage(
+      attachment: _thumbnailAttachment,
+      itemIndex: 0,
+      width: viewport.width,
+      height: viewport.height,
+      fit: BoxFit.contain,
+      filterQuality: FilterQuality.high,
+      onCreateMediaAssetAccessUrl: widget.onCreateThumbnailAccessUrl,
+      persistToDisk: true,
+    );
+    final VideoPlayerController? controller = _controller;
+
+    return Stack(
+      key: const ValueKey<String>('video-viewer-content'),
+      fit: StackFit.expand,
+      children: [
+        thumbnail,
+        if (_controllerReady &&
+            controller != null &&
+            controller.value.isInitialized)
+          FittedBox(
+            fit: BoxFit.contain,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(
+              width: controller.value.size.width,
+              height: controller.value.size.height,
+              child: VideoPlayer(controller),
+            ),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final EdgeInsets padding = MediaQuery.paddingOf(context);
+    final double topBarHeight = _mediaViewerTopBarHeight(padding.top);
+    final Duration duration = _duration;
+    final Duration position = _position > duration ? duration : _position;
+    final SystemUiOverlayStyle overlayStyle = SystemUiOverlayStyle.light
+        .copyWith(
+          statusBarColor: Colors.transparent,
+          systemNavigationBarColor: _mediaViewerChromeBarColor,
+          systemNavigationBarIconBrightness: Brightness.light,
+        );
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: overlayStyle,
+      child: Scaffold(
+        backgroundColor: _mediaViewerChromeBarColor,
+        body: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _handleViewerTap,
+          onVerticalDragStart: _handleVerticalDragStart,
+          onVerticalDragUpdate: _handleVerticalDragUpdate,
+          onVerticalDragEnd: _handleVerticalDragEnd,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _buildVideo(context),
+              _MediaViewerTopBar(
+                keyPrefix: 'video-viewer',
+                visible: _controlsVisible,
+                height: topBarHeight,
+                topPadding: padding.top,
+                senderName: widget.senderName,
+                sentAt: widget.sentAt,
+                onBackPressed: _close,
+              ),
+              _VideoViewerBottomOverlay(
+                visible: _controlsVisible,
+                isPlaying: _isPlaying,
+                position: position,
+                duration: duration,
+                onPlaybackPressed: () {
+                  unawaited(_togglePlayback());
+                },
+                onSeekStart: _handleSeekStart,
+                onSeekUpdate: _handleSeekUpdate,
+                onSeekEnd: (double fraction) {
+                  unawaited(_handleSeekEnd(fraction));
+                },
+                onDownloadPressed: () {
+                  unawaited(_downloadVideo());
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VideoViewerBottomOverlay extends StatelessWidget {
+  const _VideoViewerBottomOverlay({
+    required this.visible,
+    required this.isPlaying,
+    required this.position,
+    required this.duration,
+    required this.onPlaybackPressed,
+    required this.onSeekStart,
+    required this.onSeekUpdate,
+    required this.onSeekEnd,
+    required this.onDownloadPressed,
+  });
+
+  static const double _fadeHeight = 44;
+  static const double _progressRowHeight = 24;
+  static const double _progressToActionBarGap = 2;
+  static const double _progressCenterToDownloadButtonTop =
+      _progressRowHeight / 2 + _progressToActionBarGap + _topBarTrailingSpacing;
+  static const double _progressTopPaddingWithinActionBar =
+      _progressCenterToDownloadButtonTop - _progressRowHeight / 2;
+  static const double _downloadButtonTopToBottom =
+      _mediaViewerDownloadButtonDimension + _topBarTrailingSpacing;
+  static const double _actionBarHeight =
+      _progressCenterToDownloadButtonTop * 2 + _downloadButtonTopToBottom;
+  static const double _fadeAboveActionBarHeight =
+      _fadeHeight - _progressTopPaddingWithinActionBar;
+  static const double _horizontalPadding = 16;
+  static const double _playbackButtonDimension = 20;
+  static const double _playbackToTimeGap = 18;
+  static const double _timeToProgressGap = 6;
+
+  final bool visible;
+  final bool isPlaying;
+  final Duration position;
+  final Duration duration;
+  final VoidCallback onPlaybackPressed;
+  final ValueChanged<double> onSeekStart;
+  final ValueChanged<double> onSeekUpdate;
+  final ValueChanged<double> onSeekEnd;
+  final VoidCallback onDownloadPressed;
+
+  double get _progress {
+    if (duration <= Duration.zero) {
+      return 0;
+    }
+
+    return (position.inMicroseconds / duration.inMicroseconds)
+        .clamp(0, 1)
+        .toDouble();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: AnimatedSlide(
+        key: const ValueKey<String>('video-viewer-bottom-overlay'),
+        duration: _mediaViewerControlsAnimationDuration,
+        curve: _mediaViewerControlsSlideCurve(visible),
+        offset: visible ? Offset.zero : const Offset(0, 1),
+        child: IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            duration: _mediaViewerControlsAnimationDuration,
+            opacity: visible ? 1 : 0,
+            child: DecoratedBox(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: <Color>[
+                    Color(0x00000000),
+                    Color(0xB8000000),
+                    _mediaViewerChromeBarColor,
+                  ],
+                  stops: <double>[0, 0.43, 1],
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: _fadeAboveActionBarHeight),
+                  _MediaViewerControlTapRegion(
+                    child: SizedBox(
+                      height: _actionBarHeight,
+                      child: ColoredBox(
+                        key: ValueKey<String>(
+                          'video-viewer-action-bar-background',
+                        ),
+                        color: _mediaViewerChromeBarColor,
+                        child: Column(
+                          children: [
+                            const SizedBox(
+                              height: _progressTopPaddingWithinActionBar,
+                            ),
+                            SizedBox(
+                              height: _progressRowHeight,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: _horizontalPadding,
+                                ),
+                                child: Row(
+                                  children: [
+                                    _VideoViewerPlaybackButton(
+                                      isPlaying: isPlaying,
+                                      dimension: _playbackButtonDimension,
+                                      onPressed: onPlaybackPressed,
+                                    ),
+                                    const SizedBox(width: _playbackToTimeGap),
+                                    _VideoViewerTimeLabel(
+                                      key: const ValueKey<String>(
+                                        'video-viewer-elapsed-time',
+                                      ),
+                                      duration: position,
+                                    ),
+                                    const SizedBox(width: _timeToProgressGap),
+                                    Expanded(
+                                      child: _VideoViewerProgressScrubber(
+                                        progress: _progress,
+                                        onSeekStart: onSeekStart,
+                                        onSeekUpdate: onSeekUpdate,
+                                        onSeekEnd: onSeekEnd,
+                                      ),
+                                    ),
+                                    const SizedBox(width: _timeToProgressGap),
+                                    _VideoViewerTimeLabel(
+                                      key: const ValueKey<String>(
+                                        'video-viewer-total-time',
+                                      ),
+                                      duration: duration,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: _progressToActionBarGap),
+                            _MediaViewerDownloadBar(
+                              keyPrefix: 'video-viewer',
+                              onDownloadPressed: onDownloadPressed,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VideoViewerPlaybackButton extends StatelessWidget {
+  const _VideoViewerPlaybackButton({
+    required this.isPlaying,
+    required this.dimension,
+    required this.onPressed,
+  });
+
+  final bool isPlaying;
+  final double dimension;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      key: const ValueKey<String>('video-viewer-playback'),
+      behavior: HitTestBehavior.opaque,
+      onTap: onPressed,
+      child: SizedBox.square(
+        dimension: dimension,
+        child: CustomPaint(
+          painter: _VideoViewerPlaybackIconPainter(isPlaying: isPlaying),
+        ),
+      ),
+    );
+  }
+}
+
+final class _VideoViewerPlaybackIconPainter extends CustomPainter {
+  const _VideoViewerPlaybackIconPainter({required this.isPlaying});
+
+  final bool isPlaying;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = AppColors.white
+      ..style = PaintingStyle.fill;
+    final double iconHeight = size.height * (isPlaying ? 0.875 : 0.804);
+    final double iconAspectRatio = isPlaying ? 5 / 6 : 0.846;
+    final Rect iconBounds = Rect.fromCenter(
+      center: size.center(Offset.zero),
+      width: iconHeight * iconAspectRatio,
+      height: iconHeight,
+    );
+
+    if (isPlaying) {
+      final double barWidth = iconBounds.width / 3;
+      final double cornerRadius = barWidth / 2;
+      final RRect leftBar = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          iconBounds.left,
+          iconBounds.top,
+          barWidth,
+          iconBounds.height,
+        ),
+        Radius.circular(cornerRadius),
+      );
+      final RRect rightBar = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          iconBounds.right - barWidth,
+          iconBounds.top,
+          barWidth,
+          iconBounds.height,
+        ),
+        Radius.circular(cornerRadius),
+      );
+
+      canvas.drawRRect(leftBar, paint);
+      canvas.drawRRect(rightBar, paint);
+      return;
+    }
+
+    const double cornerFraction = 0.1;
+    final Offset topVertex = iconBounds.topLeft;
+    final Offset rightVertex = Offset(iconBounds.right, iconBounds.center.dy);
+    final Offset bottomVertex = iconBounds.bottomLeft;
+    final Offset topEntry = Offset.lerp(
+      topVertex,
+      bottomVertex,
+      cornerFraction,
+    )!;
+    final Offset topExit = Offset.lerp(topVertex, rightVertex, cornerFraction)!;
+    final Offset rightEntry = Offset.lerp(
+      rightVertex,
+      topVertex,
+      cornerFraction,
+    )!;
+    final Offset rightExit = Offset.lerp(
+      rightVertex,
+      bottomVertex,
+      cornerFraction,
+    )!;
+    final Offset bottomEntry = Offset.lerp(
+      bottomVertex,
+      rightVertex,
+      cornerFraction,
+    )!;
+    final Offset bottomExit = Offset.lerp(
+      bottomVertex,
+      topVertex,
+      cornerFraction,
+    )!;
+    final Path playPath = Path()
+      ..moveTo(topExit.dx, topExit.dy)
+      ..lineTo(rightEntry.dx, rightEntry.dy)
+      ..quadraticBezierTo(
+        rightVertex.dx,
+        rightVertex.dy,
+        rightExit.dx,
+        rightExit.dy,
+      )
+      ..lineTo(bottomEntry.dx, bottomEntry.dy)
+      ..quadraticBezierTo(
+        bottomVertex.dx,
+        bottomVertex.dy,
+        bottomExit.dx,
+        bottomExit.dy,
+      )
+      ..lineTo(topEntry.dx, topEntry.dy)
+      ..quadraticBezierTo(topVertex.dx, topVertex.dy, topExit.dx, topExit.dy)
+      ..close();
+
+    canvas.drawPath(playPath, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _VideoViewerPlaybackIconPainter oldDelegate) {
+    return isPlaying != oldDelegate.isPlaying;
+  }
+}
+
+final class _VideoViewerTimeLabel extends StatelessWidget {
+  const _VideoViewerTimeLabel({required this.duration, super.key});
+
+  final Duration duration;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      _formatChatVideoDuration(duration),
+      style: const TextStyle(
+        color: Color(0xFFF2F2F2),
+        fontSize: 13,
+        height: 20 / 13,
+        letterSpacing: -0.8,
+        fontWeight: AppTypography.regular,
+        fontFeatures: <ui.FontFeature>[ui.FontFeature.tabularFigures()],
+      ),
+    );
+  }
+}
+
+final class _VideoViewerProgressScrubber extends StatefulWidget {
+  const _VideoViewerProgressScrubber({
+    required this.progress,
+    required this.onSeekStart,
+    required this.onSeekUpdate,
+    required this.onSeekEnd,
+  });
+
+  final double progress;
+  final ValueChanged<double> onSeekStart;
+  final ValueChanged<double> onSeekUpdate;
+  final ValueChanged<double> onSeekEnd;
+
+  @override
+  State<_VideoViewerProgressScrubber> createState() {
+    return _VideoViewerProgressScrubberState();
+  }
+}
+
+final class _VideoViewerProgressScrubberState
+    extends State<_VideoViewerProgressScrubber> {
+  double _lastFraction = 0;
+
+  double _fractionFor(Offset localPosition, double width) {
+    if (width <= 0) {
+      return 0;
+    }
+
+    return (localPosition.dx / width).clamp(0, 1).toDouble();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double width = constraints.maxWidth;
+
+        return GestureDetector(
+          key: const ValueKey<String>('video-viewer-progress'),
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (TapDownDetails details) {
+            _lastFraction = _fractionFor(details.localPosition, width);
+            widget.onSeekStart(_lastFraction);
+          },
+          onTapUp: (TapUpDetails details) {
+            _lastFraction = _fractionFor(details.localPosition, width);
+            widget.onSeekEnd(_lastFraction);
+          },
+          onHorizontalDragStart: (DragStartDetails details) {
+            _lastFraction = _fractionFor(details.localPosition, width);
+            widget.onSeekStart(_lastFraction);
+          },
+          onHorizontalDragUpdate: (DragUpdateDetails details) {
+            _lastFraction = _fractionFor(details.localPosition, width);
+            widget.onSeekUpdate(_lastFraction);
+          },
+          onHorizontalDragEnd: (_) {
+            widget.onSeekEnd(_lastFraction);
+          },
+          child: CustomPaint(
+            painter: _VideoViewerProgressPainter(progress: widget.progress),
+            size: Size(width, _VideoViewerBottomOverlay._progressRowHeight),
+          ),
+        );
+      },
+    );
+  }
+}
+
+final class _VideoViewerProgressPainter extends CustomPainter {
+  const _VideoViewerProgressPainter({required this.progress});
+
+  static const double _inactiveTrackHeight = 2;
+  static const double _activeTrackHeight = 4;
+  static const double _thumbRadius = 5.5;
+
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double centerY = size.height / 2;
+    final double startX = _thumbRadius;
+    final double endX = math.max(startX, size.width - _thumbRadius);
+    final double progressX = startX + (endX - startX) * progress;
+    final Paint inactivePaint = Paint()
+      ..color = const Color(0xFFB8B8B8)
+      ..strokeWidth = _inactiveTrackHeight
+      ..strokeCap = StrokeCap.round;
+    final Paint activePaint = Paint()
+      ..color = AppColors.blue500
+      ..strokeWidth = _activeTrackHeight
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawLine(
+      Offset(startX, centerY),
+      Offset(endX, centerY),
+      inactivePaint,
+    );
+    canvas.drawLine(
+      Offset(startX, centerY),
+      Offset(progressX, centerY),
+      activePaint,
+    );
+    canvas.drawCircle(
+      Offset(progressX, centerY),
+      _thumbRadius,
+      Paint()..color = AppColors.blue500,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _VideoViewerProgressPainter oldDelegate) {
+    return progress != oldDelegate.progress;
   }
 }
 
@@ -15657,14 +16504,15 @@ final class _PhotoViewerPage extends StatelessWidget {
   }
 }
 
-final class _PhotoViewerTopBar extends StatelessWidget {
-  const _PhotoViewerTopBar({
+final class _MediaViewerTopBar extends StatelessWidget {
+  const _MediaViewerTopBar({
     required this.visible,
     required this.height,
     required this.topPadding,
     required this.senderName,
     required this.sentAt,
     required this.onBackPressed,
+    this.keyPrefix = 'photo-viewer',
   });
 
   final bool visible;
@@ -15673,6 +16521,7 @@ final class _PhotoViewerTopBar extends StatelessWidget {
   final String senderName;
   final DateTime sentAt;
   final VoidCallback onBackPressed;
+  final String keyPrefix;
 
   @override
   Widget build(BuildContext context) {
@@ -15681,72 +16530,70 @@ final class _PhotoViewerTopBar extends StatelessWidget {
       top: 0,
       right: 0,
       child: AnimatedSlide(
-        key: const ValueKey<String>('photo-viewer-top-bar'),
-        duration: _PhotoViewerScreenState._controlsAnimationDuration,
-        curve: Curves.easeOutCubic,
+        key: ValueKey<String>('$keyPrefix-top-bar'),
+        duration: _mediaViewerControlsAnimationDuration,
+        curve: _mediaViewerControlsSlideCurve(visible),
         offset: visible ? Offset.zero : const Offset(0, -1),
         child: IgnorePointer(
           ignoring: !visible,
           child: AnimatedOpacity(
-            duration: _PhotoViewerScreenState._controlsAnimationDuration,
+            duration: _mediaViewerControlsAnimationDuration,
             opacity: visible ? 1 : 0,
-            child: Container(
-              height: height,
-              color: _PhotoViewerScreenState._chromeBarColor,
-              child: Stack(
-                children: [
-                  Positioned(
-                    left: _topBarHorizontalMargin,
-                    top: topPadding,
-                    child: _PhotoViewerChromeButton(
-                      key: const ValueKey<String>('photo-viewer-back'),
-                      dimension: _topBarButtonDimension,
-                      onPressed: onBackPressed,
-                      icon: const _TopBarBackIcon(color: Color(0xFFE8E8E8)),
-                    ),
-                  ),
-                  Positioned(
-                    left: _topBarHorizontalMargin + _topBarButtonDimension,
-                    top: topPadding,
-                    right: _topBarHorizontalMargin + _topBarButtonDimension,
-                    height: _topBarButtonDimension,
-                    child: Center(
-                      child: Column(
-                        key: const ValueKey<String>('photo-viewer-info'),
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            key: const ValueKey<String>(
-                              'photo-viewer-sender-name',
-                            ),
-                            senderName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppTypography.typography6.copyWith(
-                              color: const Color(0xFFF2F2F2),
-                              fontWeight: AppTypography.bold,
-                              height: 18 / 15,
-                            ),
-                          ),
-                          Text(
-                            key: const ValueKey<String>(
-                              'photo-viewer-timestamp',
-                            ),
-                            _formatPhotoViewerTimestamp(sentAt),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: AppTypography.typography7.copyWith(
-                              color: const Color(0xFFF2F2F2),
-                              fontWeight: AppTypography.regular,
-                              height: 16 / 13,
-                            ),
-                          ),
-                        ],
+            child: _MediaViewerControlTapRegion(
+              child: Container(
+                height: height,
+                color: _mediaViewerChromeBarColor,
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: _topBarHorizontalMargin,
+                      top: topPadding,
+                      child: _PhotoViewerChromeButton(
+                        key: ValueKey<String>('$keyPrefix-back'),
+                        dimension: _topBarButtonDimension,
+                        onPressed: onBackPressed,
+                        icon: const _TopBarBackIcon(color: Color(0xFFE8E8E8)),
                       ),
                     ),
-                  ),
-                ],
+                    Positioned(
+                      left: _topBarHorizontalMargin + _topBarButtonDimension,
+                      top: topPadding,
+                      right: _topBarHorizontalMargin + _topBarButtonDimension,
+                      height: _topBarButtonDimension,
+                      child: Center(
+                        child: Column(
+                          key: ValueKey<String>('$keyPrefix-info'),
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              key: ValueKey<String>('$keyPrefix-sender-name'),
+                              senderName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTypography.typography6.copyWith(
+                                color: const Color(0xFFF2F2F2),
+                                fontWeight: AppTypography.bold,
+                                height: 18 / 15,
+                              ),
+                            ),
+                            Text(
+                              key: ValueKey<String>('$keyPrefix-timestamp'),
+                              _formatPhotoViewerTimestamp(sentAt),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: AppTypography.typography7.copyWith(
+                                color: const Color(0xFFF2F2F2),
+                                fontWeight: AppTypography.regular,
+                                height: 16 / 13,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -15787,48 +16634,80 @@ final class _PhotoViewerBottomOverlay extends StatelessWidget {
       bottom: 0,
       child: AnimatedSlide(
         key: const ValueKey<String>('photo-viewer-bottom-overlay'),
-        duration: _PhotoViewerScreenState._controlsAnimationDuration,
-        curve: Curves.easeOutCubic,
+        duration: _mediaViewerControlsAnimationDuration,
+        curve: _mediaViewerControlsSlideCurve(visible),
         offset: visible ? Offset.zero : const Offset(0, 1),
         child: IgnorePointer(
           ignoring: !visible,
           child: AnimatedOpacity(
-            duration: _PhotoViewerScreenState._controlsAnimationDuration,
+            duration: _mediaViewerControlsAnimationDuration,
             opacity: visible ? 1 : 0,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_hasMultiplePhotos)
-                  SizedBox(
-                    width: double.infinity,
-                    child: ColoredBox(
-                      color: _PhotoViewerScreenState._filmstripOverlayColor,
-                      child: _PhotoViewerThumbnailBar(
-                        attachments: attachments,
-                        currentIndex: currentIndex,
-                        thumbnailKeys: thumbnailKeys,
-                        onCreateMediaAssetAccessUrl:
-                            onCreateMediaAssetAccessUrl,
-                        onThumbnailPressed: onThumbnailPressed,
+            child: _MediaViewerControlTapRegion(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_hasMultiplePhotos)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ColoredBox(
+                        color: _PhotoViewerScreenState._filmstripOverlayColor,
+                        child: _PhotoViewerThumbnailBar(
+                          attachments: attachments,
+                          currentIndex: currentIndex,
+                          thumbnailKeys: thumbnailKeys,
+                          onCreateMediaAssetAccessUrl:
+                              onCreateMediaAssetAccessUrl,
+                          onThumbnailPressed: onThumbnailPressed,
+                        ),
                       ),
                     ),
-                  ),
-                Container(
-                  height: _PhotoViewerScreenState._actionBarContentHeight,
-                  color: _PhotoViewerScreenState._chromeBarColor,
-                  child: Center(
-                    child: _PhotoViewerChromeButton(
-                      key: const ValueKey<String>('photo-viewer-download'),
-                      dimension:
-                          _PhotoViewerScreenState._downloadButtonDimension,
-                      onPressed: onDownloadPressed,
-                      icon: const _PhotoViewerDownloadIcon(),
-                    ),
-                  ),
-                ),
-              ],
+                  _MediaViewerDownloadBar(onDownloadPressed: onDownloadPressed),
+                ],
+              ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _MediaViewerControlTapRegion extends StatelessWidget {
+  const _MediaViewerControlTapRegion({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      excludeFromSemantics: true,
+      onTap: () {},
+      child: child,
+    );
+  }
+}
+
+final class _MediaViewerDownloadBar extends StatelessWidget {
+  const _MediaViewerDownloadBar({
+    required this.onDownloadPressed,
+    this.keyPrefix = 'photo-viewer',
+  });
+
+  final VoidCallback onDownloadPressed;
+  final String keyPrefix;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: _mediaViewerActionBarContentHeight,
+      color: _mediaViewerChromeBarColor,
+      child: Center(
+        child: _PhotoViewerChromeButton(
+          key: ValueKey<String>('$keyPrefix-download'),
+          dimension: _mediaViewerDownloadButtonDimension,
+          onPressed: onDownloadPressed,
+          icon: const _PhotoViewerDownloadIcon(),
         ),
       ),
     );

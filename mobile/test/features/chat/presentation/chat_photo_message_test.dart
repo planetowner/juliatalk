@@ -1257,6 +1257,68 @@ void main() {
     );
   });
 
+  testWidgets(
+    'visible photo bars shield taps and hidden bars reveal anywhere',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        _buildPhotoMessageScreen(
+          _photoMessage(senderId: '1', recipientId: '2'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(_photoFinder(0));
+      await tester.pumpAndSettle();
+
+      final Finder topBarFinder = find.byKey(
+        const ValueKey<String>('photo-viewer-top-bar'),
+      );
+      final Finder bottomOverlayFinder = find.byKey(
+        const ValueKey<String>('photo-viewer-bottom-overlay'),
+      );
+      final Rect topBarRect = tester.getRect(topBarFinder);
+      final Rect bottomOverlayRect = tester.getRect(bottomOverlayFinder);
+
+      await tester.tapAt(Offset(topBarRect.right - 8, topBarRect.center.dy));
+      await tester.pump();
+      await tester.tapAt(
+        Offset(bottomOverlayRect.left + 8, bottomOverlayRect.center.dy),
+      );
+      await tester.pump();
+
+      expect(tester.widget<AnimatedSlide>(topBarFinder).offset, Offset.zero);
+      expect(
+        tester.widget<AnimatedSlide>(bottomOverlayFinder).offset,
+        Offset.zero,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('photo-viewer-page-view')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<AnimatedSlide>(topBarFinder).offset,
+        const Offset(0, -1),
+      );
+      expect(
+        tester.widget<AnimatedSlide>(bottomOverlayFinder).offset,
+        const Offset(0, 1),
+      );
+
+      await tester.tapAt(
+        Offset(bottomOverlayRect.left + 8, bottomOverlayRect.center.dy),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<AnimatedSlide>(topBarFinder).offset, Offset.zero);
+      expect(
+        tester.widget<AnimatedSlide>(bottomOverlayFinder).offset,
+        Offset.zero,
+      );
+    },
+  );
+
   testWidgets('three-photo collage uses one large image beside two stacked', (
     WidgetTester tester,
   ) async {

@@ -21,6 +21,7 @@ void main() {
     const AuthSessionStore store = AuthSessionStore();
     const AuthSession session = AuthSession(
       accessToken: 'test-access-token',
+      refreshToken: 'test-refresh-token',
       tokenType: 'bearer',
       user: AppUser(
         id: '11111111-1111-4111-8111-111111111111',
@@ -37,6 +38,7 @@ void main() {
 
     expect(restoredSession, isNotNull);
     expect(restoredSession!.accessToken, session.accessToken);
+    expect(restoredSession.refreshToken, session.refreshToken);
     expect(restoredSession.tokenType, session.tokenType);
     expect(restoredSession.user.id, session.user.id);
     expect(restoredSession.user.username, session.user.username);
@@ -52,6 +54,7 @@ void main() {
     const AuthSessionStore store = AuthSessionStore();
     const AuthSession session = AuthSession(
       accessToken: 'test-access-token',
+      refreshToken: 'test-refresh-token',
       tokenType: 'bearer',
       user: AppUser(
         id: '11111111-1111-4111-8111-111111111111',
@@ -64,6 +67,20 @@ void main() {
     await store.save(session);
     await store.clear();
 
+    expect(await store.load(), isNull);
+  });
+
+  test('clears a legacy session without a refresh token', () async {
+    FlutterSecureStorage.setMockInitialValues(<String, String>{
+      'juliatalk.auth_session.v1':
+          '{"access_token":"legacy","token_type":"bearer","user":'
+          '{"id":"11111111-1111-4111-8111-111111111111",'
+          '"username":"test-user","display_name":"June",'
+          '"preferred_language":"ko"}}',
+    });
+    const AuthSessionStore store = AuthSessionStore();
+
+    expect(await store.load(), isNull);
     expect(await store.load(), isNull);
   });
 }

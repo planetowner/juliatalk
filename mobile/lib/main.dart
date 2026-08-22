@@ -9,6 +9,7 @@ import 'core/notifications/notification_service.dart';
 import 'design_system/app_theme.dart';
 import 'features/auth/data/auth_api.dart';
 import 'features/auth/data/auth_login_exception.dart';
+import 'features/auth/data/auth_refresh_exception.dart';
 import 'features/auth/data/auth_session_store.dart';
 import 'features/auth/domain/auth_session.dart';
 import 'features/auth/presentation/login_screen.dart';
@@ -35,17 +36,22 @@ final class JuliaTalkApp extends StatefulWidget {
 
 final class _JuliaTalkAppState extends State<JuliaTalkApp>
     with WidgetsBindingObserver {
+  static const Duration _accessTokenRefreshLeadTime = Duration(days: 1);
+  static const Duration _accessTokenRefreshRetryDelay = Duration(minutes: 5);
+
   late final http.Client _httpClient;
   late final AuthApi _authApi;
   late final AuthSessionStore _authSessionStore;
   late final NotificationService _notificationService;
   late final ChatConversationHomeController _chatController;
   StreamSubscription<Map<String, dynamic>>? _notificationEventSubscription;
+  Timer? _accessTokenRefreshTimer;
 
   AuthSession? _session;
   ChatApi? _chatApi;
   ChatRealtimeService? _chatRealtimeService;
   bool _isRestoringSession = true;
+  bool _isRefreshingSession = false;
 
   @override
   void initState() {
@@ -73,6 +79,7 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_notificationEventSubscription?.cancel());
+    _accessTokenRefreshTimer?.cancel();
     _chatRealtimeService?.dispose();
     _chatController.dispose();
     _httpClient.close();
@@ -83,6 +90,7 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_clearDeliveredNotifications());
+      unawaited(_refreshActiveSessionIfNeeded());
     }
   }
 
@@ -120,6 +128,25 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp>
       session = await _authSessionStore.load();
     } on Exception catch (error) {
       debugPrint('Session restoration failed: $error');
+    }
+
+    if (session != null) {
+      try {
+        final AuthSession refreshedSession = await _authApi.refresh(
+          refreshToken: session.refreshToken,
+        );
+        await _authSessionStore.save(refreshedSession);
+        session = refreshedSession;
+      } on AuthRefreshException catch (error) {
+        if (error.statusCode == 401) {
+          await _clearStoredSession();
+          session = null;
+        } else {
+          debugPrint('Session refresh failed: $error');
+        }
+      } on Exception catch (error) {
+        debugPrint('Session refresh failed: $error');
+      }
     }
 
     if (!mounted) {
@@ -186,6 +213,88 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp>
     }
   }
 
+  Future<void> _refreshActiveSessionIfNeeded() async {
+    final AuthSession? session = _session;
+    if (session == null || _isRefreshingSession) {
+      return;
+    }
+
+    final DateTime? expiresAt = session.accessTokenExpiresAt;
+    final DateTime refreshBoundary = DateTime.now().toUtc().add(
+      _accessTokenRefreshLeadTime,
+    );
+    if (expiresAt != null && expiresAt.isAfter(refreshBoundary)) {
+      return;
+    }
+
+    await _refreshActiveSession(session);
+  }
+
+  Future<void> _refreshActiveSession(AuthSession session) async {
+    if (_isRefreshingSession || _session != session) {
+      return;
+    }
+
+    _isRefreshingSession = true;
+
+    try {
+      final AuthSession refreshedSession = await _authApi.refresh(
+        refreshToken: session.refreshToken,
+      );
+
+      try {
+        await _authSessionStore.save(refreshedSession);
+      } on Exception catch (error) {
+        debugPrint('Refreshed session persistence failed: $error');
+      }
+
+      if (!mounted || _session != session) {
+        return;
+      }
+
+      _activateChatSession(refreshedSession);
+      setState(() {
+        _session = refreshedSession;
+      });
+      unawaited(_configureNotifications(refreshedSession));
+    } on AuthRefreshException catch (error) {
+      if (error.statusCode == 401) {
+        await _clearStoredSession();
+
+        if (!mounted || _session != session) {
+          return;
+        }
+
+        _deactivateChatSession();
+        setState(() {
+          _session = null;
+        });
+      } else {
+        debugPrint('Session refresh failed: $error');
+        _scheduleAccessTokenRefresh(
+          session,
+          retryAfter: _accessTokenRefreshRetryDelay,
+        );
+      }
+    } on Exception catch (error) {
+      debugPrint('Session refresh failed: $error');
+      _scheduleAccessTokenRefresh(
+        session,
+        retryAfter: _accessTokenRefreshRetryDelay,
+      );
+    } finally {
+      _isRefreshingSession = false;
+    }
+  }
+
+  Future<void> _clearStoredSession() async {
+    try {
+      await _authSessionStore.clear();
+    } on Exception catch (error) {
+      debugPrint('Session cleanup failed: $error');
+    }
+  }
+
   void _activateChatSession(AuthSession session) {
     _chatRealtimeService?.dispose();
 
@@ -204,12 +313,42 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp>
     _chatApi = chatApi;
     _chatRealtimeService = realtimeService;
     realtimeService.start();
+    _scheduleAccessTokenRefresh(session);
   }
 
   void _deactivateChatSession() {
+    _accessTokenRefreshTimer?.cancel();
+    _accessTokenRefreshTimer = null;
     _chatRealtimeService?.dispose();
     _chatRealtimeService = null;
     _chatApi = null;
+  }
+
+  void _scheduleAccessTokenRefresh(
+    AuthSession session, {
+    Duration? retryAfter,
+  }) {
+    _accessTokenRefreshTimer?.cancel();
+
+    final DateTime? expiresAt = session.accessTokenExpiresAt;
+    final Duration refreshDelay;
+
+    if (retryAfter != null) {
+      refreshDelay = retryAfter;
+    } else if (expiresAt == null) {
+      refreshDelay = Duration.zero;
+    } else {
+      final DateTime refreshAt = expiresAt.subtract(
+        _accessTokenRefreshLeadTime,
+      );
+      final Duration remaining = refreshAt.difference(DateTime.now().toUtc());
+      refreshDelay = remaining.isNegative ? Duration.zero : remaining;
+    }
+
+    // 앱이 계속 켜져 있어도 만료 하루 전에 새 액세스 토큰을 받아요.
+    _accessTokenRefreshTimer = Timer(refreshDelay, () {
+      unawaited(_refreshActiveSession(session));
+    });
   }
 
   Widget _buildHome() {
@@ -231,6 +370,7 @@ final class _JuliaTalkAppState extends State<JuliaTalkApp>
     }
 
     return ChatConversationHomeScreen(
+      key: ValueKey<String>(session.accessToken),
       chatApi: chatApi,
       realtimeService: realtimeService,
       session: session,

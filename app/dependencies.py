@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Optional
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import (
@@ -25,6 +26,20 @@ CredentialsDependency = Annotated[
     Optional[HTTPAuthorizationCredentials],
     Depends(bearer_scheme),
 ]
+
+
+async def get_user_for_token(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    token_version: int,
+) -> Optional[User]:
+    user = await session.get(User, user_id)
+
+    if user is None or user.token_version != token_version:
+        return None
+
+    return user
 
 
 async def get_current_user(
@@ -52,12 +67,13 @@ async def get_current_user(
     except ValueError:
         raise authentication_error
 
-    user = await session.get(User, user_id)
+    user = await get_user_for_token(
+        session,
+        user_id=user_id,
+        token_version=token_version,
+    )
 
     if user is None:
-        raise authentication_error
-
-    if user.token_version != token_version:
         raise authentication_error
 
     return user

@@ -11,7 +11,7 @@ OpenAI.
 
 - Username and password authentication
 - Argon2id password hashing
-- JWT access tokens
+- JWT access tokens with automatic refresh
 - Token invalidation after password changes
 - Editable display names
 - Persistent direct conversation history

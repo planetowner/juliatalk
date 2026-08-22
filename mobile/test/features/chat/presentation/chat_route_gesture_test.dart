@@ -126,6 +126,7 @@ Future<ChatRealtimeService> _pumpConversationHome(
   );
   final AuthSession session = AuthSession(
     accessToken: 'test-token',
+    refreshToken: 'test-refresh-token',
     tokenType: 'bearer',
     user: _currentUser,
   );
@@ -284,7 +285,7 @@ void main() {
 
       await tester.tap(find.text(_otherUser.displayName));
 
-    // 첫 빌드 프레임에서 전환 시간을 모두 흘려도 애니메이션은 다음 프레임부터 시작해야 해요.
+      // 첫 빌드 프레임에서 전환 시간을 모두 흘려도 애니메이션은 다음 프레임부터 시작해야 해요.
       await tester.pump(const Duration(milliseconds: 190));
 
       final Finder routeTransformFinder = find.byKey(
@@ -523,7 +524,7 @@ void main() {
           (originalBubbleRect.top - messageListRect.top) /
           messageListRect.height;
 
-    // RenderAbstractViewport의 물리 픽셀 반올림 오차는 허용하되 기대 위치 범위는 지켜요.
+      // RenderAbstractViewport의 물리 픽셀 반올림 오차는 허용하되 기대 위치 범위는 지켜요.
       expect(originalTopRatio, inInclusiveRange(0.18, 0.39));
 
       await tester.tap(backButtonFinder);

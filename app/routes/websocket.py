@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.database import SessionLocal
+from app.dependencies import get_user_for_token
 from app.models import User
 from app.security import decode_access_token
 from app.websocket_manager import connection_manager
@@ -44,15 +45,11 @@ async def authenticate_websocket(
         return None
 
     async with SessionLocal() as session:
-        user = await session.get(User, user_id)
-
-        if user is None:
-            return None
-
-        if user.token_version != token_version:
-            return None
-
-        return user
+        return await get_user_for_token(
+            session,
+            user_id=user_id,
+            token_version=token_version,
+        )
 
 
 @router.websocket("/ws")

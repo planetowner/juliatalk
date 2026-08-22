@@ -86,6 +86,33 @@ const MethodChannel _pathProviderChannel = MethodChannel(
   'plugins.flutter.io/path_provider',
 );
 
+const MethodChannel _photoManagerChannel = MethodChannel(
+  'com.fluttercandies/photo_manager',
+);
+
+void _setUpPhotoSave({ValueChanged<MethodCall>? onCall}) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_photoManagerChannel, (MethodCall call) async {
+        onCall?.call(call);
+
+        if (call.method == 'saveImage' || call.method == 'saveImageWithPath') {
+          return <String, Object>{
+            'id': 'saved-photo',
+            'type': 1,
+            'width': 1,
+            'height': 1,
+            'duration': 0,
+          };
+        }
+
+        return null;
+      });
+  addTearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_photoManagerChannel, null);
+  });
+}
+
 Directory _setUpPhotoCacheDirectory(String prefix) {
   final Directory cacheDirectory = Directory.systemTemp.createTempSync(prefix);
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -534,6 +561,20 @@ void main() {
       '${originalDirectory.path}/$mediaAssetId.image',
     )..writeAsBytesSync(_testPng);
     int originalAccessUrlRequests = 0;
+    MethodCall? photoSaveCall;
+    Uint8List? photoSaveInputBytes;
+    _setUpPhotoSave(
+      onCall: (MethodCall call) {
+        if (call.method == 'saveImage' || call.method == 'saveImageWithPath') {
+          photoSaveCall = call;
+          final Object? path =
+              (call.arguments as Map<Object?, Object?>?)?['path'];
+          if (path is String) {
+            photoSaveInputBytes = File(path).readAsBytesSync();
+          }
+        }
+      },
+    );
     final ChatMessage message = ChatMessage(
       id: 'prefetched-original-message',
       senderId: '2',
@@ -547,6 +588,8 @@ void main() {
           previewBytes: _testPng,
           width: 1200,
           height: 900,
+          fileName: 'prefetched-original.png',
+          mimeType: 'image/png',
         ),
       ],
     );
@@ -587,6 +630,30 @@ void main() {
     final FileImage fileImage = resizedImage.imageProvider as FileImage;
 
     expect(fileImage.file.path, originalFile.path);
+    expect(originalAccessUrlRequests, 0);
+
+    await tester.runAsync(() async {
+      await tester.tap(
+        find.byKey(const ValueKey<String>('photo-viewer-download')),
+      );
+      await tester.pump();
+      for (int attempt = 0; attempt < 100 && photoSaveCall == null; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(photoSaveCall?.method, 'saveImageWithPath');
+    final Map<Object?, Object?> photoSaveArguments =
+        photoSaveCall?.arguments as Map<Object?, Object?>;
+    final String photoSaveInputPath = photoSaveArguments['path']! as String;
+    expect(photoSaveInputPath, isNot(originalFile.path));
+    expect(photoSaveInputPath, endsWith('.png'));
+    expect(photoSaveArguments['title'], endsWith('.png'));
+    expect(photoSaveInputBytes, _testPng);
+    expect(File(photoSaveInputPath).existsSync(), isFalse);
+    expect(originalFile.existsSync(), isTrue);
+    expect(find.text('Photo saved'), findsOneWidget);
     expect(originalAccessUrlRequests, 0);
   });
 
@@ -1136,6 +1203,94 @@ void main() {
       find.byKey(const ValueKey<String>('photo-viewer-image-photo-preview-0')),
       findsNothing,
     );
+  });
+
+  testWidgets('photo save confirmation matches the measured reference', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(393, 852));
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+    _setUpPhotoSave();
+    String? copiedDiagnostics;
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (
+      MethodCall call,
+    ) async {
+      if (call.method == 'Clipboard.setData') {
+        final Map<Object?, Object?> arguments =
+            call.arguments as Map<Object?, Object?>;
+        copiedDiagnostics = arguments['text'] as String?;
+      }
+
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    await tester.pumpWidget(
+      _buildPhotoMessageScreen(_photoMessage(senderId: '1', recipientId: '2')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_photoFinder(0));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey<String>('photo-viewer-download')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    final Finder confirmation = find.byKey(
+      const ValueKey<String>('photo-viewer-action-confirmation'),
+    );
+    final Finder opacityFinder = find.byKey(
+      const ValueKey<String>('photo-viewer-action-confirmation-opacity'),
+    );
+    final Finder icon = find.descendant(
+      of: confirmation,
+      matching: find.byType(CustomPaint),
+    );
+    final Finder label = find.text('Photo saved');
+    final Rect confirmationRect = tester.getRect(confirmation);
+    final Rect iconRect = tester.getRect(icon);
+    final Rect labelRect = tester.getRect(label);
+    final Container confirmationContainer = tester.widget<Container>(
+      confirmation,
+    );
+    final BoxDecoration decoration =
+        confirmationContainer.decoration! as BoxDecoration;
+    final BorderRadius borderRadius = decoration.borderRadius! as BorderRadius;
+    final Text labelText = tester.widget<Text>(label);
+    final FadeTransition opacity = tester.widget<FadeTransition>(opacityFinder);
+
+    expect(find.byType(SnackBar), findsNothing);
+    expect(confirmationRect.height, 56);
+    expect(confirmationRect.center, const Offset(196.5, 426));
+    expect(iconRect.size, const Size.square(24));
+    expect(iconRect.left - confirmationRect.left, 16);
+    expect(labelRect.left - iconRect.right, 12);
+    expect(confirmationRect.right - labelRect.right, 14.5);
+    expect(decoration.color, const Color(0x80000000));
+    expect(borderRadius.topLeft.x, 18);
+    expect(labelText.style?.fontSize, 18);
+    expect(labelText.style?.fontWeight, FontWeight.w400);
+    expect(labelText.style?.color, Colors.white);
+    expect(opacity.opacity.value, 1);
+    expect(copiedDiagnostics, isNull);
+
+    await tester.pump(const Duration(milliseconds: 2500));
+    expect(opacity.opacity.value, 1);
+
+    await tester.pump(const Duration(milliseconds: 125));
+    expect(opacity.opacity.value, greaterThan(0));
+    expect(opacity.opacity.value, lessThan(1));
+
+    await tester.pump(const Duration(milliseconds: 126));
+    expect(confirmation, findsNothing);
   });
 
   testWidgets('photo viewer shows the sender name for the current viewer', (

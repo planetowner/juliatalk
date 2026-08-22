@@ -1,7 +1,7 @@
 name: juliatalk
 description: Private Flutter chat client for JuliaTalk.
 publish_to: none
-version: 1.0.0+5
+version: 1.0.0+6
 
 environment:
   sdk: ^3.11.4

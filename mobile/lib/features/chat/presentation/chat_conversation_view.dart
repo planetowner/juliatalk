@@ -42,6 +42,8 @@ const double _messageHorizontalPadding = 11;
 
 const double _messageListHorizontalPadding = 8;
 
+const double _composerHorizontalPadding = 10;
+
 const double _replyMessageMinimumWidthRatio = 0.36;
 
 const double _replyMessageMaximumWidthRatio = 0.70;
@@ -59,6 +61,18 @@ const double _topBarTrailingSpacing = 23;
 const Duration _mediaViewerControlsAnimationDuration = Duration(
   milliseconds: 200,
 );
+
+const Duration _mediaSaveConfirmationDuration = Duration(milliseconds: 2950);
+
+const Duration _messageCopyConfirmationDuration = Duration(milliseconds: 3300);
+
+const double _actionConfirmationHeight = 56;
+
+const double _messageCopyConfirmationGap = 8;
+
+const double _messageCopyConfirmationOvershoot = 13 / 3;
+
+// TODO: 사진·영상 저장과 메시지 복사를 제외한 스낵바도 새 피드백 버튼으로 바꿔요.
 
 Curve _mediaViewerControlsSlideCurve(bool visible) {
   return visible ? Curves.easeOutCubic : Curves.linear;
@@ -110,6 +124,10 @@ String _messagePresentationId(ChatMessage message) {
   return 'photo-${message.photoAttachments.first.assetId}';
 }
 
+String _elapsedMilliseconds(Stopwatch stopwatch) {
+  return (stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1);
+}
+
 void _logPhotoPreparationTiming(
   String stage,
   Stopwatch stopwatch, {
@@ -121,7 +139,7 @@ void _logPhotoPreparationTiming(
   final List<String> fields = <String>[
     '[photo-send]',
     'stage=$stage',
-    'elapsed_ms=${(stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1)}',
+    'elapsed_ms=${_elapsedMilliseconds(stopwatch)}',
     'photo_count=$photoCount',
     if (photoIndex != null) 'photo_index=$photoIndex',
     if (bytes != null) 'bytes=$bytes',
@@ -142,7 +160,7 @@ void _logVideoSendTiming(
   final List<String> fields = <String>[
     '[video-send]',
     'stage=$stage',
-    'elapsed_ms=${(stopwatch.elapsedMicroseconds / 1000).toStringAsFixed(1)}',
+    'elapsed_ms=${_elapsedMilliseconds(stopwatch)}',
     'video_count=$videoCount',
     'video_index=$videoIndex',
     if (originalBytes != null) 'original_bytes=$originalBytes',
@@ -541,6 +559,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   final FocusNode _searchFocusNode = FocusNode();
   final GlobalKey _messageInputHostKey = GlobalKey();
   final GlobalKey _composerMeasureKey = GlobalKey();
+  final GlobalKey<_ActionConfirmationState> _messageCopyConfirmationKey =
+      GlobalKey<_ActionConfirmationState>();
   final Map<String, Future<Uri>> _mediaAssetAccessUrlFutures =
       <String, Future<Uri>>{};
   late final ChatMediaAssetAccessUrlCreator _mediaAssetAccessUrlCreator =
@@ -582,6 +602,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
   bool _pinBottomAfterKeyboardDismiss = false;
   bool _postSendBottomSettlePending = false;
   bool _textMessageSending = false;
+
+  double _messageCopyComposerHeight = _MessageComposer._defaultComposerHeight;
 
   bool _attachmentPanelOpen = false;
   bool _photoPickerOpen = false;
@@ -1266,7 +1288,8 @@ final class _ChatConversationViewState extends State<ChatConversationView>
       }
     }
 
-    await copyPhotoSendDiagnosticsToClipboard();
+    // 진단할 때만 아래 줄의 주석을 풀어 클립보드 복사를 켜요.
+    // await copyPhotoSendDiagnosticsToClipboard();
   }
 
   Future<void> _completeSelectedVideoSend({
@@ -2784,6 +2807,28 @@ final class _ChatConversationViewState extends State<ChatConversationView>
     }
   }
 
+  void _showMessageCopiedConfirmation() {
+    final RenderObject? composerRenderObject = _composerMeasureKey
+        .currentContext
+        ?.findRenderObject();
+    final double composerHeight =
+        composerRenderObject is RenderBox &&
+            composerRenderObject.attached &&
+            composerRenderObject.hasSize
+        ? composerRenderObject.size.height
+        : _messageCopyComposerHeight;
+
+    setState(() {
+      _messageCopyComposerHeight = composerHeight;
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _messageCopyConfirmationKey.currentState?.show('Copied');
+      }
+    });
+  }
+
   void _restoreComposerFocusAfterModeChange({
     bool animateInitialScroll = false,
   }) {
@@ -3381,6 +3426,14 @@ final class _ChatConversationViewState extends State<ChatConversationView>
         ? keyboardHeight + 10
         : systemBottomPadding + 10;
 
+    final double messageCopyConfirmationBottom = _searchModeActive
+        ? searchToolbarBottom +
+              _ChatSearchToolbar.height +
+              _messageCopyConfirmationGap
+        : bottomSurfaceHeight +
+              _messageCopyComposerHeight +
+              _messageCopyConfirmationGap;
+
     final bool showActiveVoiceCallBanner =
         !_searchModeActive && _hasActiveVoiceCall && !showingVoiceCallScreen;
 
@@ -3469,6 +3522,7 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                           ? _searchFocusNode.unfocus
                           : _dismissComposerSurface,
                       onPrepareMessageActions: _prepareMessageActions,
+                      onMessageCopied: _showMessageCopiedConfirmation,
                       searchQuery: _searchModeActive && _hasSubmittedSearch
                           ? _searchQuery
                           : '',
@@ -3579,6 +3633,22 @@ final class _ChatConversationViewState extends State<ChatConversationView>
                     onPressed: () {
                       unawaited(_openQuickPhotoPreview());
                     },
+                  ),
+                ),
+
+              if (!showingVoiceCallScreen)
+                Positioned(
+                  left: _composerHorizontalPadding,
+                  right: _composerHorizontalPadding,
+                  bottom: messageCopyConfirmationBottom,
+                  child: _ActionConfirmation(
+                    key: _messageCopyConfirmationKey,
+                    keyPrefix: 'message-copy',
+                    fillWidth: true,
+                    motion: _ActionConfirmationMotion.slideFromBottom,
+                    hiddenOffsetY:
+                        messageCopyConfirmationBottom +
+                        _actionConfirmationHeight,
                   ),
                 ),
 
@@ -7124,6 +7194,7 @@ final class _MessageList extends StatefulWidget {
     required this.onEditSelected,
     required this.onBackgroundTap,
     required this.onPrepareMessageActions,
+    required this.onMessageCopied,
     required this.searchQuery,
     required this.activeSearchMessageId,
     required this.topPadding,
@@ -7164,6 +7235,7 @@ final class _MessageList extends StatefulWidget {
   final _EditSelectedCallback onEditSelected;
   final VoidCallback onBackgroundTap;
   final Future<void> Function() onPrepareMessageActions;
+  final VoidCallback onMessageCopied;
   final String searchQuery;
   final String? activeSearchMessageId;
   final double topPadding;
@@ -10478,9 +10550,7 @@ final class _MessageListState extends State<_MessageList>
           return;
         }
 
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('Message copied')));
+        widget.onMessageCopied();
         return;
 
       case ChatMessageAction.reply:
@@ -13954,6 +14024,44 @@ String _videoFileExtension(String? fileName) {
   return ChatVideoDiskCache.fileExtension(fileName);
 }
 
+String _photoFileExtension(ChatPhotoAttachment attachment) {
+  final String fileName = attachment.fileName?.toLowerCase() ?? '';
+
+  for (final String extension in <String>[
+    'jpeg',
+    'jpg',
+    'png',
+    'heic',
+    'webp',
+  ]) {
+    if (fileName.endsWith('.$extension')) {
+      return extension;
+    }
+  }
+
+  return switch (attachment.mimeType?.toLowerCase()) {
+    'image/png' => 'png',
+    'image/heic' => 'heic',
+    'image/webp' => 'webp',
+    _ => 'jpg',
+  };
+}
+
+String _photoSavePlatformErrorDetails(Object error) {
+  if (error is! PlatformException) {
+    return '';
+  }
+
+  final String code = error.code.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final String? message = error.message?.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final String details =
+      error.details?.toString().replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+
+  return ' platform_code=$code'
+      '${message == null || message.isEmpty ? '' : ' platform_message=$message'}'
+      '${details.isEmpty ? '' : ' platform_details=$details'}';
+}
+
 String _formatChatVideoDuration(Duration duration) {
   final int totalSeconds = duration.inSeconds;
   final int hours = totalSeconds ~/ 3600;
@@ -15179,6 +15287,251 @@ final class _PhotoMessagePlaceholder extends StatelessWidget {
   }
 }
 
+enum _ActionConfirmationMotion { fade, slideFromBottom }
+
+final class _ActionConfirmation extends StatefulWidget {
+  const _ActionConfirmation({
+    required this.keyPrefix,
+    this.fillWidth = false,
+    this.motion = _ActionConfirmationMotion.fade,
+    this.hiddenOffsetY = 0,
+    super.key,
+  });
+
+  final String keyPrefix;
+  final bool fillWidth;
+  final _ActionConfirmationMotion motion;
+  final double hiddenOffsetY;
+
+  @override
+  State<_ActionConfirmation> createState() {
+    return _ActionConfirmationState();
+  }
+}
+
+final class _ActionConfirmationState extends State<_ActionConfirmation>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _opacity;
+  late Animation<double> _offsetY;
+
+  String? _message;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _controller = AnimationController(
+      vsync: this,
+      duration: switch (widget.motion) {
+        _ActionConfirmationMotion.fade => _mediaSaveConfirmationDuration,
+        _ActionConfirmationMotion.slideFromBottom =>
+          _messageCopyConfirmationDuration,
+      },
+    )..addStatusListener(_handleAnimationStatus);
+    _opacity = switch (widget.motion) {
+      _ActionConfirmationMotion.fade =>
+        TweenSequence<double>(<TweenSequenceItem<double>>[
+          TweenSequenceItem<double>(
+            tween: Tween<double>(
+              begin: 0,
+              end: 1,
+            ).chain(CurveTween(curve: Curves.easeInOut)),
+            weight: 200,
+          ),
+          TweenSequenceItem<double>(
+            tween: ConstantTween<double>(1),
+            weight: 2500,
+          ),
+          TweenSequenceItem<double>(
+            tween: Tween<double>(
+              begin: 1,
+              end: 0,
+            ).chain(CurveTween(curve: Curves.easeIn)),
+            weight: 250,
+          ),
+        ]).animate(_controller),
+      _ActionConfirmationMotion.slideFromBottom =>
+        const AlwaysStoppedAnimation<double>(1),
+    };
+    _offsetY = _createOffsetAnimation();
+  }
+
+  Animation<double> _createOffsetAnimation() {
+    return switch (widget.motion) {
+      _ActionConfirmationMotion.fade => const AlwaysStoppedAnimation<double>(0),
+      _ActionConfirmationMotion.slideFromBottom => TweenSequence<double>(
+        <TweenSequenceItem<double>>[
+          // 인스타그램 원본의 60fps 위치와 최대 13px 오버슈트를 맞춰요.
+          TweenSequenceItem<double>(
+            tween: Tween<double>(
+              begin: widget.hiddenOffsetY,
+              end: -_messageCopyConfirmationOvershoot,
+            ).chain(CurveTween(curve: Curves.fastOutSlowIn)),
+            weight: 167,
+          ),
+          TweenSequenceItem<double>(
+            tween: Tween<double>(
+              begin: -_messageCopyConfirmationOvershoot,
+              end: 0,
+            ).chain(CurveTween(curve: Curves.easeInOut)),
+            weight: 117,
+          ),
+          TweenSequenceItem<double>(
+            tween: ConstantTween<double>(0),
+            weight: 2716,
+          ),
+          TweenSequenceItem<double>(
+            tween: Tween<double>(
+              begin: 0,
+              end: widget.hiddenOffsetY,
+            ).chain(CurveTween(curve: Curves.easeInOut)),
+            weight: 300,
+          ),
+        ],
+      ).animate(_controller),
+    };
+  }
+
+  @override
+  void didUpdateWidget(_ActionConfirmation oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (widget.motion == _ActionConfirmationMotion.slideFromBottom &&
+        oldWidget.hiddenOffsetY != widget.hiddenOffsetY) {
+      _offsetY = _createOffsetAnimation();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller
+      ..removeStatusListener(_handleAnimationStatus)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _handleAnimationStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _message = null;
+    });
+  }
+
+  void show(String message) {
+    setState(() {
+      _message = message;
+    });
+    _controller.forward(from: 0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String? message = _message;
+
+    if (message == null) {
+      return const SizedBox.shrink();
+    }
+
+    return IgnorePointer(
+      child: Center(
+        child: AnimatedBuilder(
+          animation: _offsetY,
+          builder: (BuildContext context, Widget? child) {
+            return Transform.translate(
+              offset: Offset(0, _offsetY.value),
+              child: child,
+            );
+          },
+          child: FadeTransition(
+            key: ValueKey<String>(
+              '${widget.keyPrefix}-action-confirmation-opacity',
+            ),
+            opacity: _opacity,
+            child: Semantics(
+              liveRegion: true,
+              label: message,
+              excludeSemantics: true,
+              child: Container(
+                key: ValueKey<String>(
+                  '${widget.keyPrefix}-action-confirmation',
+                ),
+                width: widget.fillWidth ? double.infinity : null,
+                height: _actionConfirmationHeight,
+                // 글자의 오른쪽 사이드베어링까지 포함해 보이는 좌우 여백을 맞춰요.
+                padding: const EdgeInsets.only(left: 16, right: 14.5),
+                decoration: const BoxDecoration(
+                  color: Color(0x80000000),
+                  borderRadius: BorderRadius.all(Radius.circular(18)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const _ActionConfirmationCheckIcon(),
+                    const SizedBox(width: 12),
+                    Text(
+                      message,
+                      style: AppTypography.subTypography9.copyWith(
+                        color: AppColors.white,
+                        fontWeight: AppTypography.regular,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+final class _ActionConfirmationCheckIcon extends StatelessWidget {
+  const _ActionConfirmationCheckIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox.square(
+      dimension: 24,
+      child: CustomPaint(painter: _ActionConfirmationCheckPainter()),
+    );
+  }
+}
+
+final class _ActionConfirmationCheckPainter extends CustomPainter {
+  const _ActionConfirmationCheckPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint circlePaint = Paint()
+      ..color = AppColors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    final Paint checkPaint = Paint()
+      ..color = AppColors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    canvas.drawCircle(size.center(Offset.zero), 10.5, circlePaint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(7, 12)
+        ..lineTo(11, 15)
+        ..lineTo(17, 9),
+      checkPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ActionConfirmationCheckPainter oldDelegate) => false;
+}
+
 final class _PhotoViewerScreen extends StatefulWidget {
   const _PhotoViewerScreen({
     required this.attachments,
@@ -15210,6 +15563,9 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
   late final PageController _pageController;
 
   late final List<GlobalKey> _thumbnailKeys;
+
+  final GlobalKey<_ActionConfirmationState> _saveConfirmationKey =
+      GlobalKey<_ActionConfirmationState>();
 
   late int _currentIndex;
 
@@ -15371,44 +15727,139 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
   Future<void> _downloadCurrentPhoto() async {
     final ChatPhotoAttachment attachment = _currentAttachment;
     final int timestamp = DateTime.now().millisecondsSinceEpoch;
+    final Stopwatch totalStopwatch = Stopwatch()..start();
+    final ClipboardDiagnostics diagnostics = ClipboardDiagnostics('photo-save')
+      ..record('[photo-save] stage=tap');
 
     try {
-      Uint8List? imageBytes = attachment.previewBytes;
+      final String? mediaAssetId = attachment.mediaAssetId;
+      final ChatMediaAssetAccessUrlCreator? createAccessUrl =
+          widget.onCreateMediaAssetAccessUrl;
+      final Uint8List? originalBytes = attachment.uploadBytes;
+      File? imageFile = mediaAssetId == null
+          ? null
+          : await _ChatPhotoDiskCache.findCached(
+              mediaAssetId,
+              variant: _ChatPhotoCacheVariant.original,
+            );
+      Uint8List? imageBytes;
 
-      if (imageBytes == null) {
-        final String? mediaAssetId = attachment.mediaAssetId;
-        final ChatMediaAssetAccessUrlCreator? createAccessUrl =
-            widget.onCreateMediaAssetAccessUrl;
+      if (imageFile != null) {
+        diagnostics.record(
+          '[photo-save] stage=bytes_source source=local_file '
+          'bytes=${await imageFile.length()}',
+        );
+      } else if (originalBytes != null && originalBytes.isNotEmpty) {
+        diagnostics.record(
+          '[photo-save] stage=bytes_source source=memory '
+          'bytes=${originalBytes.length}',
+        );
+        imageFile = mediaAssetId == null
+            ? null
+            : await _ChatPhotoDiskCache.store(
+                mediaAssetId: mediaAssetId,
+                bytes: originalBytes,
+                variant: _ChatPhotoCacheVariant.original,
+              );
+        imageBytes = imageFile == null ? originalBytes : null;
+      } else if (mediaAssetId != null && createAccessUrl != null) {
+        diagnostics.record('[photo-save] stage=bytes_source source=network');
+        final Stopwatch downloadStopwatch = Stopwatch()..start();
 
-        if (mediaAssetId == null || createAccessUrl == null) {
+        imageFile = await _ChatPhotoDiskCache.load(
+          mediaAssetId: mediaAssetId,
+          createAccessUrl: createAccessUrl,
+          variant: _ChatPhotoCacheVariant.original,
+        );
+        downloadStopwatch.stop();
+        diagnostics.record(
+          '[photo-save] stage=download '
+          'elapsed_ms=${_elapsedMilliseconds(downloadStopwatch)} '
+          'result=${imageFile == null ? 'failed' : 'success'}'
+          '${imageFile == null ? '' : ' bytes=${await imageFile.length()}'}',
+        );
+
+        if (imageFile == null) {
+          throw StateError('Photo download failed.');
+        }
+      } else {
+        imageBytes = attachment.previewBytes;
+
+        if (imageBytes == null || imageBytes.isEmpty) {
           throw StateError('Photo bytes are not available.');
         }
 
-        final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
-        final http.Response response = await http.get(accessUrl);
-
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw StateError('Photo download failed.');
-        }
-
-        imageBytes = response.bodyBytes;
+        diagnostics.record(
+          '[photo-save] stage=bytes_source source=memory '
+          'bytes=${imageBytes.length}',
+        );
       }
 
-      await PhotoManager.editor.saveImage(
-        imageBytes,
-        filename: 'juliatalk-$timestamp.jpg',
-        title: 'JuliaTalk Photo',
-        creationDate: DateTime.now(),
-      );
+      File? photoLibraryInputFile;
+      final Stopwatch photoLibraryStopwatch = Stopwatch()..start();
+
+      try {
+        if (imageFile != null) {
+          final String extension = _photoFileExtension(attachment);
+          photoLibraryInputFile = await imageFile.copy(
+            '${imageFile.path}.photo-save-$timestamp.$extension',
+          );
+          await PhotoManager.editor.saveImageWithPath(
+            photoLibraryInputFile.path,
+            title: 'juliatalk-$timestamp.$extension',
+            creationDate: DateTime.now(),
+          );
+        } else {
+          await PhotoManager.editor.saveImage(
+            imageBytes!,
+            filename: 'juliatalk-$timestamp.jpg',
+            title: 'JuliaTalk Photo',
+            creationDate: DateTime.now(),
+          );
+        }
+        photoLibraryStopwatch.stop();
+        diagnostics.record(
+          '[photo-save] stage=photo_library '
+          'elapsed_ms=${_elapsedMilliseconds(photoLibraryStopwatch)} '
+          'result=success',
+        );
+      } on Object {
+        photoLibraryStopwatch.stop();
+        diagnostics.record(
+          '[photo-save] stage=photo_library '
+          'elapsed_ms=${_elapsedMilliseconds(photoLibraryStopwatch)} '
+          'result=failed',
+        );
+        rethrow;
+      } finally {
+        if (photoLibraryInputFile != null) {
+          try {
+            await photoLibraryInputFile.delete();
+          } catch (_) {
+            // 삭제에 실패해도 캐시 디렉터리의 임시 파일이라 저장에는 영향이 없어요.
+          }
+        }
+      }
 
       if (!mounted) {
         return;
       }
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(content: Text('Photo saved.')));
-    } catch (_) {
+      _saveConfirmationKey.currentState?.show('Photo saved');
+      totalStopwatch.stop();
+      diagnostics.record(
+        '[photo-save] stage=confirmation '
+        'elapsed_ms=${_elapsedMilliseconds(totalStopwatch)}',
+      );
+    } on Object catch (error) {
+      totalStopwatch.stop();
+      diagnostics.record(
+        '[photo-save] stage=failure '
+        'elapsed_ms=${_elapsedMilliseconds(totalStopwatch)} '
+        'error_type=${error.runtimeType}'
+        '${_photoSavePlatformErrorDetails(error)}',
+      );
+
       if (!mounted) {
         return;
       }
@@ -15418,6 +15869,9 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
         ..showSnackBar(
           const SnackBar(content: Text('Photo could not be saved.')),
         );
+    } finally {
+      // 진단할 때만 아래 줄의 주석을 풀어 클립보드 복사를 켜요.
+      // unawaited(diagnostics.copyToClipboard());
     }
   }
 
@@ -15485,6 +15939,10 @@ final class _PhotoViewerScreenState extends State<_PhotoViewerScreen> {
                   unawaited(_downloadCurrentPhoto());
                 },
               ),
+              _ActionConfirmation(
+                key: _saveConfirmationKey,
+                keyPrefix: 'photo-viewer',
+              ),
             ],
           ),
         ),
@@ -15517,6 +15975,8 @@ final class _VideoViewerScreenState extends State<_VideoViewerScreen> {
 
   VideoPlayerController? _controller;
   Timer? _controlsTimer;
+  final GlobalKey<_ActionConfirmationState> _saveConfirmationKey =
+      GlobalKey<_ActionConfirmationState>();
   Duration? _scrubPosition;
   bool _controllerReady = false;
   bool _controlsVisible = true;
@@ -15805,22 +16265,54 @@ final class _VideoViewerScreenState extends State<_VideoViewerScreen> {
   Future<void> _downloadVideo() async {
     final int timestamp = DateTime.now().millisecondsSinceEpoch;
     final String extension = _videoFileExtension(widget.attachment.fileName);
+    final Stopwatch totalStopwatch = Stopwatch()..start();
+    final ClipboardDiagnostics diagnostics = ClipboardDiagnostics('video-save')
+      ..record('[video-save] stage=tap')
+      ..record('[video-save] stage=bytes_source source=local_file');
 
     try {
-      await PhotoManager.editor.saveVideo(
-        widget.videoFile,
-        title: 'juliatalk-$timestamp.$extension',
-        creationDate: DateTime.now(),
-      );
+      final Stopwatch photoLibraryStopwatch = Stopwatch()..start();
+
+      try {
+        await PhotoManager.editor.saveVideo(
+          widget.videoFile,
+          title: 'juliatalk-$timestamp.$extension',
+          creationDate: DateTime.now(),
+        );
+        photoLibraryStopwatch.stop();
+        diagnostics.record(
+          '[video-save] stage=photo_library '
+          'elapsed_ms=${_elapsedMilliseconds(photoLibraryStopwatch)} '
+          'result=success',
+        );
+      } on Object {
+        photoLibraryStopwatch.stop();
+        diagnostics.record(
+          '[video-save] stage=photo_library '
+          'elapsed_ms=${_elapsedMilliseconds(photoLibraryStopwatch)} '
+          'result=failed',
+        );
+        rethrow;
+      }
 
       if (!mounted) {
         return;
       }
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(content: Text('Video saved.')));
-    } catch (_) {
+      _saveConfirmationKey.currentState?.show('Video saved');
+      totalStopwatch.stop();
+      diagnostics.record(
+        '[video-save] stage=confirmation '
+        'elapsed_ms=${_elapsedMilliseconds(totalStopwatch)}',
+      );
+    } on Object catch (error) {
+      totalStopwatch.stop();
+      diagnostics.record(
+        '[video-save] stage=failure '
+        'elapsed_ms=${_elapsedMilliseconds(totalStopwatch)} '
+        'error_type=${error.runtimeType}',
+      );
+
       if (!mounted) {
         return;
       }
@@ -15830,6 +16322,9 @@ final class _VideoViewerScreenState extends State<_VideoViewerScreen> {
         ..showSnackBar(
           const SnackBar(content: Text('Video could not be saved.')),
         );
+    } finally {
+      // 진단할 때만 아래 줄의 주석을 풀어 클립보드 복사를 켜요.
+      // unawaited(diagnostics.copyToClipboard());
     }
   }
 
@@ -15921,6 +16416,10 @@ final class _VideoViewerScreenState extends State<_VideoViewerScreen> {
                 onDownloadPressed: () {
                   unawaited(_downloadVideo());
                 },
+              ),
+              _ActionConfirmation(
+                key: _saveConfirmationKey,
+                keyPrefix: 'video-viewer',
               ),
             ],
           ),
@@ -18901,7 +19400,12 @@ final class _MessageComposer extends StatelessWidget {
 
     return TextFieldTapRegion(
       child: Padding(
-        padding: EdgeInsets.fromLTRB(10, 0, 10, bottomPadding),
+        padding: EdgeInsets.fromLTRB(
+          _composerHorizontalPadding,
+          0,
+          _composerHorizontalPadding,
+          bottomPadding,
+        ),
         child: ValueListenableBuilder<TextEditingValue>(
           valueListenable: controller,
           builder:

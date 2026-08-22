@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/design_system/app_colors.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
@@ -169,6 +170,93 @@ void main() {
     expect(find.text('Reply'), findsOneWidget);
     expect(find.text('Edit'), findsNothing);
     expect(find.text('Unsend'), findsNothing);
+  });
+
+  testWidgets('copy confirmation matches the composer and reference motion', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    String? copiedText;
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (
+      MethodCall call,
+    ) async {
+      if (call.method == 'Clipboard.setData') {
+        final Map<Object?, Object?> arguments =
+            call.arguments as Map<Object?, Object?>;
+        copiedText = arguments['text'] as String?;
+      }
+
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    await tester.pumpWidget(const JuliaTalkPreviewApp());
+    await tester.pumpAndSettle();
+
+    const String message = '欧巴我快要登机了';
+    await _showMessage(tester, find.text(message));
+    await tester.longPress(find.text(message));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Copy'));
+
+    final Finder confirmation = find.byKey(
+      const ValueKey<String>('message-copy-action-confirmation'),
+    );
+    await _pumpUntilFound(tester, confirmation);
+    await tester.pump(const Duration(milliseconds: 167));
+    final double overshootTop = tester.getTopLeft(confirmation).dy;
+    await tester.pump(const Duration(milliseconds: 117));
+
+    final Finder composer = find.byKey(
+      const ValueKey<String>('message-composer-default'),
+    );
+    final Finder icon = find.descendant(
+      of: confirmation,
+      matching: find.byType(CustomPaint),
+    );
+    final Rect confirmationRect = tester.getRect(confirmation);
+    final Rect composerRect = tester.getRect(composer);
+    final Container confirmationContainer = tester.widget<Container>(
+      confirmation,
+    );
+    final BoxDecoration decoration =
+        confirmationContainer.decoration! as BoxDecoration;
+    final BorderRadius borderRadius = decoration.borderRadius! as BorderRadius;
+    final Text label = tester.widget<Text>(find.text('Copied'));
+
+    expect(copiedText, message);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(confirmationRect.width, composerRect.width);
+    expect(confirmationRect.left, composerRect.left);
+    expect(confirmationRect.right, composerRect.right);
+    expect(confirmationRect.height, 56);
+    expect(composerRect.top - confirmationRect.bottom, 8);
+    expect(tester.getSize(icon), const Size.square(24));
+    expect(decoration.color, const Color(0x80000000));
+    expect(borderRadius.topLeft.x, 18);
+    expect(label.style?.fontSize, 18);
+    expect(label.style?.fontWeight, FontWeight.w400);
+    expect(label.style?.color, Colors.white);
+    expect(confirmationRect.top - overshootTop, closeTo(13 / 3, 0.01));
+
+    await tester.pump(const Duration(milliseconds: 2716));
+    final double settledTop = tester.getTopLeft(confirmation).dy;
+
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(confirmation, findsOneWidget);
+    expect(tester.getTopLeft(confirmation).dy, greaterThan(settledTop));
+
+    await tester.pump(const Duration(milliseconds: 151));
+    expect(confirmation, findsNothing);
   });
 
   testWidgets('selected message stays above the dimmed chat screen', (

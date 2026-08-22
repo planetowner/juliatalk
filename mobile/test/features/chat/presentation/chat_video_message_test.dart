@@ -20,6 +20,31 @@ const MethodChannel _pathProviderChannel = MethodChannel(
   'plugins.flutter.io/path_provider',
 );
 
+const MethodChannel _photoManagerChannel = MethodChannel(
+  'com.fluttercandies/photo_manager',
+);
+
+void _setUpVideoSave() {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_photoManagerChannel, (MethodCall call) async {
+        if (call.method == 'saveVideo') {
+          return <String, Object>{
+            'id': 'saved-video',
+            'type': 2,
+            'width': 1920,
+            'height': 1080,
+            'duration': 10,
+          };
+        }
+
+        return null;
+      });
+  addTearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_photoManagerChannel, null);
+  });
+}
+
 Directory _setUpVideoCacheDirectory(String prefix) {
   final Directory cacheDirectory = Directory.systemTemp.createTempSync(prefix);
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -370,6 +395,53 @@ void main() {
       expect(hiddenBottomOverlay.curve, Curves.linear);
     },
   );
+
+  testWidgets('video save uses the shared centered confirmation', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(393, 852));
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+    });
+    _setUpVideoSave();
+    String? copiedDiagnostics;
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (
+      MethodCall call,
+    ) async {
+      if (call.method == 'Clipboard.setData') {
+        final Map<Object?, Object?> arguments =
+            call.arguments as Map<Object?, Object?>;
+        copiedDiagnostics = arguments['text'] as String?;
+      }
+
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    await tester.pumpWidget(_buildVideoMessageScreen(videoFile));
+    await tester.pumpAndSettle();
+    await _openVideoViewer(tester);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('video-viewer-download')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    final Finder confirmation = find.byKey(
+      const ValueKey<String>('video-viewer-action-confirmation'),
+    );
+
+    expect(find.text('Video saved'), findsOneWidget);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(tester.getRect(confirmation).height, 56);
+    expect(tester.getCenter(confirmation), const Offset(196.5, 426));
+    expect(copiedDiagnostics, isNull);
+  });
 
   testWidgets('a server video reuses its disk cache after restart', (
     WidgetTester tester,

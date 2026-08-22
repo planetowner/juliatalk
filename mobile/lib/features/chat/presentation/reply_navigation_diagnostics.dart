@@ -1,7 +1,8 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+
+// 진단할 때는 dart:async와 flutter/services.dart import의 주석도 함께 풀어요.
+// import 'dart:async';
+// import 'package:flutter/services.dart';
 
 abstract final class ReplyNavigationDiagnostics {
   static const int _maximumLineCount = 80;
@@ -31,6 +32,7 @@ abstract final class ReplyNavigationDiagnostics {
 
     _lines.add(timedLine);
     debugPrint(timedLine);
-    unawaited(Clipboard.setData(ClipboardData(text: _lines.join('\n'))));
+    // 진단할 때만 아래 줄의 주석을 풀어 클립보드 복사를 켜요.
+    // unawaited(Clipboard.setData(ClipboardData(text: _lines.join('\n'))));
   }
 }

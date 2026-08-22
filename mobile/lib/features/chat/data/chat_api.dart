@@ -10,6 +10,7 @@ import '../domain/chat_link.dart';
 import '../domain/chat_message.dart';
 import 'chat_api_exception.dart';
 import 'chat_realtime_event_state.dart';
+import 'chat_video_disk_cache.dart';
 import 'device_link_preview_fetcher.dart';
 import 'photo_send_diagnostics.dart';
 
@@ -653,6 +654,10 @@ final class ChatApi {
       originalBytes: video.sizeBytes ?? video.uploadBytes?.length,
       previewBytes: video.previewBytes?.length,
     );
+    final ChatVideoAttachment retainedVideo = await _withRetainedLocalVideo(
+      video,
+      mediaAssetId: mediaAssetId,
+    );
 
     final Stopwatch messageStopwatch = Stopwatch()..start();
     final ChatMessage message = await _createMessage(
@@ -673,7 +678,10 @@ final class ChatApi {
     messageStopwatch.stop();
     _logVideoSendTiming('message_create', messageStopwatch);
 
-    final ChatMessage resolvedMessage = _withLocalVideoPreview(message, video);
+    final ChatMessage resolvedMessage = _withLocalVideoPreview(
+      message,
+      retainedVideo,
+    );
     totalStopwatch.stop();
     _logVideoSendTiming(
       'api_total',
@@ -1180,6 +1188,41 @@ final class ChatApi {
         sizeBytes: serverVideo.sizeBytes ?? localVideo.sizeBytes,
         localPath: localVideo.localPath,
       ),
+    );
+  }
+
+  Future<ChatVideoAttachment> _withRetainedLocalVideo(
+    ChatVideoAttachment video, {
+    required String mediaAssetId,
+  }) async {
+    final String? localPath = video.localPath;
+
+    if (localPath == null || localPath.isEmpty) {
+      return video;
+    }
+
+    final File? retainedFile = await ChatVideoDiskCache.retainLocalFile(
+      mediaAssetId: mediaAssetId,
+      fileName: video.fileName,
+      localPath: localPath,
+    );
+
+    if (retainedFile == null) {
+      return video;
+    }
+
+    return ChatVideoAttachment(
+      assetId: video.assetId,
+      width: video.width,
+      height: video.height,
+      duration: video.duration,
+      mediaAssetId: mediaAssetId,
+      previewBytes: video.previewBytes,
+      fileName: video.fileName,
+      mimeType: video.mimeType,
+      sizeBytes: video.sizeBytes,
+      uploadBytes: video.uploadBytes,
+      localPath: retainedFile.path,
     );
   }
 

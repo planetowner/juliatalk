@@ -1,15 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:juliatalk/features/chat/data/chat_api.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
 
+const MethodChannel _pathProviderChannel = MethodChannel(
+  'plugins.flutter.io/path_provider',
+);
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('requests the chat thumbnail variant', () async {
     final MockClient client = MockClient((http.Request request) async {
       expect(request.method, 'GET');
@@ -202,8 +208,30 @@ void main() {
       final Directory temporaryDirectory = await Directory.systemTemp
           .createTemp('juliatalk-video-upload-test-');
       addTearDown(() => temporaryDirectory.delete(recursive: true));
+      final Directory cacheDirectory = Directory(
+        '${temporaryDirectory.path}/cache',
+      );
+      await cacheDirectory.create();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_pathProviderChannel, (
+            MethodCall call,
+          ) async {
+            if (call.method == 'getApplicationCacheDirectory') {
+              return cacheDirectory.path;
+            }
+
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_pathProviderChannel, null);
+      });
+      final Directory videoUploadDirectory = Directory(
+        '${cacheDirectory.path}/video-uploads',
+      );
+      await videoUploadDirectory.create();
       final File encodedVideo = File(
-        '${temporaryDirectory.path}/encoded-video.mp4',
+        '${videoUploadDirectory.path}/encoded-video.mp4',
       );
       await encodedVideo.writeAsBytes(originalBytes);
       final List<Uri> requestedUrls = <Uri>[];
@@ -252,6 +280,13 @@ void main() {
         expect(
           jsonDecode(request.body),
           containsPair('created_at', createdAt.toIso8601String()),
+        );
+        expect(await encodedVideo.exists(), isFalse);
+        expect(
+          await File(
+            '${cacheDirectory.path}/chat-videos/video-1.mov',
+          ).readAsBytes(),
+          originalBytes,
         );
 
         return http.Response(
@@ -320,7 +355,15 @@ void main() {
         Uri.parse('https://api.example.com/messages/video'),
       );
       expect(message.videoAttachment?.previewBytes, thumbnailBytes);
-      expect(message.videoAttachment?.localPath, encodedVideo.path);
+      expect(
+        message.videoAttachment?.localPath,
+        '${cacheDirectory.path}/chat-videos/video-1.mov',
+      );
+      expect(
+        await File(message.videoAttachment!.localPath!).readAsBytes(),
+        originalBytes,
+      );
+      expect(await encodedVideo.exists(), isFalse);
       expect(message.videoAttachment?.duration, const Duration(seconds: 14));
     },
   );

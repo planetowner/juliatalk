@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:juliatalk/features/chat/domain/chat_message.dart';
 import 'package:juliatalk/features/chat/presentation/chat_conversation_view.dart';
@@ -15,6 +15,30 @@ final Uint8List _testPng = base64Decode(
   '/wD/AP+gvaeTAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAB3RJTUUH5gMQ'
   'FwcdLl4wmwAAAAtJREFUCNdjYAACAAAFAAHiJgWbAAAAAElFTkSuQmCC',
 );
+
+const MethodChannel _pathProviderChannel = MethodChannel(
+  'plugins.flutter.io/path_provider',
+);
+
+Directory _setUpVideoCacheDirectory(String prefix) {
+  final Directory cacheDirectory = Directory.systemTemp.createTempSync(prefix);
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_pathProviderChannel, (MethodCall call) async {
+        if (call.method == 'getApplicationCacheDirectory') {
+          return cacheDirectory.path;
+        }
+
+        return null;
+      });
+  addTearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_pathProviderChannel, null);
+    if (cacheDirectory.existsSync()) {
+      cacheDirectory.deleteSync(recursive: true);
+    }
+  });
+  return cacheDirectory;
+}
 
 final class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
   final List<String> calls = <String>[];
@@ -137,12 +161,75 @@ Widget _buildVideoMessageScreen(File videoFile) {
   );
 }
 
-Future<void> _openVideoViewer(WidgetTester tester) async {
+Widget _buildRemoteVideoMessageScreen({
+  required ChatMediaAssetAccessUrlCreator onCreateMediaAssetAccessUrl,
+  String senderId = '1',
+  String recipientId = '2',
+  bool includePreview = true,
+}) {
+  final ChatMessage message = ChatMessage(
+    id: 'remote-video-message',
+    senderId: senderId,
+    recipientId: recipientId,
+    content: '',
+    createdAt: DateTime(2026, 7, 1, 12, 52),
+    videoAttachment: ChatVideoAttachment(
+      assetId: 'remote-video-preview',
+      mediaAssetId: 'remote-video-media',
+      width: 1179,
+      height: 2556,
+      duration: const Duration(seconds: 10),
+      previewBytes: includePreview ? _testPng : null,
+      fileName: 'video.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: 4,
+    ),
+  );
+
+  return MaterialApp(
+    home: ChatConversationView(
+      initialMessages: <ChatMessage>[message],
+      currentUserName: 'June',
+      otherParticipantName: 'Lia',
+      onCreateMediaAssetAccessUrl: onCreateMediaAssetAccessUrl,
+    ),
+  );
+}
+
+Future<void> _openVideoViewer(
+  WidgetTester tester, {
+  String assetId = 'video-preview',
+  bool isOutgoing = true,
+  String messageId = 'video-message',
+}) async {
   await tester.tap(
-    find.byKey(const ValueKey<String>('outgoing-bubble-video-video-preview')),
+    find.byKey(
+      ValueKey<String>(
+        isOutgoing
+            ? 'outgoing-bubble-video-$assetId'
+            : 'incoming-bubble-$messageId',
+      ),
+    ),
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 500));
+  await tester.pump();
+}
+
+Future<void> _pumpRealAsyncUntil(
+  WidgetTester tester,
+  bool Function() condition,
+) async {
+  await tester.runAsync(() async {
+    for (int attempt = 0; attempt < 100; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      await tester.pump();
+
+      if (condition()) {
+        return;
+      }
+    }
+  });
   await tester.pump();
 }
 
@@ -283,6 +370,179 @@ void main() {
       expect(hiddenBottomOverlay.curve, Curves.linear);
     },
   );
+
+  testWidgets('a server video reuses its disk cache after restart', (
+    WidgetTester tester,
+  ) async {
+    final Directory cacheDirectory = _setUpVideoCacheDirectory(
+      'juliatalk-video-restart-cache-test-',
+    );
+    final Directory videoDirectory = Directory(
+      '${cacheDirectory.path}/chat-videos',
+    );
+    videoDirectory.createSync(recursive: true);
+    File(
+      '${videoDirectory.path}/remote-video-media.mp4',
+    ).writeAsBytesSync(const <int>[1, 2, 3, 4]);
+    int accessUrlRequests = 0;
+
+    await tester.pumpWidget(
+      _buildRemoteVideoMessageScreen(
+        onCreateMediaAssetAccessUrl: ({required String mediaAssetId}) async {
+          accessUrlRequests += 1;
+          throw StateError('Cached videos must not request the network.');
+        },
+      ),
+    );
+    await _pumpRealAsyncUntil(
+      tester,
+      () => find.byIcon(Icons.play_arrow_rounded).evaluate().isNotEmpty,
+    );
+
+    expect(accessUrlRequests, 0);
+    expect(find.byIcon(Icons.play_arrow_rounded), findsOneWidget);
+
+    await _openVideoViewer(tester, assetId: 'remote-video-preview');
+
+    expect(videoPlatform.calls, contains('play'));
+    expect(find.byType(VideoPlayer), findsOneWidget);
+  });
+
+  testWidgets('a received video viewer uses a dark media background', (
+    WidgetTester tester,
+  ) async {
+    final Directory cacheDirectory = _setUpVideoCacheDirectory(
+      'juliatalk-video-viewer-background-test-',
+    );
+    final Directory videoDirectory = Directory(
+      '${cacheDirectory.path}/chat-videos',
+    );
+    videoDirectory.createSync(recursive: true);
+    File(
+      '${videoDirectory.path}/remote-video-media.mp4',
+    ).writeAsBytesSync(const <int>[1, 2, 3, 4]);
+
+    await tester.pumpWidget(
+      _buildRemoteVideoMessageScreen(
+        senderId: '2',
+        recipientId: '1',
+        includePreview: false,
+        onCreateMediaAssetAccessUrl: ({required String mediaAssetId}) async {
+          throw StateError('Cached videos must not request the network.');
+        },
+      ),
+    );
+    await _pumpRealAsyncUntil(
+      tester,
+      () => find.byIcon(Icons.play_arrow_rounded).evaluate().isNotEmpty,
+    );
+
+    await _openVideoViewer(
+      tester,
+      assetId: 'remote-video-preview',
+      isOutgoing: false,
+      messageId: 'remote-video-message',
+    );
+
+    final Finder viewer = find.byKey(
+      const ValueKey<String>('video-viewer-content'),
+    );
+    final Iterable<Color> backgroundColors = tester
+        .widgetList<ColoredBox>(
+          find.descendant(of: viewer, matching: find.byType(ColoredBox)),
+        )
+        .map((ColoredBox box) => box.color);
+
+    expect(backgroundColors, contains(const Color(0xFF202020)));
+    expect(backgroundColors, isNot(contains(Colors.white)));
+  });
+
+  testWidgets('a failed video download stays retryable', (
+    WidgetTester tester,
+  ) async {
+    final Directory cacheDirectory = _setUpVideoCacheDirectory(
+      'juliatalk-video-retry-test-',
+    );
+    int accessUrlRequests = 0;
+
+    await tester.pumpWidget(
+      _buildRemoteVideoMessageScreen(
+        onCreateMediaAssetAccessUrl: ({required String mediaAssetId}) async {
+          accessUrlRequests += 1;
+          throw StateError('The test download fails before receiving bytes.');
+        },
+      ),
+    );
+
+    final Finder bubble = find.byKey(
+      const ValueKey<String>('outgoing-bubble-video-remote-video-preview'),
+    );
+    await _pumpRealAsyncUntil(
+      tester,
+      () =>
+          accessUrlRequests == 1 &&
+          find
+              .descendant(
+                of: bubble,
+                matching: find.byIcon(Icons.refresh_rounded),
+              )
+              .evaluate()
+              .isNotEmpty,
+    );
+    expect(accessUrlRequests, 1);
+    expect(
+      find.descendant(of: bubble, matching: find.byIcon(Icons.refresh_rounded)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: bubble,
+        matching: find.byIcon(Icons.play_arrow_rounded),
+      ),
+      findsNothing,
+    );
+
+    await tester.tap(bubble);
+    await tester.pump();
+    await _pumpRealAsyncUntil(tester, () => accessUrlRequests == 2);
+
+    expect(accessUrlRequests, 2);
+
+    final Directory videoDirectory = Directory(
+      '${cacheDirectory.path}/chat-videos',
+    );
+    videoDirectory.createSync(recursive: true);
+    File(
+      '${videoDirectory.path}/remote-video-media.mp4',
+    ).writeAsBytesSync(const <int>[1, 2, 3, 4]);
+
+    await tester.tap(bubble);
+    await tester.pump();
+    await _pumpRealAsyncUntil(
+      tester,
+      () => find
+          .descendant(
+            of: bubble,
+            matching: find.byIcon(Icons.play_arrow_rounded),
+          )
+          .evaluate()
+          .isNotEmpty,
+    );
+
+    expect(accessUrlRequests, 2);
+    expect(
+      find.descendant(
+        of: bubble,
+        matching: find.byIcon(Icons.play_arrow_rounded),
+      ),
+      findsOneWidget,
+    );
+
+    await _openVideoViewer(tester, assetId: 'remote-video-preview');
+
+    expect(videoPlatform.calls, contains('play'));
+    expect(find.byType(VideoPlayer), findsOneWidget);
+  });
 
   testWidgets('video completion returns to zero and restores controls', (
     WidgetTester tester,

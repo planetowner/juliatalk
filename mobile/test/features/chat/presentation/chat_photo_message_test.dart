@@ -657,8 +657,12 @@ void main() {
     );
     final ResizeImage resizedImage = thumbnailImage.image as ResizeImage;
     final FileImage fileImage = resizedImage.imageProvider as FileImage;
+    final ColoredBox viewerPlaceholder = tester.widget<ColoredBox>(
+      find.descendant(of: viewer, matching: find.byType(ColoredBox)).first,
+    );
 
     expect(fileImage.file.path, thumbnailFile.path);
+    expect(viewerPlaceholder.color, const Color(0xFF202020));
     expect(
       find.byKey(
         const ValueKey<String>('photo-viewer-original-viewer-thumbnail-photo'),

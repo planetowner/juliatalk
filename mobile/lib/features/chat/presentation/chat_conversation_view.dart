@@ -24,6 +24,7 @@ import '../../../design_system/app_radius.dart';
 import '../../../design_system/app_typography.dart';
 import '../../../design_system/components/app_profile_image.dart';
 import '../data/chat_photo_library.dart';
+import '../data/chat_video_disk_cache.dart';
 import '../data/chat_video_transcoder.dart';
 import '../data/photo_send_diagnostics.dart';
 import '../domain/chat_link.dart';
@@ -8535,7 +8536,7 @@ final class _MessageListState extends State<_MessageList>
         fileName: sentVideo.fileName ?? pendingVideo.fileName,
         mimeType: sentVideo.mimeType ?? pendingVideo.mimeType,
         sizeBytes: sentVideo.sizeBytes ?? pendingVideo.sizeBytes,
-        localPath: pendingVideo.localPath,
+        localPath: sentVideo.localPath ?? pendingVideo.localPath,
       ),
       videoUploadPending: false,
       videoEncodingPending: false,
@@ -13560,6 +13561,7 @@ final class _VideoMessageState extends State<_VideoMessage> {
   File? _localFile;
   String? _activeMediaAssetId;
   bool _downloadInProgress = false;
+  bool _downloadFailed = false;
   int _downloadedBytes = 0;
   int _downloadTotalBytes = 0;
 
@@ -13591,8 +13593,21 @@ final class _VideoMessageState extends State<_VideoMessage> {
     final String? localPath = attachment.localPath;
 
     if (localPath != null && localPath.isNotEmpty) {
-      _localFile = File(localPath);
-      return;
+      final File localFile = File(localPath);
+      _localFile = null;
+
+      try {
+        if (localFile.existsSync() && localFile.lengthSync() > 0) {
+          _activeMediaAssetId = attachment.mediaAssetId;
+          _downloadFuture = null;
+          _localFile = localFile;
+          _downloadInProgress = false;
+          _downloadFailed = false;
+          return;
+        }
+      } catch (_) {
+        _localFile = null;
+      }
     }
 
     if (widget.message.videoUploadPending) {
@@ -13611,12 +13626,14 @@ final class _VideoMessageState extends State<_VideoMessage> {
       _activeMediaAssetId = mediaAssetId;
       _downloadFuture = null;
       _localFile = null;
+      _downloadFailed = false;
       _downloadedBytes = 0;
       _downloadTotalBytes = attachment.sizeBytes ?? 0;
     }
 
     if (_downloadFuture == null) {
       _downloadInProgress = true;
+      _downloadFailed = false;
       _downloadFuture = _loadRemoteVideo(
         mediaAssetId: mediaAssetId,
         createAccessUrl: createAccessUrl,
@@ -13628,28 +13645,29 @@ final class _VideoMessageState extends State<_VideoMessage> {
     required String mediaAssetId,
     required ChatMediaAssetAccessUrlCreator createAccessUrl,
   }) async {
-    final Directory cacheDirectory = await getApplicationCacheDirectory();
-    final Directory videoDirectory = Directory(
-      '${cacheDirectory.path}/chat-videos',
-    );
-    final String extension = _videoFileExtension(_attachment.fileName);
-    final File file = File('$videoDirectory/$mediaAssetId.$extension');
-
-    if (await file.exists() && await file.length() > 0) {
-      if (mounted && _attachment.mediaAssetId == mediaAssetId) {
-        setState(() {
-          _localFile = file;
-          _downloadInProgress = false;
-        });
-      }
-      return;
-    }
-
-    final File partialFile = File('${file.path}.part');
+    File? partialFile;
     http.Client? client;
     RandomAccessFile? output;
 
     try {
+      final File file = await ChatVideoDiskCache.fileFor(
+        mediaAssetId: mediaAssetId,
+        fileName: _attachment.fileName,
+      );
+
+      if (await ChatVideoDiskCache.isUsable(file)) {
+        if (mounted && _attachment.mediaAssetId == mediaAssetId) {
+          setState(() {
+            _localFile = file;
+            _downloadInProgress = false;
+            _downloadFailed = false;
+          });
+        }
+        return;
+      }
+
+      partialFile = File('${file.path}.part');
+
       if (mounted && _attachment.mediaAssetId == mediaAssetId) {
         setState(() {
           _downloadInProgress = true;
@@ -13657,7 +13675,7 @@ final class _VideoMessageState extends State<_VideoMessage> {
         });
       }
 
-      await videoDirectory.create(recursive: true);
+      await file.parent.create(recursive: true);
       final Uri accessUrl = await createAccessUrl(mediaAssetId: mediaAssetId);
       client = http.Client();
       final http.StreamedResponse response = await client.send(
@@ -13690,6 +13708,10 @@ final class _VideoMessageState extends State<_VideoMessage> {
       await output.close();
       output = null;
 
+      if (downloadedBytes == 0) {
+        throw HttpException('Video download returned no data.', uri: accessUrl);
+      }
+
       if (await file.exists()) {
         await file.delete();
       }
@@ -13699,18 +13721,24 @@ final class _VideoMessageState extends State<_VideoMessage> {
         setState(() {
           _localFile = file;
           _downloadInProgress = false;
+          _downloadFailed = false;
           _downloadedBytes = downloadedBytes;
           _downloadTotalBytes = totalBytes;
         });
       }
     } catch (_) {
+      if (_activeMediaAssetId == mediaAssetId) {
+        _downloadFuture = null;
+      }
       if (mounted && _attachment.mediaAssetId == mediaAssetId) {
         setState(() {
           _downloadInProgress = false;
+          _downloadFailed = true;
         });
       }
-      if (await partialFile.exists()) {
-        await partialFile.delete();
+      final File? failedPartialFile = partialFile;
+      if (failedPartialFile != null && await failedPartialFile.exists()) {
+        await failedPartialFile.delete();
       }
     } finally {
       if (output != null) {
@@ -13724,6 +13752,9 @@ final class _VideoMessageState extends State<_VideoMessage> {
     final File? localFile = _localFile;
 
     if (localFile == null) {
+      setState(() {
+        _downloadFailed = false;
+      });
       _syncVideoSource();
       return;
     }
@@ -13756,7 +13787,9 @@ final class _VideoMessageState extends State<_VideoMessage> {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: isTransferring ? null : _openVideo,
+      onTap: isTransferring || (_localFile == null && !_downloadFailed)
+          ? null
+          : _openVideo,
       child: ClipRRect(
         key: widget.measurementKey,
         borderRadius: const BorderRadius.all(Radius.circular(14)),
@@ -13782,12 +13815,26 @@ final class _VideoMessageState extends State<_VideoMessage> {
                   uploadedBytes: uploadedBytes,
                   totalBytes: totalBytes,
                 )
-              else
+              else if (_downloadFailed)
+                const _VideoDownloadRetryIndicator()
+              else if (_localFile != null)
                 _VideoPlayIndicator(duration: attachment.duration),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+final class _VideoDownloadRetryIndicator extends StatelessWidget {
+  const _VideoDownloadRetryIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return const _MediaStatusIndicator(
+      icon: Icon(Icons.refresh_rounded, size: 24, color: AppColors.white),
+      label: 'Try again',
     );
   }
 }
@@ -13904,14 +13951,7 @@ Size _videoBubbleSize(BuildContext context, ChatVideoAttachment attachment) {
 }
 
 String _videoFileExtension(String? fileName) {
-  final String name = fileName ?? '';
-  final int dotIndex = name.lastIndexOf('.');
-
-  if (dotIndex < 0 || dotIndex == name.length - 1) {
-    return 'mp4';
-  }
-
-  return name.substring(dotIndex + 1).toLowerCase();
+  return ChatVideoDiskCache.fileExtension(fileName);
 }
 
 String _formatChatVideoDuration(Duration duration) {
@@ -14543,6 +14583,7 @@ final class _PhotoMessageImage extends StatefulWidget {
     this.fit = BoxFit.cover,
     this.filterQuality = FilterQuality.medium,
     this.persistToDisk = false,
+    this.placeholderColor = AppColors.white,
   });
 
   final ChatPhotoAttachment attachment;
@@ -14553,6 +14594,7 @@ final class _PhotoMessageImage extends StatefulWidget {
   final BoxFit fit;
   final FilterQuality filterQuality;
   final bool persistToDisk;
+  final Color placeholderColor;
 
   @override
   State<_PhotoMessageImage> createState() {
@@ -14891,7 +14933,11 @@ final class _PhotoMessageImageState extends State<_PhotoMessageImage> {
   }
 
   Widget _buildPlaceholder() {
-    return _PhotoMessagePlaceholder(width: widget.width, height: widget.height);
+    return _PhotoMessagePlaceholder(
+      width: widget.width,
+      height: widget.height,
+      color: widget.placeholderColor,
+    );
   }
 
   String get _defaultImageKey {
@@ -15113,17 +15159,22 @@ final class _ChatPhotoDiskCache {
 }
 
 final class _PhotoMessagePlaceholder extends StatelessWidget {
-  const _PhotoMessagePlaceholder({this.width, this.height});
+  const _PhotoMessagePlaceholder({
+    this.width,
+    this.height,
+    this.color = AppColors.white,
+  });
 
   final double? width;
   final double? height;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
       width: width,
       height: height,
-      child: const ColoredBox(color: AppColors.white),
+      child: ColoredBox(color: color),
     );
   }
 }
@@ -15793,6 +15844,7 @@ final class _VideoViewerScreenState extends State<_VideoViewerScreen> {
       filterQuality: FilterQuality.high,
       onCreateMediaAssetAccessUrl: widget.onCreateThumbnailAccessUrl,
       persistToDisk: true,
+      placeholderColor: _mediaViewerChromeBarColor,
     );
     final VideoPlayerController? controller = _controller;
 
@@ -16419,6 +16471,7 @@ final class _PhotoViewerImageState extends State<_PhotoViewerImage> {
       fit: widget.fit,
       filterQuality: widget.filterQuality,
       persistToDisk: true,
+      placeholderColor: _mediaViewerChromeBarColor,
     );
     final ImageProvider<Object>? originalProvider = switch ((
       _originalBytes,
